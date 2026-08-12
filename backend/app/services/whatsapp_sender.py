@@ -1,0 +1,146 @@
+"""
+WhatsApp Business API sender via AiSensy (Meta BSP) on +91 90849 58495.
+
+WHY THE CONSENT GATE IS NOT OPTIONAL
+------------------------------------
+Meta's WhatsApp Business Messaging Policy requires opt-in before ANY
+business-initiated message. Our leads are scraped from Google Maps / IndiaMART /
+TradeIndia — consent_status is UNKNOWN for 736 of 737. Sending template messages
+to those numbers is a policy violation, and the practical consequence is not a
+fine: recipients block/report -> quality rating drops -> messaging limits ->
+the number gets banned. That is the same number our email + outreach copy tells
+prospects to call, so losing it costs more than the channel.
+
+So this module refuses to send to a lead without recorded consent. Cold
+first-touch stays on wa.me (the founder's own phone, manual send) via the
+WhatsApp Send Queue. This API path is for people who have opted in — in practice
+someone who REPLIED, which both proves consent and opens Meta's 24-hour
+customer-service window where free-form (non-template) messages are allowed.
+
+CONFIG (dormant until set — nothing sends without these):
+  AISENSY_API_KEY        API key from the AiSensy dashboard
+  AISENSY_CAMPAIGN_NAME  campaign wired to a Meta-approved template
+
+Business-initiated messages must use an approved template; AiSensy's campaign API
+maps a campaign -> template. Inside the 24h window free-form text is allowed.
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Optional
+
+import httpx
+
+AISENSY_URL = "https://backend.aisensy.com/campaign/t1/api/v2"
+
+# Consent values we treat as a real opt-in.
+CONSENT_OK = {"EXPLICIT", "IMPLIED_B2B", "OPTED_IN"}
+
+# Statuses that prove the lead messaged/replied to us — that is an opt-in and
+# opens Meta's 24h customer-service window.
+ENGAGED = {"REPLIED", "MEETING_BOOKED", "MEETING_COMPLETED", "SAMPLE_SENT",
+           "FEEDBACK_PENDING", "FEEDBACK_RECEIVED", "PROPOSAL_SENT",
+           "NEGOTIATION", "ORDER_WON", "ONBOARDED"}
+
+SERVICE_WINDOW_HOURS = 24
+
+
+@dataclass
+class WaResult:
+    status: str                      # sent | blocked | failed | not_configured
+    reason: str = ""
+    message_id: str = ""
+    response: str = ""
+
+
+def is_configured() -> bool:
+    key = (os.getenv("AISENSY_API_KEY") or "").strip()
+    return bool(key and key not in ("", "your_aisensy_api_key_here"))
+
+
+def consent_check(lead) -> tuple[bool, str]:
+    """
+    May we send this lead a WhatsApp message via the API?
+
+    Returns (allowed, reason). Deliberately strict: an unknown consent state is
+    a NO, never a maybe.
+    """
+    status = (getattr(lead, "consent_status", None) or "UNKNOWN").upper()
+    if getattr(lead, "do_not_call", False):
+        return False, "lead is on do-not-contact"
+    if status in CONSENT_OK:
+        return True, f"consent recorded: {status}"
+    if (getattr(lead, "status", "") or "") in ENGAGED:
+        return True, "lead replied to us — opt-in + 24h service window open"
+    return False, (
+        f"no opt-in on record (consent_status={status}). Meta requires opt-in before "
+        f"business-initiated WhatsApp. Use the wa.me Send Queue for cold first touch."
+    )
+
+
+def in_service_window(lead) -> bool:
+    """
+    True if the lead messaged us within the last 24h — inside Meta's
+    customer-service window, where free-form (non-template) text is allowed.
+    Outside it, only an approved template may be sent.
+    """
+    last = getattr(lead, "last_reply_at", None) or getattr(lead, "last_updated", None)
+    if not last or (getattr(lead, "status", "") or "") not in ENGAGED:
+        return False
+    return (datetime.utcnow() - last) < timedelta(hours=SERVICE_WINDOW_HOURS)
+
+
+def _normalise_msisdn(raw: str) -> str:
+    """AiSensy wants a country-coded number without + or separators."""
+    d = "".join(ch for ch in (raw or "") if ch.isdigit())
+    if len(d) == 10:            # bare Indian mobile
+        d = "91" + d
+    return d
+
+
+def send_whatsapp(lead, message: str, campaign_name: Optional[str] = None,
+                  template_params: Optional[list[str]] = None,
+                  timeout: float = 20.0) -> WaResult:
+    """
+    Send via AiSensy. Refuses without consent — that check comes first, on
+    purpose, so no future caller can bypass it by passing the right arguments.
+    """
+    allowed, reason = consent_check(lead)
+    if not allowed:
+        return WaResult(status="blocked", reason=reason)
+
+    if not is_configured():
+        return WaResult(status="not_configured",
+                        reason="AISENSY_API_KEY not set — add it to enable API sending")
+
+    phone = _normalise_msisdn(getattr(lead, "whatsapp_number", None) or getattr(lead, "phone", "") or "")
+    if len(phone) < 11:
+        return WaResult(status="blocked", reason="no usable WhatsApp number on the lead")
+
+    campaign = (campaign_name or os.getenv("AISENSY_CAMPAIGN_NAME") or "").strip()
+    if not campaign:
+        return WaResult(status="not_configured",
+                        reason="AISENSY_CAMPAIGN_NAME not set — it must map to a Meta-approved template")
+
+    payload = {
+        "apiKey": (os.getenv("AISENSY_API_KEY") or "").strip(),
+        "campaignName": campaign,
+        "destination": phone,
+        "userName": getattr(lead, "contact_name", None) or getattr(lead, "company", "") or "there",
+        "source": "purity-revenue-os",
+        # Template placeholders, in the order defined on the approved template.
+        "templateParams": template_params if template_params is not None else [
+            (getattr(lead, "contact_name", None) or getattr(lead, "company", "") or "there")
+        ],
+    }
+    try:
+        with httpx.Client(timeout=timeout) as c:
+            r = c.post(AISENSY_URL, json=payload)
+        body = (r.text or "")[:300]
+        if r.status_code // 100 == 2:
+            return WaResult(status="sent", message_id=str(r.headers.get("x-message-id", "")), response=body)
+        return WaResult(status="failed", reason=f"AiSensy HTTP {r.status_code}", response=body)
+    except Exception as e:
+        return WaResult(status="failed", reason=f"{type(e).__name__}: {str(e)[:120]}")

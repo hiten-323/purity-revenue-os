@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+:root {
+  --background: #090a0f;
+  --foreground: #ededed;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Touchpoint Engine shared button utilities */
+.cta-btn {
+  display: block;
+  width: 100%;
+  padding: 3px 6px;
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 4px;
+  transition: all 0.15s;
+  text-align: center;
+}
+
+.cta-dim {
+  display: block;
+  width: 100%;
+  padding: 3px 6px;
+  font-size: 8px;
+  color: #4b5563;
+  border: 1px solid #1f2937;
+  border-radius: 4px;
+  text-align: center;
+}
+
+/* Force readable option colors in dark mode browser rendering */
+select option {
+  background-color: #0c0d12 !important;
+  color: #ededed !important;
+}

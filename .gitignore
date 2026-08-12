@@ -1,0 +1,49 @@
+
+# Credentials. Never commit these. ecosystem.config.js reads every secret from
+# backend/.env at load time, so the config file itself stays safe to track.
+.env
+*.env
+!.env.example
+
+# Lead data. purity_beans.db holds contact records for real businesses —
+# names, email addresses and phone numbers belonging to third parties who
+# never agreed to appear in a public repository. The schema lives in
+# backend/app/models/, so the application is fully reproducible without it.
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+
+# Runtime logs. autostart.log and watchdog.log were tracked in the previous
+# repository, which meant every process restart showed up as a source change —
+# and log lines can carry credentials or lead data straight into a commit.
+*.log
+logs/
+
+# Data exports and backups — same third-party contact data as the database.
+removed_leads_backup.json
+*_backup.json
+*.csv
+
+# Compiled bytecode — 121 .pyc files were tracked, so every run dirtied the
+# working tree and a stale .pyc could ship instead of the source beside it.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Dependencies and build output
+node_modules/
+.next/
+out/
+build/
+dist/
+venv/
+.venv/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
