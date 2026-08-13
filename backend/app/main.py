@@ -96,6 +96,11 @@ async def startup():
     import app.models.models
     # Register founder_actions table (model lives in the service module).
     import app.services.founder_actions  # noqa: F401
+    # Fail-closed EMAIL_SENT proof: same connection, no swallowed duplicate check.
+    import app.models.send_proof_fix  # noqa: F401
+    # Fail-closed call outcome: engine failure -> FOUNDER_REVIEW, not registry.
+    from app.services.call_outcome_failclosed import install as _install_call_outcome
+    _install_call_outcome()
     Base.metadata.create_all(bind=engine)
     
     # Run dynamic SQLite migrations for call fields and call_history
@@ -235,7 +240,7 @@ async def startup():
             if col not in existing_gov_cols:
                 try:
                     cursor.execute(f"ALTER TABLE gov_tenders ADD COLUMN {col} {col_type};")
-                    print(f"Migration: Added column {col} to gov_tenders")
+                    print(f"Migration: Added column {col} to gov_tenders: {e}")
                 except Exception as e:
                     print(f"Migration Error adding {col} to gov_tenders: {e}")
 
