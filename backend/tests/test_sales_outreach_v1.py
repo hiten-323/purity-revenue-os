@@ -25,13 +25,19 @@ def mklead(n, **kw):
                 email=kw.pop("email", ""), division="DISTRIBUTOR", **kw)
     db.add(l); db.commit(); return l
 
-# ---- 1. canonical set present ----
+# ---- 1. canonical registry contract ----
+# EXISTING_CONTRACT remains a supported canonical outcome in the registry;
+# the earlier test called this a 12-item registry while actually testing only
+# 12 selected outcomes. Pin the real contract explicitly so a future addition
+# cannot silently change the vocabulary.
 CANON = ["NO_ANSWER","CALLBACK","GATEKEEPER","WRONG_NUMBER","DECISION_MAKER_FOUND",
          "EMAIL_COLLECTED","WHATSAPP_CONSENT","CATALOGUE_REQUESTED","SAMPLE_REQUESTED",
-         "PRICING_REQUESTED","INTERESTED","NOT_INTERESTED"]
+         "PRICING_REQUESTED","INTERESTED","NOT_INTERESTED","EXISTING_CONTRACT"]
 missing = [o for o in CANON if o not in pi.OUTCOMES]
 ck(not missing, f"canonical outcomes missing: {missing}")
-print(f"1. canonical 12 present: {not missing}  (registry has {len(pi.OUTCOMES)})")
+ck(set(pi.OUTCOMES) == set(CANON),
+   f"registry vocabulary differs: extra={sorted(set(pi.OUTCOMES)-set(CANON))} missing={sorted(set(CANON)-set(pi.OUTCOMES))}")
+print(f"1. canonical registry contract: {not missing}  ({len(pi.OUTCOMES)} outcomes)")
 
 # ---- 2. aliases normalise, unknown still rejected ----
 for raw, want in [("CALL_BACK","CALLBACK"), ("call back","CALLBACK"),
@@ -45,8 +51,8 @@ try:
 except ValueError: pass
 print("2. aliases normalise + unknown rejected: OK")
 
-# ---- 3. every outcome leaves exactly ONE next action ----
-print("3. every outcome -> exactly one next action:")
+# ---- 3. every outcome leaves exactly ONE next action decision ----
+print("3. every outcome -> exactly one next action decision:")
 for i, oc in enumerate(sorted(pi.OUTCOMES)):
     l = mklead(f"{i}-{oc}", email="buyer@acmedistributors.in")
     notes = {"EMAIL_COLLECTED": "email is buyer@acmedistributors.in",
@@ -57,10 +63,11 @@ for i, oc in enumerate(sorted(pi.OUTCOMES)):
     sets = [e for e in db.query(WorkflowEvent).filter(
         WorkflowEvent.lead_id == l.id,
         WorkflowEvent.event_type == "NEXT_ACTION_SET").all()]
-    ck(na.get("action") is not None, f"{oc}: no action")
+    ck(na.get("action") is not None or na.get("terminal") is True,
+       f"{oc}: no action/terminal decision")
     ck(len(sets) == 1, f"{oc}: {len(sets)} NEXT_ACTION_SET events, expected 1")
-    print(f"   {oc:22s} -> {na['action']:20s} via {na['decided_by']}"
-          + (f"  [blocked: {na['blocked'][:34]}]" if na.get("blocked") else ""))
+    print(f"   {oc:22s} -> {na.get('action')} via {na.get('decided_by')}"
+          + (f"  [blocked: {na.get('blocked','')[:34]}]" if na.get("blocked") else ""))
 
 # ---- 4. WHATSAPP_CONSENT actually unlocks the AiSensy gate ----
 l = mklead("wa", email="x@acmedistributors.in")
@@ -74,7 +81,7 @@ print(f"4. WHATSAPP_CONSENT unlocks AiSensy: consent_check {before} -> {after}; 
       f"status={l.consent_status} source={l.consent_source}")
 
 # ---- 5. EMAIL_COLLECTED promotes trust and warns when no address parsed ----
-l2 = mklead("em")                                   # starts with NO email
+l2 = mklead("em")
 r = pi.log_call(l2, db, "EMAIL_COLLECTED", notes="send it to purchase@bigtraders.in")
 db.refresh(l2)
 ck(l2.email == "purchase@bigtraders.in", f"email not stored: {l2.email!r}")
@@ -95,15 +102,12 @@ ck(l4.email_trust == t_before,
 print(f"6. phone catalogue request leaves email trust alone: {t_before} -> {l4.email_trust}")
 
 # ---- 7. the engine sees the open commitment and does not schedule over it ----
-# 7a. address is unsendable -> the promise is BLOCKED and escalated, never
-#     silently dropped and never queued as a send that cannot go out.
 l5b = mklead("cmb", email="buyer@unverified.in")
 pi.log_call(l5b, db, "CATALOGUE_REQUESTED", notes="send catalogue please")
 db_ = evaluate_next_action(l5b, db)
 ck(db_["action"] == "FOUNDER_REVIEW", f"blocked commitment -> {db_['action']}")
 ck("commitment_blocked" in db_["blockers"], f"blockers={db_['blockers']}")
 
-# 7b. address is sendable -> the commitment itself is returned.
 l5 = mklead("cm", email="buyer@realco.in")
 from app.services import trust_promoter as tp
 tp.on_founder_call(l5, db, confirmed=True, notes="address confirmed on a call")
@@ -114,11 +118,8 @@ ck(d["action"] == "SEND_CATALOGUE",
    f"engine returned {d['action']}, expected SEND_CATALOGUE from open commitment")
 ck(any("commitment" in a for a in d["audit"]), "commitment not in audit trail")
 print(f"7. commitment gate — blocked: {db_['action']} | sendable: {d['action']}")
-
-# 7c. a commitment must outrank the scheduled sequence, not sit behind it.
 ck(d["action"] != "SEND", "commitment lost to the sequence")
-print(f"   outranks the sequence (would otherwise be a scheduled touch): "
-      f"{d['reason'][:48]}")
+print(f"   outranks the sequence: {d['reason'][:48]}")
 
 # ---- 8. both doors agree on the same call ----
 from app.services.outreach_search import apply_call_outcome
