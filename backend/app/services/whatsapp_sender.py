@@ -49,10 +49,14 @@ SERVICE_WINDOW_HOURS = 24
 
 @dataclass
 class WaResult:
+    # `sent` means AiSensy accepted the request. It does NOT mean the recipient
+    # received/read it; those facts must come from provider status callbacks.
     status: str                      # sent | blocked | failed | not_configured
     reason: str = ""
     message_id: str = ""
     response: str = ""
+    provider_accepted: bool = False
+    delivery_confirmed: bool = False
 
 
 def is_configured() -> bool:
@@ -100,12 +104,41 @@ def _normalise_msisdn(raw: str) -> str:
     return d
 
 
+def _extract_provider_message_id(response_text: str, headers) -> str:
+    """Extract a provider message identifier without assuming one transport shape."""
+    header_id = str(headers.get("x-message-id") or headers.get("x-messageid") or "").strip()
+    if header_id:
+        return header_id
+
+    try:
+        import json
+        body = json.loads(response_text or "{}")
+    except Exception:
+        return ""
+
+    if not isinstance(body, dict):
+        return ""
+    for key in ("messageId", "message_id", "id", "data"):
+        value = body.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            for nested in ("messageId", "message_id", "id"):
+                nested_value = value.get(nested)
+                if isinstance(nested_value, str) and nested_value.strip():
+                    return nested_value.strip()
+    return ""
+
+
 def send_whatsapp(lead, message: str, campaign_name: Optional[str] = None,
                   template_params: Optional[list[str]] = None,
                   timeout: float = 20.0) -> WaResult:
     """
     Send via AiSensy. Refuses without consent — that check comes first, on
     purpose, so no future caller can bypass it by passing the right arguments.
+
+    A successful HTTP response means PROVIDER_ACCEPTED only. Delivery/read
+    status must be established separately from provider callbacks.
     """
     allowed, reason = consent_check(lead)
     if not allowed:
@@ -138,9 +171,17 @@ def send_whatsapp(lead, message: str, campaign_name: Optional[str] = None,
     try:
         with httpx.Client(timeout=timeout) as c:
             r = c.post(AISENSY_URL, json=payload)
-        body = (r.text or "")[:300]
+        body = (r.text or "")[:1000]
         if r.status_code // 100 == 2:
-            return WaResult(status="sent", message_id=str(r.headers.get("x-message-id", "")), response=body)
-        return WaResult(status="failed", reason=f"AiSensy HTTP {r.status_code}", response=body)
+            message_id = _extract_provider_message_id(body, r.headers)
+            return WaResult(
+                status="sent",
+                reason="AiSensy accepted the send request; delivery must be confirmed by webhook/status callback",
+                message_id=message_id,
+                response=body[:300],
+                provider_accepted=True,
+                delivery_confirmed=False,
+            )
+        return WaResult(status="failed", reason=f"AiSensy HTTP {r.status_code}", response=body[:300])
     except Exception as e:
         return WaResult(status="failed", reason=f"{type(e).__name__}: {str(e)[:120]}")
