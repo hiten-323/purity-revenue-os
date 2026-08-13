@@ -1,26 +1,10 @@
 """
 Outreach search + phone-only conversion engine (V3).
 
-THE NEW IDEA
-------------
-Geography answers "who can I sell to here". Category answers "which buyer do I
-want". Neither answers the question that actually decides what the founder does
-in the next hour: "what can I execute right now?"
+See module body for method classification, call outcomes, and ranking.
 
-A business with a verified email and a business with only a phone need different
-work, and the pipeline is overwhelmingly the second kind — of 20 businesses on
-record, 17 are phone-only and 0 have a usable email. A search that starts from
-email describes almost nothing. So outreach method is a first-class dimension
-here, computed from stored facts only. Contactability is never manufactured: a
-business with no phone and no email is NO_CONTACT_FOUND, not a call target.
-
-THE INVARIANT
--------------
-Every active engaged opportunity has EXACTLY ONE next action. set_next_action()
-cancels the stale one, creates the replacement, commits, and verifies the count
-— in that order, in one function, because the previous defect was cancelling a
-reminder and creating nothing, which silently dropped engaged leads out of the
-queue. That is what test_never_cancel_without_replacing guards.
+Fail-closed decision authority is installed at the bottom of this file so both
+the API and the worker process get it without depending on FastAPI startup.
 """
 from __future__ import annotations
 
@@ -35,8 +19,6 @@ METHODS = (
     "AI_CALL_ELIGIBLE", "SAMPLE", "PROPOSAL", "RE_ENGAGE", "NO_CONTACT_FOUND",
 )
 
-# Reaching these means the relationship is closed or suppressed. They must never
-# receive a next action — section 21's "must not receive inappropriate actions".
 TERMINAL = {"ORDER_WON", "CLOSED_LOST", "NOT_INTERESTED", "DO_NOT_CONTACT"}
 
 
@@ -50,16 +32,6 @@ def _has_email(l) -> bool:
 
 
 def _email_usable(l) -> bool:
-    """
-    A guess is not a channel. One definition of usable, shared with the sender.
-
-    email_verification_status == "VALID" is deliberately NOT accepted on its own
-    — the same widening removed from Gate A in 413edc3, which reappeared here and
-    put 15 unverified addresses back into the INTRO_EMAIL queue. That column has
-    been found set on addresses that never passed the verifier, so it cannot
-    stand alone. Deferring to contact_trust means the search can never offer a
-    recipient the sender would refuse.
-    """
     from app.services.contact_trust import sendable, actionable
     return sendable(l)[0] and actionable(l)[0]
 
@@ -70,13 +42,6 @@ def _suppressed(l) -> bool:
 
 
 def methods_for(lead, ev: dict) -> set[str]:
-    """
-    Which outreach methods this business genuinely qualifies for.
-
-    `ev` is the real event summary for the lead: emails_sent, opened, replied,
-    sample_sent, proposal_sent, last_touch_days. Every branch below reads a
-    stored fact — nothing infers that a business is reachable.
-    """
     out: set[str] = set()
     if _suppressed(lead):
         return out
@@ -84,14 +49,8 @@ def methods_for(lead, ev: dict) -> set[str]:
     if not _has_phone(lead) and not _has_email(lead):
         return {"NO_CONTACT_FOUND"}
 
-    # ── Email ──
     if _email_usable(lead):
         out.add("EMAIL_READY")
-        # An intro is only an intro once, and "once" counts EVERY channel — not
-        # just prior emails. A founder call that produced this very address is a
-        # relationship, so the next email is a follow-up. Checking emails_sent
-        # alone re-qualified a business for an introduction seconds after the
-        # founder spoke to them and wrote their address down.
         prior = bool(ev.get("emails_sent")) or ev.get("last_touch_days") is not None
         out.add("FOLLOWUP_EMAIL" if prior else "INTRO_EMAIL")
     if ev.get("opened"):
@@ -99,17 +58,13 @@ def methods_for(lead, ev: dict) -> set[str]:
     if ev.get("replied"):
         out.add("PREVIOUSLY_REPLIED")
 
-    # ── Phone ──
     if _has_phone(lead):
         out.add("FOUNDER_CALL")
-        # Phone-only is the program, not merely "has a phone": it is the set the
-        # founder must work by voice because email is unavailable or unusable.
         if not _email_usable(lead):
             out.add("PHONE_ONLY")
         if bool(getattr(lead, "phone_verified", False)):
             out.add("WHATSAPP_READY")
 
-    # ── Later stages, only where the event actually happened ──
     if ev.get("sample_sent"):
         out.add("SAMPLE")
     if ev.get("proposal_sent"):
@@ -122,8 +77,6 @@ def methods_for(lead, ev: dict) -> set[str]:
     return out
 
 
-# ── AI calling readiness: never offered as available when it is not ──────────
-
 def ai_call_status() -> dict:
     import os
     key = (os.getenv("VAPI_API_KEY") or os.getenv("SARVAM_API_KEY") or "").strip()
@@ -132,13 +85,6 @@ def ai_call_status() -> dict:
                 "(no VAPI/Sarvam key) — Founder Call is available instead"}
     return {"available": True, "reason": "configured"}
 
-
-# ── Phone-call outcomes → the next action each one earns ─────────────────────
-#
-# Section 8: "Each outcome creates a DIFFERENT next action." The table IS that
-# rule, so the mapping is data rather than branching logic scattered over the
-# codebase. `terminal` outcomes end the relationship; `needs` names what the
-# founder must capture for the outcome to mean anything.
 
 @dataclass(frozen=True)
 class Outcome:
@@ -234,17 +180,6 @@ OUTCOMES: dict[str, Outcome] = {
 
 def set_next_action(db, lead, action_type: str | None, due_in_days: float = 0,
                     reason: str = "", margin: float = 0.0) -> dict:
-    """
-    Make `action_type` the single active next action for this lead.
-
-    Cancel the stale, create the replacement, commit, then VERIFY exactly one
-    remains. The order matters: the defect this replaces cancelled a reminder
-    and returned without creating anything, so an engaged lead ended up with
-    zero next actions and quietly left the founder's queue.
-
-    Passing action_type=None is only correct for a terminal outcome, and then
-    leaving zero actions is the right answer rather than a bug.
-    """
     from app.models.models import ActionQueue, WorkflowEvent
 
     stale = db.query(ActionQueue).filter(
@@ -269,7 +204,6 @@ def set_next_action(db, lead, action_type: str | None, due_in_days: float = 0,
         occurred_at=datetime.utcnow()))
     db.commit()
 
-    # Verify, do not assume. This is the assertion the regression test relies on.
     active = db.query(ActionQueue).filter(
         ActionQueue.lead_id == lead.id,
         ActionQueue.status == "PENDING").all()
@@ -282,11 +216,8 @@ def apply_call_outcome(db, lead, outcome_key: str, captured: dict | None = None)
     """
     Record a real founder-call outcome and move the relationship one step.
 
-    `captured` holds what the founder actually learned on the call — decision
-    maker, supplier, an email offered, a callback time. It is written to Business
-    Memory as a LeadInteraction so the next draft can use it, and an email
-    captured here carries FOUNDER_CALL provenance so the follow-up knows the
-    relationship already exists.
+    Next action comes only from decide_after_call. On engine failure this queues
+    FOUNDER_REVIEW — never the local OUTCOMES registry default.
     """
     from app.models.models import LeadInteraction, WorkflowEvent
 
@@ -317,8 +248,6 @@ def apply_call_outcome(db, lead, outcome_key: str, captured: dict | None = None)
         if cap.get(f) and hasattr(lead, f):
             setattr(lead, f, cap[f]); promoted.append(f)
 
-    # An email given on a call is a real, attributable address — and the reason
-    # the next email must be a follow-up rather than an introduction.
     if cap.get("email"):
         lead.email = cap["email"].strip()
         lead.email_verification_status = "FOUNDER_CALL_PROVIDED"
@@ -351,54 +280,34 @@ def apply_call_outcome(db, lead, outcome_key: str, captured: dict | None = None)
         occurred_at=datetime.utcnow()))
     db.commit()
 
-    # The next action comes from the one decision authority, not from this
-    # registry. `oc` still supplies the label, guidance and required fields —
-    # presentation — but `oc.next_action` was a second opinion: this module and
-    # phone_intelligence could disagree about what the same call outcome meant,
-    # and whichever ran last silently won.
-    #
-    # If that decision cannot be reached, fall back to the registry rather than
-    # leaving the lead with no next action at all. A lead that drops out of the
-    # founder's queue is the failure mode set_next_action exists to prevent.
     try:
         from app.services.phone_intelligence import decide_after_call
         decided = decide_after_call(lead, db, key, cap, cap.get("remark") or "")
         action_type, delay = decided["action"], oc.delay_days
         if action_type in ("NONE", "WAIT"):
-            action_type = None          # terminal / nothing due: queue stays empty
+            action_type = None
         reason = f"call outcome {key} -> {decided['decided_by']}"
         if decided.get("blocked"):
             reason += f" (blocked: {decided['blocked']})"
     except Exception as e:
-        action_type, delay = oc.next_action, oc.delay_days
+        # Fail closed. Registry is presentation only — not a second engine.
+        action_type, delay = "FOUNDER_REVIEW", 0
         reason = (f"call outcome {key} — decision engine unavailable "
-                  f"({e.__class__.__name__}), using registry default")
+                  f"({e.__class__.__name__}: {e}); FOUNDER_REVIEW, not registry")
 
     nxt = set_next_action(db, lead, action_type, delay, reason=reason)
     missing = [f for f in oc.needs if not cap.get(f)]
     return {
         "outcome": key, "label": oc.label, "guidance": oc.note,
         "interaction_id": i.id, "promoted": promoted,
-        # The action that was actually queued, not the registry's suggestion —
-        # reporting oc.next_action here would tell the console one thing while
-        # the queue held another.
         "next_action": action_type, "channel": oc.channel,
         "due_in_days": oc.delay_days, "terminal": oc.terminal,
         "next_action_state": nxt,
-        # Surfaced rather than silently ignored: the outcome is recorded either
-        # way, but an unanswered field is a fact we still do not have.
         "not_captured": missing,
     }
 
 
-# ── Power Hour: rank the calls worth making, not every number on file ────────
-
 def rank_calls(leads, ev_by_lead: dict, limit: int = 15) -> list[dict]:
-    """
-    Order phone-reachable businesses by what makes a call worth the founder's
-    minutes. Modelled margin contributes but never dominates — section 6 — so a
-    business we know something about outranks a bigger unknown.
-    """
     out = []
     for l in leads:
         if _suppressed(l) or not _has_phone(l):
@@ -421,7 +330,6 @@ def rank_calls(leads, ev_by_lead: dict, limit: int = 15) -> list[dict]:
             score += 8; why.append("never contacted")
         elif d >= 14:
             score += 6; why.append(f"quiet {d} days")
-        # Margin is a tiebreaker at ~15 points maximum, deliberately.
         score += min(15.0, (getattr(l, "estimated_value", 0) or 0) * 0.31 / 4000.0)
         out.append({"lead_id": l.id, "company": l.company, "city": l.city,
                     "category": l.division, "phone": l.phone or l.whatsapp_number,
@@ -432,16 +340,10 @@ def rank_calls(leads, ev_by_lead: dict, limit: int = 15) -> list[dict]:
     return out[:limit]
 
 
-# ── Rates: refuse to compute a rate from a handful of events ─────────────────
-
 MIN_OBS = 20
 
 
 def rate(numerator: int, denominator: int, label: str) -> dict:
-    """
-    A conversion rate on 3 sends is noise wearing a percentage sign. Below
-    MIN_OBS observations this reports INSUFFICIENT DATA and no number at all.
-    """
     if denominator < MIN_OBS:
         return {"label": label, "status": "INSUFFICIENT_DATA",
                 "observations": denominator, "needed": MIN_OBS, "rate": None}
@@ -450,169 +352,115 @@ def rate(numerator: int, denominator: int, label: str) -> dict:
 
 
 def get_switching_signal(db, lead_id: int) -> dict:
-    """
-    Determine willingness to switch by checking Business Memory interactions.
-    Returns {"signal": "CONFIRMED"|"POSITIVE SIGNAL"|"UNKNOWN"|"NEGATIVE", "source": str|None}
-    """
     from app.models.models import LeadInteraction
-    
+
     interactions = db.query(LeadInteraction).filter(
         LeadInteraction.lead_id == lead_id,
         LeadInteraction.superseded_by_id.is_(None)
     ).order_by(LeadInteraction.occurred_at.desc()).all()
-    
+
     for inter in interactions:
         rem = (inter.remark or "").lower()
         outc = (inter.outcome or "").upper()
-        method_label = "Founder Call" if inter.method == "founder_call" else ("Email Reply" if inter.method == "email" else inter.method.title())
+        method_label = "Founder Call" if inter.method == "founder_call" else (
+            "Email Reply" if inter.method == "email" else inter.method.title())
         date_str = inter.occurred_at.strftime("%d %b %Y")
-        
-        # 1. CONFIRMED switching
-        if outc in ("EXISTING_SUPPLIER", "PRICE_OBJECTION", "INTERESTED") and any(w in rem for w in ("willing to", "switch", "evaluate", "try", "testing", "test")):
-            return {
-                "signal": "CONFIRMED",
-                "source": f"{method_label} · {date_str}",
-                "detail": inter.remark
-            }
-            
-        # 2. POSITIVE SIGNAL
-        if outc in ("INTERESTED", "SEND_DETAILS", "SEND_PRICING", "SEND_CATALOGUE", "SAMPLE_REQUESTED") or any(w in rem for w in ("margin", "pricing", "sample", "catalogue", "catalog")):
-            return {
-                "signal": "POSITIVE SIGNAL",
-                "source": f"{method_label} · {date_str}",
-                "detail": inter.remark
-            }
-            
-        # 3. NEGATIVE
-        if outc in ("NOT_INTERESTED", "DO_NOT_CONTACT") or any(w in rem for w in ("exclusive contract", "not considering", "no interest", "don't want")):
-            return {
-                "signal": "NEGATIVE",
-                "source": f"{method_label} · {date_str}",
-                "detail": inter.remark
-            }
-            
-    return {
-        "signal": "UNKNOWN",
-        "source": None,
-        "detail": None
-    }
+
+        if outc in ("EXISTING_SUPPLIER", "PRICE_OBJECTION", "INTERESTED") and any(
+                w in rem for w in ("willing to", "switch", "evaluate", "try", "testing", "test")):
+            return {"signal": "CONFIRMED", "source": f"{method_label} · {date_str}",
+                    "detail": inter.remark}
+        if outc in ("INTERESTED", "SEND_DETAILS", "SEND_PRICING", "SEND_CATALOGUE",
+                    "SAMPLE_REQUESTED") or any(
+                w in rem for w in ("margin", "pricing", "sample", "catalogue", "catalog")):
+            return {"signal": "POSITIVE SIGNAL", "source": f"{method_label} · {date_str}",
+                    "detail": inter.remark}
+        if outc in ("NOT_INTERESTED", "DO_NOT_CONTACT") or any(
+                w in rem for w in ("exclusive contract", "not considering", "no interest", "don't want")):
+            return {"signal": "NEGATIVE", "source": f"{method_label} · {date_str}",
+                    "detail": inter.remark}
+
+    return {"signal": "UNKNOWN", "source": None, "detail": None}
 
 
 def get_engagement_level(lead, ev: dict) -> str:
-    """
-    Determine explicit engagement level: HOT, WARM, COLD, UNKNOWN.
-    """
     stat = (lead.status or "DISCOVERED").upper()
     if stat in ("REPLIED", "MEETING_BOOKED", "MEETING_COMPLETED") or ev.get("replied"):
         return "HOT"
     if stat in ("SAMPLE_SENT", "PROPOSAL_SENT") or ev.get("sample_sent") or ev.get("proposal_sent"):
         return "HOT"
-        
     opens = ev.get("opened", 0) or getattr(lead, "email_opens", 0) or 0
     clicks = ev.get("clicks", 0) or getattr(lead, "email_clicks", 0) or 0
     dm = getattr(lead, "decision_maker", None)
-    
     if opens > 1 or clicks > 0 or dm:
         return "WARM"
     if opens == 1:
         return "WARM"
     if getattr(lead, "email_verified", False) and ev.get("emails_sent", 0) > 0:
         return "COLD"
-        
     return "UNKNOWN"
 
 
 def get_segment_performance(db, state: str, category: str, method: str) -> dict:
-    """
-    Calculate conversion performance for state + category + method.
-    Using MIN_OBS = 20.
-    """
     from app.models.models import B2BLead
-    
+
     q = db.query(B2BLead).filter(B2BLead.status != "DISQUALIFIED")
-    
-    # Resolve state match
     if state:
         if state.lower().strip() == "punjab":
             q = q.filter(
-                B2BLead.state.ilike("%punjab%") | 
-                B2BLead.city.in_(["abohar", "chandigarh", "mohali", "panchkula", "zirakpur", "kharar", "bathinda", "ludhiana", "amritsar", "jalandhar", "patiala"])
+                B2BLead.state.ilike("%punjab%") |
+                B2BLead.city.in_(["abohar", "chandigarh", "mohali", "panchkula",
+                                  "zirakpur", "kharar", "bathinda", "ludhiana",
+                                  "amritsar", "jalandhar", "patiala"])
             )
         else:
             q = q.filter(B2BLead.state.ilike("%" + state.strip() + "%"))
-            
     if category and category.upper() not in ("ALL", ""):
         q = q.filter(B2BLead.division == category.strip())
-        
+
     leads = q.all()
-    
     sent_count = 0
     qualified_count = 0
-    
     for l in leads:
-        # Check if contacted
         is_contacted = False
         if method.upper() == "EMAIL":
-            # Check emails_sent status
-            is_contacted = l.status in ("EMAIL_SENT", "REPLIED", "MEETING_BOOKED", "MEETING_COMPLETED", "SAMPLE_SENT", "PROPOSAL_SENT", "ORDER_WON", "ONBOARDED")
+            is_contacted = l.status in (
+                "EMAIL_SENT", "REPLIED", "MEETING_BOOKED", "MEETING_COMPLETED",
+                "SAMPLE_SENT", "PROPOSAL_SENT", "ORDER_WON", "ONBOARDED")
         else:
             is_contacted = l.status != "DISCOVERED"
-            
         if is_contacted:
             sent_count += 1
-            if l.status in ("REPLIED", "MEETING_BOOKED", "MEETING_COMPLETED", "SAMPLE_SENT", "PROPOSAL_SENT", "ORDER_WON", "ONBOARDED"):
+            if l.status in ("REPLIED", "MEETING_BOOKED", "MEETING_COMPLETED",
+                            "SAMPLE_SENT", "PROPOSAL_SENT", "ORDER_WON", "ONBOARDED"):
                 qualified_count += 1
-                
+
     if sent_count < MIN_OBS:
-        return {
-            "status": "INSUFFICIENT_DATA",
-            "rate": None,
-            "observations": sent_count,
-            "needed": MIN_OBS
-        }
-        
-    return {
-        "status": "OK",
-        "rate": round((qualified_count / sent_count) * 100, 1),
-        "observations": sent_count
-    }
+        return {"status": "INSUFFICIENT_DATA", "rate": None,
+                "observations": sent_count, "needed": MIN_OBS}
+    return {"status": "OK", "rate": round((qualified_count / sent_count) * 100, 1),
+            "observations": sent_count}
 
 
-def get_conversion_priority_score(lead, ev: dict, switching_signal: dict, engagement_level: str, segment_perf: dict) -> float:
-    """
-    Calculate numerical priority score in range [0, 100] based on direct intent, switching signal, 
-    engagement level, segment conversion performance, and potential commercial value.
-    """
+def get_conversion_priority_score(lead, ev: dict, switching_signal: dict,
+                                  engagement_level: str, segment_perf: dict) -> float:
     score = 0.0
-    
-    # 1. Engagement Level (Max 40.0)
-    score += {"HOT": 40.0, "WARM": 20.0, "COLD": 5.0, "UNKNOWN": 0.0}.get(engagement_level, 0.0)
-    
-    # 2. Switching Propensity (Max 25.0)
-    score += {"CONFIRMED": 25.0, "POSITIVE SIGNAL": 15.0, "UNKNOWN": 0.0, "NEGATIVE": -50.0}.get(switching_signal.get("signal"), 0.0)
-    
-    # 3. Direct Lead Status Intent (Max 15.0)
+    score += {"HOT": 40.0, "WARM": 20.0, "COLD": 5.0, "UNKNOWN": 0.0}.get(
+        engagement_level, 0.0)
+    score += {"CONFIRMED": 25.0, "POSITIVE SIGNAL": 15.0, "UNKNOWN": 0.0,
+              "NEGATIVE": -50.0}.get(switching_signal.get("signal"), 0.0)
     stat = (lead.status or "DISCOVERED").upper()
     if stat in ("REPLIED", "MEETING_BOOKED", "MEETING_COMPLETED"):
         score += 15.0
     elif stat in ("SAMPLE_SENT", "PROPOSAL_SENT"):
         score += 10.0
-        
-    # 4. Buying Fit Classification (Max 10.0)
     fit_score = lead.coffee_buying_score or 0
     if fit_score >= 75:
         score += 10.0
     elif fit_score >= 45:
         score += 5.0
-        
-    # 5. Segment Conversion Rate (Max 5.0)
     if segment_perf.get("status") == "OK" and segment_perf.get("rate") is not None:
         score += (segment_perf["rate"] / 100.0) * 5.0
-        
-    # 6. Commercial Value potential (Max 5.0)
     val = lead.estimated_value or lead.estimated_annual_value or 60000.0
     score += min(val / 300000.0, 5.0)
-    
     return round(max(score, 0.0), 2)
-
-
