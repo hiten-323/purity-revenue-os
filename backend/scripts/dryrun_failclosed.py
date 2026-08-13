@@ -25,17 +25,18 @@ from unittest.mock import patch
 def main() -> int:
     fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
+    # Must be set BEFORE database module is imported so the engine binds here.
     os.environ["DATABASE_URL"] = f"sqlite:///{db_path}"
 
     try:
-        # Backend root must be on path when invoked as scripts/dryrun_failclosed.py
         backend_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if backend_root not in sys.path:
             sys.path.insert(0, backend_root)
 
         from app.database.database import SessionLocal, engine, Base
         import app.models.models  # noqa: F401
-        import app.models.send_proof_fix  # noqa: F401 — must load before inserts
+        import app.models.send_proof_fix as spf
+        spf.install()
         from app.models.models import B2BLead, WorkflowEvent, ActionQueue
         from app.services.outreach_search import apply_call_outcome
 
