@@ -1,11 +1,9 @@
 """
-Multi-touch cadence. The system currently sends once and stops.
+Multi-touch cadence.
 
-54 emails have gone out and none has had a second touch. Most B2B supply
-conversations need four to seven. Single-touch is not a small inefficiency —
-it is the difference between a 2% and an 8% reply rate on the same list, which
-on 32 sendable contacts is the whole difference between a pipeline and a
-mailing.
+Most B2B supply conversations need four to seven touches. Single-touch is not a
+small inefficiency — it is the difference between a 2% and an 8% reply rate on
+the same list.
 
 Three rules the cadence must never break:
 
@@ -15,6 +13,7 @@ Three rules the cadence must never break:
 
   APPROVAL PER TOUCH.  Every touch is a draft in the approval queue. The
   cadence decides WHEN and WHAT, never whether to send. Nothing auto-sends.
+  The founder records consent in founder_actions; the worker then drains.
 
   TRUST IS CHECKED AT SEND TIME, not at enrolment. A contact that bounces or
   expires mid-sequence drops out on its own.
@@ -42,6 +41,10 @@ DAILY_COLD_CAP = 35
 
 TERMINAL_REASONS = ("replied", "bounced", "unsubscribed", "not_sendable",
                     "completed")
+
+SIG = "Hiten Jain\nPurity Beans / Pure Pantry Provisions\nAbohar, Punjab"
+
+OPEN_DRAFT_STATUSES = ("DRAFT", "PENDING", "EDITED", "FOUNDER_APPROVED", "QUEUED")
 
 
 def _now() -> datetime:
@@ -140,10 +143,105 @@ def sent_today(db) -> int:
         WorkflowEvent.occurred_at >= start).count()
 
 
+def prepare_due_drafts(db, cap: int = DAILY_COLD_CAP) -> dict:
+    """
+    Materialise due sequence touches as EmailDraft rows for founder approval.
+
+    Called by the worker every cycle. Nothing is sent. Nothing is auto-approved.
+    The founder's only job is to approve or reject rows in status=DRAFT; the
+    worker drain then delivers approved ones.
+
+    Skips contacts that already have an open draft, that the decision engine
+    would refuse, or that the account frequency cap blocks.
+    """
+    from app.models.models import B2BLead, EmailDraft
+    from app.services.outreach_engine import build_draft
+    from app.services.account_graph import can_contact_new
+    from app.services.decision_engine import evaluate_next_action
+
+    used = sent_today(db)
+    room = max(0, cap - used)
+    due = due_now(db)
+    picked = due[:room]
+
+    created, skipped, failed = [], [], []
+
+    for item in picked:
+        l = db.query(B2BLead).filter(B2BLead.id == item["lead_id"]).first()
+        if not l:
+            continue
+
+        decision = evaluate_next_action(l, db)
+        if decision["action"] not in ("SEND", "DRAFT_ONLY"):
+            skipped.append({**item, "why": decision["reason"]})
+            continue
+
+        allowed, why = can_contact_new(l, db)
+        if not allowed:
+            skipped.append({**item, "why": why})
+            continue
+
+        existing = db.query(EmailDraft).filter(
+            EmailDraft.lead_id == l.id,
+            EmailDraft.status.in_(OPEN_DRAFT_STATUSES),
+        ).first()
+        if existing:
+            skipped.append({**item, "why": f"open draft #{existing.id} ({existing.status})"})
+            continue
+
+        try:
+            d = build_draft(
+                l, None, item["touch_number"] - 1, False,
+                item["overdue_days"] or None, SIG,
+            )
+            row = EmailDraft(
+                lead_id=l.id,
+                follow_up_type=item["touch"],
+                subject=d.get("subject"),
+                body=d.get("body"),
+                reason=(
+                    f"sequence touch {item['touch_number']}: {item['purpose']} — "
+                    f"awaiting founder approval"
+                ),
+                status="DRAFT",
+                recipient=l.email,
+            )
+            db.add(row)
+            created.append({
+                "lead_id": l.id,
+                "company": l.company,
+                "touch": item["touch"],
+                "touch_number": item["touch_number"],
+                "email": l.email,
+            })
+        except Exception as e:
+            failed.append({**item, "error": f"{e.__class__.__name__}: {e}"})
+
+    if created:
+        db.commit()
+
+    return {
+        "due": len(due),
+        "sent_today": used,
+        "cap": cap,
+        "room_left": room,
+        "created": len(created),
+        "skipped": len(skipped),
+        "failed": len(failed),
+        "detail_created": created[:20],
+        "detail_skipped": skipped[:10],
+        "detail_failed": failed[:10],
+        "founder_next": (
+            f"{len(created)} draft(s) ready at GET /api/v1/founder/pending"
+            if created else "nothing new for founder this cycle"
+        ),
+    }
+
+
 def build_queue(db, cap: int = DAILY_COLD_CAP) -> dict:
     """
-    The approval queue for today: what is due, capped for deliverability,
-    each one a draft the founder approves or rejects. Nothing here sends.
+    In-memory preview of today's approval queue. Prefer prepare_due_drafts for
+    the live path — that persists EmailDraft rows the founder actually decides.
     """
     from app.models.models import B2BLead
     from app.services.outreach_engine import build_draft
@@ -154,16 +252,11 @@ def build_queue(db, cap: int = DAILY_COLD_CAP) -> dict:
     due = due_now(db)
     picked, drafts, failed = due[:room], [], []
 
-    SIG = ("Hiten Jain\nPurity Beans / Pure Pantry Provisions\nAbohar, Punjab")
     governed = []
     for item in picked:
         l = db.query(B2BLead).filter(B2BLead.id == item["lead_id"]).first()
         if not l:
             continue
-        # Account-level cap, checked BEFORE a draft is built. A blocked
-        # contact must never reach the approval queue — showing the founder a
-        # draft the system will refuse to send is the same lie as showing a
-        # send count the sender disagrees with.
         allowed, why = can_contact_new(l, db)
         if not allowed:
             governed.append({**item, "blocked_by": why})
@@ -174,8 +267,6 @@ def build_queue(db, cap: int = DAILY_COLD_CAP) -> dict:
             drafts.append({**item, "subject": d.get("subject"),
                            "body": d.get("body")})
         except Exception as e:
-            # Never silently drop a lead from the queue — a draft that cannot
-            # be built is a bug to see, not a lead to lose.
             failed.append({**item, "error": f"{e.__class__.__name__}: {e}"})
 
     return {"due": len(due), "sent_today": used, "cap": cap,
