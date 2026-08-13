@@ -25,6 +25,23 @@ from datetime import datetime, timedelta
 COOLDOWN_DAYS = 7          # one NEW contact per account per week
 CHAIN_CORPORATE_FIRST_DAYS = 21   # branches wait while corporate has its turn
 
+# Every channel that consumes an account's cooldown slot.
+#
+# This was ("EMAIL_SENT",) alone, which made WhatsApp invisible to the cap: a
+# WhatsApp touch cost an account nothing, so all 26 More Supermarket branches
+# could have been messaged in one afternoon without the guard firing once —
+# precisely the failure this module was written to prevent, just through the
+# other door. The buyer experiences one supplier contacting them, not one
+# per channel, so the cap has to be keyed on the relationship rather than the
+# transport.
+#
+# REPLY_EVENTS in trust_promoter already counted WHATSAPP_REPLY, so the inbound
+# side was channel-aware and only the outbound side was not.
+OUTREACH_EVENTS = ("EMAIL_SENT", "WHATSAPP_SENT")
+
+# For the founder-facing reason string: which channel used the slot.
+_CHANNEL_OF = {"EMAIL_SENT": "email", "WHATSAPP_SENT": "WhatsApp"}
+
 # Public suffixes we must not treat as the registrable domain, or every
 # .co.in business in Punjab merges into one enormous account.
 _MULTI = {"co.in", "net.in", "org.in", "gov.in", "ac.in", "co.uk", "com.au"}
@@ -177,20 +194,22 @@ def can_contact_new(lead, db, founder_override: bool = False) -> tuple[bool, str
     # Both EMAIL_SENT and WHATSAPP_SENT are first-touch outreach channels.
     # The account cooldown must treat them the same, otherwise a WhatsApp
     # send to one branch leaves every other branch free for cold email the
-    # same day.
-    sends = sorted(_events(db, ids, ["EMAIL_SENT", "WHATSAPP_SENT"]),
+    # same day. See OUTREACH_EVENTS above for the full rationale.
+    sends = sorted(_events(db, ids, list(OUTREACH_EVENTS)),
                    key=lambda e: e.occurred_at or datetime.min)
     mine = [e for e in sends if e.lead_id == lead.id]
     if mine:
         return True, "already in sequence — cadence continues"
 
     if sends:
-        last = sends[-1].occurred_at
+        last_ev = sends[-1]
+        last = last_ev.occurred_at
         gap = (datetime.utcnow() - last).days if last else 999
         if gap < COOLDOWN_DAYS:
             other = next((l.company for l in acct["leads"]
-                          if l.id == sends[-1].lead_id), "another contact")
-            return False, (f"{acct['name']}: contacted {gap}d ago via "
+                          if l.id == last_ev.lead_id), "another contact")
+            via = _CHANNEL_OF.get(last_ev.event_type, "outreach")
+            return False, (f"{acct['name']}: contacted {gap}d ago by {via} via "
                            f"{other[:30]} — {COOLDOWN_DAYS - gap}d of cooldown left")
 
         # Chain: corporate gets a clear run before we go to branches.
