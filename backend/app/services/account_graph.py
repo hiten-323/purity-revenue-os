@@ -174,7 +174,11 @@ def can_contact_new(lead, db, founder_override: bool = False) -> tuple[bool, str
         return False, (f"{acct['name']}: {who[:30]} is already in conversation "
                        f"— cold outreach to the rest of the account is paused")
 
-    sends = sorted(_events(db, ids, ["EMAIL_SENT"]),
+    # Both EMAIL_SENT and WHATSAPP_SENT are first-touch outreach channels.
+    # The account cooldown must treat them the same, otherwise a WhatsApp
+    # send to one branch leaves every other branch free for cold email the
+    # same day.
+    sends = sorted(_events(db, ids, ["EMAIL_SENT", "WHATSAPP_SENT"]),
                    key=lambda e: e.occurred_at or datetime.min)
     mine = [e for e in sends if e.lead_id == lead.id]
     if mine:
