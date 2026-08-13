@@ -12,6 +12,16 @@ surfaced as random request timeouts and "Offline" flapping in the dashboard.
 Running it as its own pm2 process isolates that CPU work completely: the API
 event loop stays responsive, and the worker writes to SQLite (WAL mode) where a
 writer no longer blocks readers.
+
+OUTREACH AUTOMATION
+Each cycle:
+  1. Pull real replies from Zoho IMAP (exit sequences on engagement)
+  2. Prepare due sequence drafts for founder approval (nothing sends)
+  3. Drain the approved send queue (founder already said yes)
+  4. Re-learn patterns from outcomes
+
+The founder's only required action is approve/reject at /api/v1/founder/pending.
+Those decisions land in the founder_actions table.
 """
 import logging
 import sys
@@ -31,10 +41,8 @@ if __name__ == "__main__":
     logging.info("Auto-Warm worker starting (separate process)")
     start_auto_warm_worker()   # spawns its daemon loop thread in THIS process
 
-    # Periodically pull REAL replies from Zoho IMAP, then re-learn from the
-    # outcomes. Both run here, not in the API, so this costs the dashboard
-    # nothing. Reply detection is what moves engaged/won off zero — without it
-    # the system can send but never learn whether anything landed.
+    # Periodically pull REAL replies from Zoho IMAP, prepare due drafts, drain
+    # approved sends, then re-learn from outcomes. All run here, not in the API.
     CYCLE_SEC = 600
     while True:
         try:
@@ -45,32 +53,54 @@ if __name__ == "__main__":
                 logging.info(f"reply sync: {rep}")
             except Exception as e:
                 logging.error(f"reply sync failed: {e}")
+                rep = {"error": str(e)}
+
+            # Prepare due sequence drafts. Founder approves; nothing sends here.
+            try:
+                from app.services.sequence_engine import prepare_due_drafts
+                prep = prepare_due_drafts(db)
+                if prep.get("created") or prep.get("due"):
+                    logging.info(
+                        f"sequence drafts: created={prep.get('created')} "
+                        f"due={prep.get('due')} skipped={prep.get('skipped')} "
+                        f"— {prep.get('founder_next')}"
+                    )
+            except Exception as e:
+                logging.error(f"sequence prepare failed: {e}")
 
             # Drain the approved send queue. The founder approves once; the
-            # pacing is not their job. Before this, a batch that hit the
-            # hourly cap simply stopped and 21 approved emails waited for
-            # someone to re-run a script by hand.
+            # pacing is not their job.
             try:
                 from app.services.send_queue import drain
                 q = drain(db)
-                if q["approved_waiting"]:
-                    logging.info(f"send queue: {q['sent']} sent, "
-                                 f"{q['held']} held, {q['blocked']} blocked, "
-                                 f"{q['approved_waiting']} approved waiting")
+                if q.get("approved_waiting") or q.get("sent"):
+                    logging.info(
+                        f"send queue: {q.get('sent')} sent, "
+                        f"{q.get('held')} held, {q.get('blocked')} blocked, "
+                        f"{q.get('approved_waiting')} approved waiting"
+                    )
             except Exception as e:
                 logging.error(f"send queue drain failed: {e}")
 
-            # Beat AFTER the work, never before. A heartbeat at the top of
-            # the loop only proves the loop started — which is the useless
-            # signal pm2 already provides.
+            # Beat AFTER the work, never before.
             try:
                 from app.services.heartbeat import beat
-                beat("worker", db, {"reply_sync": str(rep)[:120]})
+                beat("worker", db, {
+                    "reply_sync": str(rep)[:120],
+                    "sequence": "prepared",
+                    "send_queue": "drained",
+                })
+                beat("sequence_engine", db, {"note": "prepare_due_drafts ran"})
+                beat("send_queue", db, {"note": "drain ran"})
             except Exception as e:
                 logging.error(f"heartbeat failed: {e}")
 
-            result = _relearn_patterns(db)
-            logging.info(f"re-learned patterns from real outcomes: {result}")
+            try:
+                result = _relearn_patterns(db)
+                logging.info(f"re-learned patterns from real outcomes: {result}")
+            except Exception as e:
+                logging.error(f"relearn failed: {e}")
+
             db.close()
         except Exception as e:
             logging.error(f"worker cycle failed: {e}")
