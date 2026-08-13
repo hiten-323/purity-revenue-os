@@ -9,7 +9,7 @@ Both are wrong. The insert's own connection is the only view of the table that
 is consistent with the write in progress, and if uniqueness cannot be checked
 the event must not count as a proven send.
 
-Imported from main.py after models so the original listener is detached first.
+Idempotent: safe to import more than once.
 """
 from __future__ import annotations
 
@@ -19,11 +19,7 @@ from sqlalchemy import event, text
 
 from app.models.models import WorkflowEvent, EMAIL_SENT_UNPROVEN, _require_send_proof
 
-
-# Detach the original listener. Leaving both would double-fire; removing only
-# this reference is intentional — the function object identity is what sqlalchemy
-# uses to match.
-event.remove(WorkflowEvent, "before_insert", _require_send_proof)
+_INSTALLED = False
 
 
 def _payload_as_dict(raw) -> dict:
@@ -42,16 +38,11 @@ def _payload_as_dict(raw) -> dict:
     return {}
 
 
-@event.listens_for(WorkflowEvent, "before_insert")
 def _require_send_proof_strict(mapper, connection, target):
     """
-    Same invariant as before — EMAIL_SENT needs recipient + message_id — but:
+    EMAIL_SENT needs recipient + message_id on the insert's connection.
 
-      * duplicate scan uses `connection` (the insert's transaction)
-      * any failure of that scan demotes to EMAIL_SENT_UNPROVEN
-
-    Nothing is raised: a failed guard must not abort an unrelated write, but it
-    also must not pretend a send was proven when it could not verify that.
+    Fail closed: any verification failure -> EMAIL_SENT_UNPROVEN.
     """
     if target.event_type != "EMAIL_SENT":
         return
@@ -71,9 +62,6 @@ def _require_send_proof_strict(mapper, connection, target):
         target.payload = p
         return
 
-    # Same connection as the insert. A separate SessionLocal can see a different
-    # snapshot, fail independently, and leave this write looking proven when the
-    # check never ran — which is how duplicate message-ids would inflate cadence.
     try:
         rows = connection.execute(
             text(
@@ -103,4 +91,26 @@ def _require_send_proof_strict(mapper, connection, target):
         )
         target.payload = p
         return
-    # provable and unique — leave as EMAIL_SENT
+
+
+def install() -> None:
+    """Detach fail-open listener; attach fail-closed. Safe to call repeatedly."""
+    global _INSTALLED
+    if _INSTALLED:
+        return
+    try:
+        event.remove(WorkflowEvent, "before_insert", _require_send_proof)
+    except Exception:
+        pass
+    # Avoid double-register if import races
+    try:
+        if not event.contains(
+            WorkflowEvent, "before_insert", _require_send_proof_strict
+        ):
+            event.listen(WorkflowEvent, "before_insert", _require_send_proof_strict)
+    except Exception:
+        event.listen(WorkflowEvent, "before_insert", _require_send_proof_strict)
+    _INSTALLED = True
+
+
+install()

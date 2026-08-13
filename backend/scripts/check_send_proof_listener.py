@@ -18,14 +18,16 @@ def main() -> int:
         sys.path.insert(0, backend_root)
 
     import app.models.models  # noqa: F401
-    import app.models.send_proof_fix  # noqa: F401
+    import app.models.send_proof_fix as spf
+    spf.install()
+
     from sqlalchemy import event
     from app.models.models import WorkflowEvent, _require_send_proof
 
     strict = event.contains(
         WorkflowEvent,
         "before_insert",
-        app.models.send_proof_fix._require_send_proof_strict,
+        spf._require_send_proof_strict,
     )
     old = event.contains(WorkflowEvent, "before_insert", _require_send_proof)
 

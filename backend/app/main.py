@@ -22,20 +22,6 @@ import redis
 app = FastAPI(title="Purity Beans AI Operating System")
 
 def _quarantine_unverifiable_addresses():
-    """
-    Quarantine every stored address that cannot actually receive mail.
-
-    Runs at boot because the write that put them there is NOT in this codebase.
-    82 addresses of the form contact@{company-name-without-spaces}.com appeared
-    marked VALID and email_verified=1, with ZERO events recording the write -
-    every in-app path logs one, so these were written straight into SQLite by
-    something outside the application. Another tool edits this database.
-
-    Since the writer cannot be fixed from here, the write is made harmless
-    instead: on every start, any address the verifier rejects is cleared and
-    tombstoned PURGED before a single send can be attempted. Whatever writes
-    them, they never reach the send gate.
-    """
     try:
         from datetime import datetime
         from app.database.database import SessionLocal
@@ -52,7 +38,7 @@ def _quarantine_unverifiable_addresses():
                 try:
                     r = verify_email(l.email.strip(), l.company or "", l.website or "")
                 except Exception:
-                    continue          # never let a DNS blip purge a good address
+                    continue
                 if r.get("status") == "VALID":
                     continue
                 old = l.email
@@ -79,8 +65,6 @@ def _quarantine_unverifiable_addresses():
 
 @app.on_event("startup")
 async def startup():
-    # The trust sweep supersedes the earlier address-only quarantine: it also
-    # detects rows changed outside the application and demotes them.
     try:
         from app.database.database import SessionLocal as _S
         from app.services.contact_trust import sweep as _sweep
@@ -94,26 +78,21 @@ async def startup():
     except Exception as _e:
         print(f"[trust-sweep] skipped: {_e}")
     import app.models.models
-    # Register founder_actions table (model lives in the service module).
     import app.services.founder_actions  # noqa: F401
-    # Fail-closed EMAIL_SENT proof: same connection, no swallowed duplicate check.
     import app.models.send_proof_fix  # noqa: F401
-    # Fail-closed call outcome: engine failure -> FOUNDER_REVIEW, not registry.
     from app.services.call_outcome_failclosed import install as _install_call_outcome
     _install_call_outcome()
     Base.metadata.create_all(bind=engine)
-    
-    # Run dynamic SQLite migrations for call fields and call_history
+
     from app.database.database import SessionLocal
     db = SessionLocal()
     try:
         conn = db.connection().connection
         cursor = conn.cursor()
-        
-        # Get existing columns of b2b_leads
+
         cursor.execute("PRAGMA table_info(b2b_leads);")
         existing_cols = [col[1] for col in cursor.fetchall()]
-        
+
         new_cols = {
             "call_status": "VARCHAR",
             "call_quality_score": "INTEGER DEFAULT 0",
@@ -197,7 +176,7 @@ async def startup():
             "division_confidence": "FLOAT DEFAULT 0.25",
             "division_verified": "BOOLEAN DEFAULT 0"
         }
-        
+
         for col, col_type in new_cols.items():
             if col not in existing_cols:
                 try:
@@ -205,8 +184,7 @@ async def startup():
                     print(f"Migration: Added column {col} to b2b_leads")
                 except Exception as e:
                     print(f"Migration Error adding {col}: {e}")
-                    
-        # Check and migrate gov_tenders columns
+
         cursor.execute("PRAGMA table_info(gov_tenders);")
         existing_gov_cols = [col[1] for col in cursor.fetchall()]
         new_gov_cols = {
@@ -240,7 +218,7 @@ async def startup():
             if col not in existing_gov_cols:
                 try:
                     cursor.execute(f"ALTER TABLE gov_tenders ADD COLUMN {col} {col_type};")
-                    print(f"Migration: Added column {col} to gov_tenders: {e}")
+                    print(f"Migration: Added column {col} to gov_tenders")
                 except Exception as e:
                     print(f"Migration Error adding {col} to gov_tenders: {e}")
 
@@ -290,7 +268,7 @@ async def startup():
 
         cursor.execute("SELECT id, division, company FROM b2b_leads;")
         leads_to_migrate = cursor.fetchall()
-        
+
         category_map = {
             "grocery": "retail_kirana",
             "kirana_store": "retail_kirana",
@@ -302,7 +280,7 @@ async def startup():
             "corporate": "corporate_office",
             "tender": "institutional_buyer"
         }
-        
+
         for lead_id, old_div, company_name in leads_to_migrate:
             old_div_lower = (old_div or "").lower().strip()
             if old_div_lower in (
@@ -313,14 +291,14 @@ async def startup():
                 "exporter", "institutional_buyer", "needs_reclassification", "unknown"
             ):
                 continue
-            
+
             if old_div_lower in category_map:
                 new_div = category_map[old_div_lower]
             elif old_div_lower in ("horeca", "education_mess"):
                 new_div = "needs_reclassification"
             else:
                 new_div = "unknown"
-                
+
             cursor.execute(
                 "UPDATE b2b_leads SET division = ?, industry = ? WHERE id = ?;",
                 (new_div, new_div.replace("_", " ").title(), lead_id)
@@ -367,21 +345,19 @@ def health_check(db: Session = Depends(get_db)):
         "database": "disconnected",
         "redis": "disconnected"
     }
-    
-    # Check Database
+
     try:
         db.execute(text("SELECT 1"))
         health_status["database"] = "connected"
-    except Exception as e:
+    except Exception:
         health_status["status"] = "unhealthy"
 
-    # Check Redis
     try:
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
         r = redis.from_url(redis_url, socket_timeout=1.0, socket_connect_timeout=1.0)
         if r.ping():
             health_status["redis"] = "connected"
-    except Exception as e:
-        pass # Optional dependency for now if it fails
-        
+    except Exception:
+        pass
+
     return health_status
