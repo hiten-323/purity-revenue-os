@@ -203,18 +203,109 @@ _CALLBACK = re.compile(
     r"\b(tomorrow|next week|next month|monday|tuesday|wednesday|thursday|"
     r"friday|saturday|after \w+|\d{1,2}\s?(?:am|pm))\b", re.I)
 
-# Outcomes the founder can record. Each maps to a real state change.
+# Outcomes the founder can record. Each maps to a real state change — these are
+# not labels. Recording one is what moves the account, so the set is the
+# commercial journey written down: who answered, what they gave us, what they
+# asked for.
 OUTCOMES = {
-    "INTERESTED": "wants to proceed",
-    "SAMPLE_REQUESTED": "asked for a sample",
-    "SEND_DETAILS": "asked for catalogue or pricing by email",
-    "CALLBACK": "asked to be called later",
-    "NOT_INTERESTED": "declined",
-    "WRONG_NUMBER": "not the business we thought",
+    # Could not have the conversation
     "NO_ANSWER": "did not pick up",
+    "CALLBACK": "asked to be called later",
     "GATEKEEPER": "could not reach the decision maker",
+    "WRONG_NUMBER": "not the business we thought",
+    # The conversation produced an asset
+    "DECISION_MAKER_FOUND": "identified who actually buys",
+    "EMAIL_COLLECTED": "buyer gave an email address",
+    "WHATSAPP_CONSENT": "buyer agreed to receive WhatsApp",
+    # The conversation produced a request
+    "CATALOGUE_REQUESTED": "asked for the catalogue",
+    "SAMPLE_REQUESTED": "asked for a sample",
+    "PRICING_REQUESTED": "asked for pricing or distributor terms",
+    # The conversation reached a verdict
+    "INTERESTED": "wants to proceed",
+    "NOT_INTERESTED": "declined",
     "EXISTING_CONTRACT": "locked in with a supplier",
 }
+
+# Spellings the founder will actually type, and one retired name. Normalising
+# beats rejecting: a call is logged once, minutes after it happened, and losing
+# it to a ValueError over an underscore loses the only record of the call.
+#
+# SEND_DETAILS predates the split between "send the catalogue" and "send
+# pricing" — they are different actions with different approval rules, so it
+# resolves to the catalogue and pricing must be recorded explicitly.
+_OUTCOME_ALIASES = {
+    "CALL_BACK": "CALLBACK",
+    "CALL BACK": "CALLBACK",
+    "SEND_DETAILS": "CATALOGUE_REQUESTED",
+    "CATALOG_REQUESTED": "CATALOGUE_REQUESTED",
+    "WHATSAPP_CONSENT_GIVEN": "WHATSAPP_CONSENT",
+    "DM_FOUND": "DECISION_MAKER_FOUND",
+    "EMAIL_COLLECTED_": "EMAIL_COLLECTED",
+    "PRICE_REQUESTED": "PRICING_REQUESTED",
+    "NO_REPLY": "NO_ANSWER",
+    "NOT_REACHABLE": "NO_ANSWER",
+
+    # outreach_search.OUTCOMES speaks a second dialect — it is the registry the
+    # API's call console posts against, and it grew separately. Mapping it in
+    # here rather than leaving two vocabularies is the point: the founder logs
+    # a call through either door and the same canonical outcome comes out.
+    # outreach_search keeps its own labels and guidance text (presentation),
+    # but no longer decides what an outcome MEANS.
+    "BUSY": "NO_ANSWER",
+    "CALL_LATER": "CALLBACK",
+    "WRONG_PERSON": "GATEKEEPER",
+    "SEND_WHATSAPP": "WHATSAPP_CONSENT",
+    "SEND_CATALOGUE": "CATALOGUE_REQUESTED",
+    "SEND_PRICING": "PRICING_REQUESTED",
+    "PRICE_OBJECTION": "PRICING_REQUESTED",
+    "MEETING_REQUESTED": "INTERESTED",
+    "EXISTING_SUPPLIER": "EXISTING_CONTRACT",
+    # DO_NOT_CONTACT is stronger than NOT_INTERESTED — it also sets
+    # do_not_call. That flag is applied by apply_call_outcome; here it only
+    # needs to resolve to the outcome that stops outreach.
+    "DO_NOT_CONTACT": "NOT_INTERESTED",
+    "OTHER": "NO_ANSWER",
+}
+
+
+def normalise_outcome(raw: str) -> str:
+    """Founder input -> canonical outcome. Raises on anything unrecognised."""
+    o = (raw or "").strip().upper().replace("-", "_")
+    o = _OUTCOME_ALIASES.get(o, o)
+    if o not in OUTCOMES:
+        raise ValueError(f"unknown outcome {raw!r}; expected one of "
+                         f"{', '.join(sorted(OUTCOMES))}")
+    return o
+
+
+# Every outcome leaves exactly one next action. A commitment is something the
+# founder PROMISED on the call — the decision engine cannot infer it from
+# stored state, so it outranks whatever the sequence had scheduled.
+#
+# EMAIL_COLLECTED deliberately has no commitment: collecting an address removes
+# a blocker rather than creating an obligation, so the decision engine decides
+# what to do with the newly-reachable contact. That is the whole point of one
+# authority — this module reports what happened, it does not plan.
+_COMMITMENT: dict[str, tuple[str | None, str, bool]] = {
+    "CATALOGUE_REQUESTED":  ("SEND_CATALOGUE", "they asked for the catalogue", False),
+    "SAMPLE_REQUESTED":     ("SEND_SAMPLE", "prepare a sample dispatch", False),
+    "PRICING_REQUESTED":    ("FOUNDER_PRICING", "pricing and terms are founder-only", True),
+    "INTERESTED":           ("FOUNDER_CALL", "buying conversation — founder call", True),
+    "WHATSAPP_CONSENT":     ("SEND_WHATSAPP", "consent given — WhatsApp now permitted", False),
+    "DECISION_MAKER_FOUND": ("CALL_DECISION_MAKER", "call the named decision maker", False),
+    "CALLBACK":             ("SCHEDULE_CALLBACK", "call back {when}", False),
+    "GATEKEEPER":           ("CALL_AGAIN", "try again for the decision maker", False),
+    "NO_ANSWER":            ("CALL_AGAIN", "no answer — try again", False),
+    "NOT_INTERESTED":       ("NONE", "closed — no follow-up", False),
+    "WRONG_NUMBER":         ("NONE", "number cleared — not this business", False),
+    "EXISTING_CONTRACT":    ("NONE", "locked with a supplier — recycle later", False),
+    "EMAIL_COLLECTED":      (None, "", False),
+}
+
+# Actions nobody but the founder may execute. Money is founder-only: an
+# automated system that quotes a price has committed the company to it.
+FOUNDER_ONLY = {"FOUNDER_PRICING", "FOUNDER_CALL"}
 
 
 def extract(notes: str) -> dict:
@@ -257,11 +348,7 @@ def log_call(lead, db, outcome: str, notes: str = "",
     from app.models.models import WorkflowEvent
     from app.services import trust_promoter as tp
 
-    outcome = (outcome or "").upper()
-    if outcome not in OUTCOMES:
-        raise ValueError(f"unknown outcome {outcome!r}; expected one of "
-                         f"{', '.join(sorted(OUTCOMES))}")
-
+    outcome = normalise_outcome(outcome)
     facts = extract(notes)
     applied = []
 
@@ -310,6 +397,66 @@ def log_call(lead, db, outcome: str, notes: str = "",
         lead.phone = ""
         applied.append("phone cleared — not this business")
 
+    elif outcome == "WHATSAPP_CONSENT":
+        # The outcome that unlocks AiSensy. Meta requires opt-in before any
+        # business-initiated WhatsApp, and a buyer saying "yes, send it on
+        # WhatsApp" to the founder IS that opt-in — it just has to be written
+        # to the field the consent gate actually reads.
+        #
+        # EXPLICIT and this exact source shape are what whatsapp_sender's
+        # consent_check treats as permission; writing anything else here would
+        # record consent that the sender still refuses to act on.
+        lead.consent_status = "EXPLICIT"
+        lead.consent_source = "FOUNDER_CALL"
+        lead.consent_timestamp = _now()
+        db.add(WorkflowEvent(
+            lead_id=lead.id, event_type="CONSENT_GIVEN", actor="FOUNDER",
+            channel="phone",
+            payload={"consent_status": "EXPLICIT", "source": "FOUNDER_CALL",
+                     "heard_on_call": True, "notes": (notes or "")[:300]},
+            occurred_at=_now()))
+        applied.append("consent -> EXPLICIT (WhatsApp now permitted)")
+
+    elif outcome == "EMAIL_COLLECTED":
+        # The address is applied above by the shared extraction path. If the
+        # founder picked this outcome and no address parsed out, the call's one
+        # valuable product was lost — say so loudly rather than recording a
+        # success that produced nothing.
+        if not got_email:
+            applied.append("WARNING: EMAIL_COLLECTED recorded but no address "
+                           "found in the notes — re-open this call and add it")
+
+    elif outcome == "DECISION_MAKER_FOUND":
+        if facts.get("contact_name"):
+            db.add(WorkflowEvent(
+                lead_id=lead.id, event_type="DECISION_MAKER_IDENTIFIED",
+                actor="FOUNDER", channel="phone",
+                payload={"name": facts["contact_name"],
+                         "notes": (notes or "")[:300]},
+                occurred_at=_now()))
+            applied.append(f"decision maker = {facts['contact_name']}")
+        else:
+            applied.append("WARNING: DECISION_MAKER_FOUND recorded but no name "
+                           "found in the notes")
+
+    elif outcome in ("CATALOGUE_REQUESTED", "PRICING_REQUESTED"):
+        # Recorded as a commercial signal, NOT via on_business_event.
+        #
+        # on_business_event promotes email_trust to TRUSTED, and a request made
+        # over the phone is no evidence whatsoever that the email address is
+        # real. Routing it there would take a scraped info@ address from
+        # DISCOVERED straight to sendable because a buyer asked for a catalogue
+        # out loud. Trust in an address may only rise from evidence about that
+        # address — which is why EMAIL_COLLECTED above goes through
+        # on_founder_call: there, the founder actually heard it.
+        db.add(WorkflowEvent(
+            lead_id=lead.id, event_type="BUYING_SIGNAL", actor="FOUNDER",
+            channel="phone",
+            payload={"signal": outcome, "via": "phone",
+                     "notes": (notes or "")[:300]},
+            occurred_at=_now()))
+        applied.append(f"buying signal recorded: {outcome}")
+
     # The founder presses Save and the system orchestrates the rest. Anything
     # that leaves the building still needs approval — what changes here is that
     # the founder no longer has to REMEMBER to queue it.
@@ -341,51 +488,106 @@ def _next_action_from_call(lead, db, outcome: str, facts: dict,
     A call that ends with "send me the catalogue" and produces no queued
     catalogue is a lost deal that looked like a good conversation. This is the
     step where founder memory stops being load-bearing.
+
+    This function does NOT plan. It splits every call into one of two cases:
+
+      1. The call created a COMMITMENT — the buyer asked for something, or the
+         founder promised something. That is new information no amount of
+         stored state could reveal, so it becomes the next action directly.
+      2. The call created no commitment (EMAIL_COLLECTED: a blocker removed,
+         nothing promised). Then decision_engine.evaluate_next_action decides,
+         because it already weighs suppression, trust, account frequency,
+         sequence position and the delivery guard.
+
+    Deciding case 2 locally is what would make this a second decision engine —
+    the exact duplication that produced six conflicting-answer bugs in this
+    codebase. Every one surfaced as two modules disagreeing about one number.
     """
     from app.models.models import WorkflowEvent
 
-    action, detail = None, ""
-    if outcome == "SAMPLE_REQUESTED":
-        action, detail = "SEND_SAMPLE", "prepare a sample dispatch"
-    elif outcome == "CALLBACK":
-        when = facts.get("callback") or "as agreed"
-        action, detail = "SCHEDULE_CALLBACK", f"call back {when}"
-    elif outcome in ("NOT_INTERESTED", "WRONG_NUMBER", "EXISTING_CONTRACT"):
-        action, detail = "NONE", "closed — no follow-up"
-    else:
-        for rx, act, desc in _SAID:
-            if rx.search(notes or ""):
-                action, detail = act, desc
-                break
-    if action is None:
-        action, detail = ("SEND_CATALOGUE", "they engaged — send the range") \
-            if outcome in ("INTERESTED", "SEND_DETAILS") else \
-            ("CALL_AGAIN", "no decision reached — try again")
-
-    from app.services.trust_promoter import may_send
-    # No try/except here. If the trust gate cannot answer, that is a bug worth
-    # seeing, not a reason to guess — and guessing False would silently mark
-    # every follow-up BLOCKED, while guessing True would queue sends to
-    # addresses nobody vouched for.
-    emailable = may_send(lead)[0]
-
-    # An email action needs a sendable address. If the call did not produce
-    # one, say so plainly rather than queueing something that cannot be sent —
-    # a queue full of impossible sends is what stalled the send queue for four
-    # hours earlier today.
-    blocked = None
-    if action in ("SEND_CATALOGUE", "SEND_PRICING") and not emailable:
-        blocked = "no sendable address — get the email before this can go out"
+    d = decide_after_call(lead, db, outcome, facts, notes)
+    action, detail = d["action"], d["detail"]
 
     db.add(WorkflowEvent(
         lead_id=lead.id, event_type="NEXT_ACTION_SET", actor="PHONE_INTELLIGENCE",
         channel="phone",
         payload={"action": action, "detail": detail, "from_outcome": outcome,
-                 "blocked": blocked, "due": facts.get("callback")},
+                 "blocked": d["blocked"], "due": facts.get("callback"),
+                 "decided_by": d["decided_by"]},
         occurred_at=_now()))
+    return d
+
+
+def decide_after_call(lead, db, outcome: str, facts: dict | None = None,
+                      notes: str = "") -> dict:
+    """
+    The decision half of "what happens after this call", with no side effects.
+
+    Both call-logging paths use this — phone_intelligence.log_call and
+    outreach_search.apply_call_outcome — so a call logged through either door
+    produces the same next action. They persist differently (WorkflowEvent vs
+    LeadInteraction + ActionQueue), which is fine: two stores, one decision.
+    Two DECISIONS is what caused the conflicting-answer bugs.
+    """
+    from app.services.decision_engine import evaluate_next_action
+    from app.services.trust_promoter import may_send
+
+    outcome = normalise_outcome(outcome)
+    facts = facts or {}
+    action, detail, decided_by = None, "", "call_commitment"
+
+    commit = _COMMITMENT.get(outcome)
+    if commit and commit[0]:
+        action, detail = commit[0], commit[1]
+        if action == "SCHEDULE_CALLBACK":
+            detail = detail.format(when=facts.get("callback") or "as agreed")
+
+        # INTERESTED is the one deliberately vague outcome — "wants to proceed"
+        # does not say proceed with WHAT. If the notes name something concrete,
+        # that is more actionable than a generic founder call.
+        if outcome == "INTERESTED":
+            for rx, act, desc in _SAID:
+                if rx.search(notes or ""):
+                    action, detail, decided_by = act, desc, "call_commitment+notes"
+                    break
+    else:
+        # No commitment: the engine owns this decision.
+        d = evaluate_next_action(lead, db)
+        decided_by = "evaluate_next_action"
+        action = {"SEND": "SEND_INTRO", "DRAFT_ONLY": "DRAFT_FOR_APPROVAL",
+                  "FOUNDER_REVIEW": "FOUNDER_CALL", "ENRICH": "ENRICH",
+                  "WAIT": "WAIT", "NONE": "NONE",
+                  "SUPPRESS": "NONE"}.get(d["action"], d["action"])
+        detail = d["reason"]
+
+    # No try/except around may_send. If the trust gate cannot answer, that is a
+    # bug worth seeing, not a reason to guess — and guessing False would
+    # silently mark every follow-up BLOCKED, while guessing True would queue
+    # sends to addresses nobody vouched for.
+    emailable = may_send(lead)[0]
+
+    # An action needs the channel it rides on to actually be usable. If the call
+    # did not produce one, say so plainly rather than queueing something that
+    # cannot be sent — a queue full of impossible sends is what stalled the send
+    # queue for four hours earlier today.
+    blocked = None
+    if action in ("SEND_CATALOGUE", "SEND_PRICING", "SEND_INTRO") and not emailable:
+        blocked = "no sendable address — get the email before this can go out"
+    elif action == "SEND_WHATSAPP":
+        try:
+            from app.services.whatsapp_sender import consent_check
+            ok, why = consent_check(lead)
+            if not ok:
+                blocked = f"WhatsApp not permitted: {why}"
+        except Exception as e:                       # adapter missing entirely
+            blocked = f"WhatsApp transport unavailable ({e.__class__.__name__})"
+
     return {"action": action, "detail": detail, "blocked": blocked,
-            "requires_approval": action in ("SEND_CATALOGUE", "SEND_PRICING",
-                                            "SEND_SAMPLE", "BOOK_MEETING")}
+            "decided_by": decided_by, "outcome": outcome,
+            "founder_only": action in FOUNDER_ONLY,
+            "requires_approval": action in (
+                "SEND_CATALOGUE", "SEND_PRICING", "SEND_SAMPLE", "SEND_INTRO",
+                "SEND_WHATSAPP", "BOOK_MEETING", "DRAFT_FOR_APPROVAL")}
 
 
 def call_funnel(db, days: int = 14) -> dict:

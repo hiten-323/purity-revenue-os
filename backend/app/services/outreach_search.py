@@ -351,13 +351,38 @@ def apply_call_outcome(db, lead, outcome_key: str, captured: dict | None = None)
         occurred_at=datetime.utcnow()))
     db.commit()
 
-    nxt = set_next_action(db, lead, oc.next_action, oc.delay_days,
-                          reason=f"call outcome {key}")
+    # The next action comes from the one decision authority, not from this
+    # registry. `oc` still supplies the label, guidance and required fields —
+    # presentation — but `oc.next_action` was a second opinion: this module and
+    # phone_intelligence could disagree about what the same call outcome meant,
+    # and whichever ran last silently won.
+    #
+    # If that decision cannot be reached, fall back to the registry rather than
+    # leaving the lead with no next action at all. A lead that drops out of the
+    # founder's queue is the failure mode set_next_action exists to prevent.
+    try:
+        from app.services.phone_intelligence import decide_after_call
+        decided = decide_after_call(lead, db, key, cap, cap.get("remark") or "")
+        action_type, delay = decided["action"], oc.delay_days
+        if action_type in ("NONE", "WAIT"):
+            action_type = None          # terminal / nothing due: queue stays empty
+        reason = f"call outcome {key} -> {decided['decided_by']}"
+        if decided.get("blocked"):
+            reason += f" (blocked: {decided['blocked']})"
+    except Exception as e:
+        action_type, delay = oc.next_action, oc.delay_days
+        reason = (f"call outcome {key} — decision engine unavailable "
+                  f"({e.__class__.__name__}), using registry default")
+
+    nxt = set_next_action(db, lead, action_type, delay, reason=reason)
     missing = [f for f in oc.needs if not cap.get(f)]
     return {
         "outcome": key, "label": oc.label, "guidance": oc.note,
         "interaction_id": i.id, "promoted": promoted,
-        "next_action": oc.next_action, "channel": oc.channel,
+        # The action that was actually queued, not the registry's suggestion —
+        # reporting oc.next_action here would tell the console one thing while
+        # the queue held another.
+        "next_action": action_type, "channel": oc.channel,
         "due_in_days": oc.delay_days, "terminal": oc.terminal,
         "next_action_state": nxt,
         # Surfaced rather than silently ignored: the outcome is recorded either

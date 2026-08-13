@@ -809,6 +809,23 @@ NEXT_ACTIONS = ("SEND", "DRAFT_ONLY", "WAIT", "FOUNDER_REVIEW", "ENRICH",
                 "SUPPRESS", "NONE")
 
 
+# Actions that represent something PROMISED to a buyer and not yet delivered.
+# CALL_AGAIN / WAIT / NONE are not commitments — nobody is waiting on them.
+_OPEN_COMMITMENTS = {
+    "SEND_CATALOGUE", "SEND_PRICING", "SEND_SAMPLE", "SEND_WHATSAPP",
+    "FOUNDER_PRICING", "FOUNDER_CALL", "SCHEDULE_CALLBACK", "BOOK_MEETING",
+    "CALL_DECISION_MAKER",
+}
+
+# Events that discharge a commitment. A later call counts: if the founder spoke
+# to them again, the earlier promise was either honoured or superseded, and
+# either way the newer call's own NEXT_ACTION_SET replaces it.
+_COMMITMENT_FULFILLED = {
+    "EMAIL_SENT", "WHATSAPP_SENT", "SAMPLE_DISPATCHED", "MEETING_HELD",
+    "ORDER_PLACED", "NEXT_ACTION_DONE", "FOUNDER_CALL", "LEAD_DISQUALIFIED",
+}
+
+
 def _gather_facts(lead, db) -> dict:
     """Ask every subsystem what it knows. This function never judges."""
     from datetime import datetime as _dt
@@ -848,6 +865,27 @@ def _gather_facts(lead, db) -> dict:
         e.event_type in ("UNSUBSCRIBED", "DO_NOT_CONTACT", "COMPLAINT")
         or (e.payload or {}).get("next_action") == "SUPPRESS_ACCOUNT"
         for e in evs)
+
+    # An open commitment from a phone call: the buyer asked for something and
+    # it has not been delivered yet. Nothing in trust, sequence or account
+    # state can reveal this — it exists only because a human said it out loud —
+    # so the engine has to be told, or it will happily schedule "touch 2:
+    # nudge" at a buyer who is waiting on the catalogue they asked for.
+    f["commitment"] = None
+    commits = [e for e in evs if e.event_type == "NEXT_ACTION_SET"
+               and (e.payload or {}).get("action") in _OPEN_COMMITMENTS]
+    if commits:
+        last_c = max(commits, key=lambda e: e.occurred_at or _dt.min)
+        done_after = [e for e in evs
+                      if e.event_type in _COMMITMENT_FULFILLED
+                      and (e.occurred_at or _dt.min) > (last_c.occurred_at or _dt.min)]
+        if not done_after:
+            p = last_c.payload or {}
+            f["commitment"] = {"action": p.get("action"),
+                               "detail": p.get("detail"),
+                               "from_outcome": p.get("from_outcome"),
+                               "blocked": p.get("blocked"),
+                               "at": last_c.occurred_at}
 
     try:
         v = D.check_send_allowed(db)
@@ -896,6 +934,26 @@ def evaluate_next_action(lead, db) -> dict:
                          f"(SLA {r['sla_minutes']} min)",
                          r["confidence"] or 60, blockers, f,
                          audit + ["a reply outranks any scheduled touch"])
+
+    # 2b. Something was promised on a call and has not been delivered.
+    #     Ranked directly below a live reply and above everything scheduled:
+    #     a buyer waiting on the catalogue they asked for must never receive
+    #     "touch 2: nudge" instead. Placed before the trust gate on purpose —
+    #     an unsendable address does not cancel the promise, it just means the
+    #     promise is blocked and the founder needs to see why.
+    if f.get("commitment"):
+        c = f["commitment"]
+        audit.append(f"open commitment {c['action']} from call outcome "
+                     f"{c['from_outcome']}")
+        if c.get("blocked"):
+            blockers.append("commitment_blocked")
+            return _decision("FOUNDER_REVIEW",
+                             f"{c['detail']} — blocked: {c['blocked']}",
+                             85, blockers, f,
+                             audit + ["a promise we cannot keep needs a human"])
+        return _decision(c["action"], c["detail"] or "promised on a call", 95,
+                         blockers, f,
+                         audit + ["a commitment outranks any scheduled touch"])
 
     # 3. May this address be used at all?
     if not f["trust"]["may_send"]:
