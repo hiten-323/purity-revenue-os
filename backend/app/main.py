@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.api.endpoints import router as api_router
+from app.api.founder_router import router as founder_router
 from app.database.database import engine, Base, get_db
 import redis
 
@@ -93,6 +94,8 @@ async def startup():
     except Exception as _e:
         print(f"[trust-sweep] skipped: {_e}")
     import app.models.models
+    # Register founder_actions table (model lives in the service module).
+    import app.services.founder_actions  # noqa: F401
     Base.metadata.create_all(bind=engine)
     
     # Run dynamic SQLite migrations for call fields and call_history
@@ -164,12 +167,7 @@ async def startup():
             "contact_searched_at": "DATETIME",
             "maps_rating": "FLOAT",
             "maps_reviews_count": "INTEGER",
-            # Real business type from the Google Maps listing. Discovery used to
-            # stamp division with the SEARCH segment, so a cafe found while
-            # searching "distributor" was filed as a distributor and pitched
-            # distributor margins. These store what the business actually is.
             "maps_types": "VARCHAR",
-            # Contact trust & provenance — see models.py for the states.
             "email_trust": "VARCHAR DEFAULT 'UNKNOWN'",
             "email_source": "VARCHAR",
             "email_collected_at": "DATETIME",
@@ -184,37 +182,12 @@ async def startup():
             "contact_confidence": "INTEGER DEFAULT 0",
             "coffee_buying_score": "INTEGER DEFAULT 0",
             "coffee_buying_evidence": "VARCHAR",
-            # Persisting place_id is what makes the Places Details amenities
-            # queryable at all — without it, serves_breakfast could only ever be
-            # inferred from the category.
             "place_id": "VARCHAR",
             "serves_breakfast": "BOOLEAN",
             "place_details_checked_at": "DATETIME",
-            # Google's operational status. Without this column the
-            # PERMANENTLY_CLOSED disqualifier could never fire — the value was
-            # fetched from Places and thrown away, so a shut-down business kept
-            # a positive score and stayed in the founder's call queue.
             "business_status": "VARCHAR",
-            # Whether Truth Layer evidence has ever been collected for this
-            # lead — a real DB fact, distinct from classification. Without it
-            # "no evidence yet" and "evidence found nothing" were both
-            # indistinguishable from "assessed and rejected" to any caller that
-            # only looked at classification, and the Approval Center briefly
-            # showed 602 unassessed leads as if all were disqualified.
             "evidence_collected_at": "DATETIME",
-            # Explicit intelligence lifecycle, so evaluation progress is a state
-            # the queue can query, not something inferred from a timestamp or a
-            # missing row. NOT_STARTED | COLLECTING | SCORING | COMPLETE |
-            # FAILED. Evaluation (this) and classification (HOT/WARM/COLD/
-            # REJECT) are separate axes: a lead can be COMPLETE+REJECT or
-            # COLLECTING+NULL, and those mean very different things.
             "intelligence_status": "VARCHAR DEFAULT 'NOT_STARTED'",
-            # Provenance for the DERIVED division field. division was being
-            # trusted as fact when for 132 leads it was just a seed default —
-            # "Manokamna Beauty Centre" carried division='distributor' with
-            # empty maps_types and was shielded from disqualification because of
-            # it. Storing where the value came from lets the scorer decide
-            # whether to trust it.
             "division_source": "VARCHAR",
             "division_confidence": "FLOAT DEFAULT 0.25",
             "division_verified": "BOOLEAN DEFAULT 0"
@@ -266,11 +239,7 @@ async def startup():
                 except Exception as e:
                     print(f"Migration Error adding {col} to gov_tenders: {e}")
 
-        # ── vFinal Domain Freeze migrations (additive, real-data-only) ──
-        # New columns for existing tables; the `contacts` table itself is
-        # created by Base.metadata.create_all above. All idempotent.
         _freeze_migrations = {
-            # §4 Company Intelligence on organizations
             "organizations": {
                 "annual_revenue": "FLOAT",
                 "estimated_coffee_consumption_kg": "FLOAT",
@@ -285,7 +254,6 @@ async def startup():
                 "average_order_size": "FLOAT",
                 "payment_behaviour": "VARCHAR",
             },
-            # §5 Opportunity economics on revenue_opportunities
             "revenue_opportunities": {
                 "founder_hours": "FLOAT",
                 "expected_roi": "FLOAT",
@@ -295,7 +263,6 @@ async def startup():
                 "risk_level": "VARCHAR",
                 "commercial_stage": "VARCHAR",
             },
-            # §1/§9 events key off the permanent Opportunity
             "workflow_events": {
                 "opportunity_id": "INTEGER",
             },
@@ -316,9 +283,6 @@ async def startup():
 
         conn.commit()
 
-        # ── V2 Category Migration ──
-        # Cleanly maps old divisions to the 21 standard keys.
-        # Ambiguous categories like 'horeca' and 'education_mess' are marked 'needs_reclassification'.
         cursor.execute("SELECT id, division, company FROM b2b_leads;")
         leads_to_migrate = cursor.fetchall()
         
@@ -336,7 +300,6 @@ async def startup():
         
         for lead_id, old_div, company_name in leads_to_migrate:
             old_div_lower = (old_div or "").lower().strip()
-            # If it's already one of the 21 categories, leave it
             if old_div_lower in (
                 "distributor", "wholesaler", "modern_trade", "supermarket", "grocery_chain",
                 "retail_kirana", "corporate_office", "office_pantry", "manufacturing",
@@ -346,7 +309,6 @@ async def startup():
             ):
                 continue
             
-            # Map old categories
             if old_div_lower in category_map:
                 new_div = category_map[old_div_lower]
             elif old_div_lower in ("horeca", "education_mess"):
@@ -365,14 +327,6 @@ async def startup():
     finally:
         db.close()
 
-    # V1.2 Auto-Warm Engine: continuous background enrichment + first-touch
-    # drafting so every discovered lead warms itself without founder clicks.
-    #
-    # It now runs as its OWN pm2 process (backend/worker.py). In-process it was a
-    # daemon thread whose HTML parsing held the GIL and periodically froze
-    # uvicorn's event loop — even a no-DB endpoint stalled ~1.8s and /b2b/kpis
-    # spiked to 12s, causing random timeouts. Set AUTOWARM_IN_PROCESS=1 only for
-    # local one-off runs without the worker process.
     if os.getenv("AUTOWARM_IN_PROCESS", "0") == "1":
         try:
             from app.api.endpoints import start_auto_warm_worker
@@ -395,6 +349,7 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix="/api/v1")
+app.include_router(founder_router, prefix="/api/v1")
 
 @app.get("/")
 def read_root():
