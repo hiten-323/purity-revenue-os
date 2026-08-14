@@ -1,19 +1,20 @@
 """
 WhatsApp Gateway HTTP endpoints.
 
-POST /webhooks/klaviyo/whatsapp  — accept a send request from Klaviyo (or tests)
-POST /webhooks/aisensy/status    — ingest delivery/read/failed callbacks
+POST /api/v1/webhooks/klaviyo/whatsapp   — Klaviyo → gateway send (auth required in prod)
+POST /api/v1/webhooks/aisensy/status     — AiSensy delivery/read callbacks (auth in prod)
+POST /api/v1/webhooks/sandbox/whatsapp   — isolated mock path; never calls AiSensy
+GET  /api/v1/webhooks/gateway/ledger     — admin-only ledger lookup
 
-These endpoints are NOT wired into any live Klaviyo flow yet.
-They exist so the gateway can be tested end-to-end with mocks first.
+These endpoints are NOT wired into any live Klaviyo flow.
 """
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Optional
+from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -21,8 +22,10 @@ from app.database.database import get_db
 from app.services.whatsapp_gateway.client import AiSensyClient, normalise_msisdn
 from app.services.whatsapp_gateway.consent import check_whatsapp_marketing_consent
 from app.services.whatsapp_gateway.idempotency import IdempotencyLedger
-from app.services.whatsapp_gateway.models import WhatsAppSendRequest
+from app.services.whatsapp_gateway.models import WhatsAppSendLedger, WhatsAppSendRequest
 from app.services.whatsapp_gateway.router import CampaignRouter
+from app.services.whatsapp_gateway.sandbox import run_sandbox_send
+from app.services.whatsapp_gateway.security import require_admin_secret, verify_webhook
 from app.services.whatsapp_gateway.status_processor import StatusNormalizer
 
 logger = logging.getLogger("whatsapp_gateway.api")
@@ -30,28 +33,16 @@ logger = logging.getLogger("whatsapp_gateway.api")
 router = APIRouter(prefix="/webhooks", tags=["whatsapp-gateway"])
 
 
-def _safe_log_extra(**kwargs) -> dict:
-    """Strip anything that could contain secrets before logging."""
-    blocked = {"api_key", "apikey", "authorization", "password", "secret", "token"}
-    return {k: v for k, v in kwargs.items() if k.lower() not in blocked}
+def _headers_dict(request: Request) -> dict[str, str]:
+    return {k: v for k, v in request.headers.items()}
 
 
 def _parse_klaviyo_body(body: dict[str, Any]) -> WhatsAppSendRequest:
-    """
-    Normalise an incoming JSON body into WhatsAppSendRequest.
-
-    Accepts a flexible shape because the final Klaviyo webhook contract is not
-    locked yet. Preferred top-level keys are documented in the response schema.
-    """
-    # Support both flat and nested "data" / "profile" shapes
     data = body.get("data") if isinstance(body.get("data"), dict) else body
     profile = data.get("profile") if isinstance(data.get("profile"), dict) else {}
 
     profile_id = str(
-        data.get("profile_id")
-        or profile.get("id")
-        or body.get("profile_id")
-        or ""
+        data.get("profile_id") or profile.get("id") or body.get("profile_id") or ""
     ).strip()
 
     phone = (
@@ -62,17 +53,11 @@ def _parse_klaviyo_body(body: dict[str, Any]) -> WhatsAppSendRequest:
     )
 
     lifecycle_stage = str(
-        data.get("lifecycle_stage")
-        or data.get("stage")
-        or body.get("lifecycle_stage")
-        or ""
+        data.get("lifecycle_stage") or data.get("stage") or body.get("lifecycle_stage") or ""
     ).strip()
 
     source_event_id = str(
-        data.get("source_event_id")
-        or data.get("event_id")
-        or body.get("source_event_id")
-        or ""
+        data.get("source_event_id") or data.get("event_id") or body.get("source_event_id") or ""
     ).strip()
 
     campaign_name = data.get("campaign_name") or data.get("campaign") or body.get("campaign_name")
@@ -93,7 +78,6 @@ def _parse_klaviyo_body(body: dict[str, Any]) -> WhatsAppSendRequest:
         or data.get("consent")
         or body.get("whatsapp_marketing_consent")
     )
-    # Nested Klaviyo-style subscriptions.whatsapp.marketing.consent
     subs = data.get("subscriptions") or profile.get("subscriptions") or {}
     if isinstance(subs, dict):
         wa = subs.get("whatsapp") or {}
@@ -118,24 +102,22 @@ def _parse_klaviyo_body(body: dict[str, Any]) -> WhatsAppSendRequest:
 
 @router.post("/klaviyo/whatsapp")
 async def klaviyo_whatsapp_send(request: Request, db: Session = Depends(get_db)):
-    """
-    Accept a WhatsApp send request (from Klaviyo webhook or test harness).
+    raw_body = await request.body()
+    auth = verify_webhook(
+        provider="klaviyo",
+        headers=_headers_dict(request),
+        body=raw_body,
+        secret_env_var="KLAVIYO_WEBHOOK_SECRET",
+    )
+    if not auth.allowed:
+        logger.warning("wa_klaviyo_auth_rejected reason=%s mode=%s", auth.reason, auth.mode)
+        return JSONResponse(
+            status_code=401,
+            content={"ok": False, "error": "unauthorized", "detail": auth.reason},
+        )
 
-    Flow:
-      1. Validate required fields
-      2. Consent gate (phone alone is never enough)
-      3. Idempotency claim
-      4. Campaign resolution
-      5. AiSensy send (only if new claim)
-      6. Record result
-
-    Response codes:
-      200 — processed (sent, blocked, or duplicate)
-      400 — malformed request
-      500 — unexpected error
-    """
     try:
-        body = await request.json()
+        body = json.loads(raw_body.decode("utf-8") if raw_body else "{}")
     except Exception:
         return JSONResponse(status_code=400, content={"ok": False, "error": "invalid JSON body"})
 
@@ -154,7 +136,6 @@ async def klaviyo_whatsapp_send(request: Request, db: Session = Depends(get_db))
     ledger = IdempotencyLedger(db)
     router_ = CampaignRouter()
 
-    # --- Consent gate (before any provider call) ---
     decision = check_whatsapp_marketing_consent(req.whatsapp_marketing_consent)
     if not decision.allowed:
         row, is_new = ledger.begin_send(
@@ -214,7 +195,6 @@ async def klaviyo_whatsapp_send(request: Request, db: Session = Depends(get_db))
             },
         )
 
-    # --- Idempotency claim ---
     row, is_new = ledger.begin_send(
         profile_id=req.profile_id,
         phone=phone_norm,
@@ -241,7 +221,6 @@ async def klaviyo_whatsapp_send(request: Request, db: Session = Depends(get_db))
         }
 
     if not is_new and row.status in {"BLOCKED_CONSENT", "BLOCKED_PHONE", "FAILED", "PENDING"}:
-        # Prior attempt blocked or failed — do not auto-retry from this endpoint.
         return {
             "ok": True,
             "action": "already_recorded",
@@ -250,7 +229,6 @@ async def klaviyo_whatsapp_send(request: Request, db: Session = Depends(get_db))
             "error": row.error,
         }
 
-    # --- Provider call ---
     client = AiSensyClient()
     result = client.send(
         campaign_name=campaign,
@@ -282,11 +260,7 @@ async def klaviyo_whatsapp_send(request: Request, db: Session = Depends(get_db))
         }
 
     ledger.mark_failed(row, result.reason)
-    logger.info(
-        "wa_provider_failed key=%s reason=%s",
-        req.idempotency_key,
-        result.reason,
-    )
+    logger.info("wa_provider_failed key=%s reason=%s", req.idempotency_key, result.reason)
     return {
         "ok": True,
         "action": "failed",
@@ -301,25 +275,42 @@ async def aisensy_status_webhook(request: Request, db: Session = Depends(get_db)
     """
     Ingest delivery / read / failed callbacks from AiSensy.
 
-    Payload schema is still UNKNOWN. We normalise best-effort and store the
-    raw payload on the matching ledger row for later schema confirmation.
+    Payload schema is still UNKNOWN. Adaptive normaliser + raw retention.
+    Auth: AISENSY_WEBHOOK_SECRET mandatory in production if set; if unset in
+    production we still reject (fail closed via verify_webhook when secret
+    required). For AiSensy, set AISENSY_WEBHOOK_SECRET once you know how
+    AiSensy signs or shares a secret; until then production should not expose
+    this path publicly without a reverse-proxy shared secret.
     """
+    raw_body = await request.body()
+    auth = verify_webhook(
+        provider="aisensy",
+        headers=_headers_dict(request),
+        body=raw_body,
+        secret_env_var="AISENSY_WEBHOOK_SECRET",
+    )
+    if not auth.allowed:
+        logger.warning("wa_aisensy_auth_rejected reason=%s mode=%s", auth.reason, auth.mode)
+        return JSONResponse(
+            status_code=401,
+            content={"ok": False, "error": "unauthorized", "detail": auth.reason},
+        )
+
     try:
-        body = await request.json()
+        body = json.loads(raw_body.decode("utf-8") if raw_body else "{}")
     except Exception:
-        # Some providers send form-encoded; try raw text.
         try:
-            raw = await request.body()
-            body = raw.decode("utf-8", errors="replace")
+            body = raw_body.decode("utf-8", errors="replace")
         except Exception:
             return JSONResponse(status_code=400, content={"ok": False, "error": "unreadable body"})
 
     normalizer = StatusNormalizer()
     normalised = normalizer.normalise(body)
 
-    raw_for_storage = None
     try:
-        raw_for_storage = json.dumps(body if isinstance(body, dict) else {"raw": str(body)[:4000]})
+        raw_for_storage = json.dumps(
+            body if isinstance(body, dict) else {"raw": str(body)[:4000]}
+        )
     except Exception:
         raw_for_storage = str(body)[:4000]
 
@@ -345,5 +336,97 @@ async def aisensy_status_webhook(request: Request, db: Session = Depends(get_db)
         "ledger_matched": bool(row),
         "ledger_status": row.status if row else None,
         "parse_notes": normalised.parse_notes,
-        "schema_verified": False,  # remains False until real AiSensy payload is confirmed
+        "schema_verified": False,
+    }
+
+
+@router.post("/sandbox/whatsapp")
+async def sandbox_whatsapp_send(request: Request, db: Session = Depends(get_db)):
+    """
+    Isolated test path. Always mocks AiSensy. Never sends a real message.
+
+    Auth uses KLAVIYO_WEBHOOK_SECRET (same as production path) so only callers
+    with the secret can exercise the sandbox on a deployed host.
+    """
+    raw_body = await request.body()
+    auth = verify_webhook(
+        provider="sandbox",
+        headers=_headers_dict(request),
+        body=raw_body,
+        secret_env_var="KLAVIYO_WEBHOOK_SECRET",
+    )
+    if not auth.allowed:
+        return JSONResponse(
+            status_code=401,
+            content={"ok": False, "error": "unauthorized", "detail": auth.reason},
+        )
+
+    try:
+        body = json.loads(raw_body.decode("utf-8") if raw_body else "{}")
+    except Exception:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid JSON body"})
+
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "body must be a JSON object"})
+
+    req = _parse_klaviyo_body(body)
+    result = run_sandbox_send(db, req)
+    return {
+        "ok": result.ok,
+        "action": result.action,
+        "status": result.status,
+        "reason": result.reason,
+        "idempotency_key": result.idempotency_key,
+        "fake_message_id": result.fake_message_id or None,
+        "campaign_name": result.campaign_name,
+        "sandbox": True,
+        "note": "No real WhatsApp message was sent",
+    }
+
+
+@router.get("/gateway/ledger")
+async def gateway_ledger_lookup(
+    request: Request,
+    db: Session = Depends(get_db),
+    idempotency_key: str | None = Query(None),
+    message_id: str | None = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """Admin-only ledger inspection. Never public without GATEWAY_ADMIN_SECRET."""
+    auth = require_admin_secret(_headers_dict(request))
+    if not auth.allowed:
+        return JSONResponse(
+            status_code=401,
+            content={"ok": False, "error": "unauthorized", "detail": auth.reason},
+        )
+
+    q = db.query(WhatsAppSendLedger)
+    if idempotency_key:
+        q = q.filter(WhatsAppSendLedger.idempotency_key == idempotency_key)
+    if message_id:
+        q = q.filter(WhatsAppSendLedger.aisensy_message_id == message_id)
+    rows = q.order_by(WhatsAppSendLedger.id.desc()).limit(limit).all()
+
+    return {
+        "ok": True,
+        "count": len(rows),
+        "rows": [
+            {
+                "idempotency_key": r.idempotency_key,
+                "profile_id": r.profile_id,
+                "lifecycle_stage": r.lifecycle_stage,
+                "campaign_name": r.campaign_name,
+                "status": r.status,
+                "aisensy_message_id": r.aisensy_message_id,
+                "order_id": r.order_id,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "sent_at": r.sent_at.isoformat() if r.sent_at else None,
+                "delivered_at": r.delivered_at.isoformat() if r.delivered_at else None,
+                "read_at": r.read_at.isoformat() if r.read_at else None,
+                "failed_at": r.failed_at.isoformat() if r.failed_at else None,
+                "error": r.error,
+                # phone intentionally omitted from default listing to reduce PII exposure
+            }
+            for r in rows
+        ],
     }
