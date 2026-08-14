@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.api.endpoints import router as api_router
 from app.api.founder_router import router as founder_router
+from app.api.whatsapp_gateway import router as whatsapp_gateway_router
 from app.database.database import engine, Base, get_db
 import redis
 
@@ -80,6 +81,8 @@ async def startup():
     import app.models.models
     import app.services.founder_actions  # noqa: F401
     import app.models.send_proof_fix  # noqa: F401
+    # Register WhatsApp Gateway ledger model so create_all builds the table.
+    import app.services.whatsapp_gateway.models  # noqa: F401
     from app.services.call_outcome_failclosed import install as _install_call_outcome
     _install_call_outcome()
     Base.metadata.create_all(bind=engine)
@@ -288,7 +291,7 @@ async def startup():
                 "retail_kirana", "corporate_office", "office_pantry", "manufacturing",
                 "facility_management", "hotel", "restaurant", "cafe", "hospital",
                 "school", "college", "government", "corporate_gifting", "private_label",
-                "exporter", "institutional_buyer", "needs_reclassification", "unknown"
+                "franchise", "institutional_buyer", "needs_reclassification", "unknown"
             ):
                 continue
 
@@ -333,6 +336,8 @@ app.add_middleware(
 
 app.include_router(api_router, prefix="/api/v1")
 app.include_router(founder_router, prefix="/api/v1")
+# WhatsApp Gateway — Phase 2 (not connected to any live Klaviyo flow yet)
+app.include_router(whatsapp_gateway_router, prefix="/api/v1")
 
 @app.get("/")
 def read_root():
