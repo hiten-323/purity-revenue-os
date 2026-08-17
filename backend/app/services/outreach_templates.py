@@ -12,6 +12,8 @@ previously duplicated in FounderActionEngine.tsx and FounderGrowthHub.tsx.
 
 from __future__ import annotations
 
+import os
+
 SIGNATURE = (
     "\n\nWarm Regards,\nHiten Jain\nFounder | Pure Pantry Provisions\n"
     "📞 +91 90849 58495 | WhatsApp: +91 98555 93323\n"
@@ -27,12 +29,15 @@ def _wa_greet(name: str) -> str:
     return f"Namaste {name} ji" if name else "Namaste"
 
 
-# ── Registry ─────────────────────────────────────────────────────────────────
-# Key = canonical segment. Each entry:
-#   email_subject: str template ({company}, {city})
-#   whatsapp:      callable(name, city) -> str
-#   ai_script:     list of {label, text-template} steps ({name}, {city})
+def _instagram_post() -> str:
+    return (
+        (os.getenv("SOCIAL_INSTAGRAM_POST") or "").strip()
+        or (os.getenv("DOC_INSTAGRAM") or "").strip()
+        or "https://www.instagram.com/p/Db_nFMaAieK/"
+    )
 
+
+# ── Registry ─────────────────────────────────────────────────────────────────
 TEMPLATES: dict[str, dict] = {
     "distributor": {
         "email_subject": "Distribution Partnership — Purity Beans Premium Coffee",
@@ -119,8 +124,8 @@ TEMPLATES: dict[str, dict] = {
     },
     "government": {
         "email_subject": "Coffee Supply Bid | Purity Beans — Pure Pantry Provisions",
-        "whatsapp": lambda n, c: "",   # No WhatsApp for government procurement
-        "ai_script": [],               # No AI cold-calls to government offices
+        "whatsapp": lambda n, c: "",
+        "ai_script": [],
     },
     "wholesale": {
         "email_subject": "Wholesale Coffee Supply — Purity Beans",
@@ -137,7 +142,6 @@ TEMPLATES: dict[str, dict] = {
     },
 }
 
-# Aliases: division/segment values seen in the DB → canonical template key
 SEGMENT_ALIASES = {
     "grocery": "retail",
     "modern_trade": "retail",
@@ -162,23 +166,23 @@ SEGMENT_ALIASES = {
 
 
 def resolve_segment(value: str | None) -> str:
-    """Map any division/segment string from the DB to a canonical template key."""
     v = (value or "corporate").strip().lower()
     if v in TEMPLATES:
         return v
     return SEGMENT_ALIASES.get(v, "corporate")
 
 
-# ── Multi-channel warming ────────────────────────────────────────────────────
-# Full channel set a lead can be warmed through. Order = warming sequence.
-CHANNELS = ["email", "whatsapp", "ai_call", "linkedin", "facebook"]
+CHANNELS = ["email", "whatsapp", "ai_call", "linkedin", "facebook", "instagram"]
 
 CHANNEL_LABELS = {
-    "email": "Email", "whatsapp": "WhatsApp", "ai_call": "AI Call (Hindi)",
-    "linkedin": "LinkedIn", "facebook": "Facebook",
+    "email": "Email",
+    "whatsapp": "WhatsApp",
+    "ai_call": "AI Call (Hindi)",
+    "linkedin": "LinkedIn",
+    "facebook": "Facebook",
+    "instagram": "Instagram",
 }
 
-# Segment value-prop line reused across LinkedIn / Facebook copy — real claims only.
 _SEGMENT_VALUEPROP = {
     "distributor":   "distributor margins of 35-42% on 100% pure instant coffee (zero chicory), with a free sample kit",
     "retail":        "shelf-ready 100% pure instant coffee at 22-28% retail margin, with a free sample pack",
@@ -196,7 +200,6 @@ def _valueprop(segment: str) -> str:
 
 
 def linkedin_message(segment: str, name: str = "", city: str = "") -> str:
-    """Professional LinkedIn connection note (English) — segment-tailored, factual."""
     greeting = f"Hi {name}," if name else "Hello,"
     loc = f" in {city}" if city else ""
     return (
@@ -207,7 +210,6 @@ def linkedin_message(segment: str, name: str = "", city: str = "") -> str:
 
 
 def facebook_message(segment: str, name: str = "", city: str = "") -> str:
-    """Facebook / page DM outreach (English) — segment-tailored, factual."""
     greeting = f"Hi {name}," if name else "Hi there,"
     return (
         f"{greeting} greetings from Purity Beans — 100% pure instant coffee, no chicory, "
@@ -216,8 +218,22 @@ def facebook_message(segment: str, name: str = "", city: str = "") -> str:
     )
 
 
+def instagram_message(segment: str, name: str = "", city: str = "") -> str:
+    """
+    Instagram DM / comment follow-up copy. Links the configured social proof post.
+    Cold Instagram automation is not enabled — founder approves before any send.
+    """
+    greeting = f"Hi {name}," if name else "Hi,"
+    post = _instagram_post()
+    return (
+        f"{greeting} Hiten here from Purity Beans (Pure Pantry Provisions). "
+        f"We offer {_valueprop(segment)}. "
+        f"Here's a recent post if useful: {post} "
+        f"Happy to share catalogue + sample — +91 90849 58495"
+    )
+
+
 def get_templates(segment: str, name: str = "", city: str = "") -> dict:
-    """Return JSON-safe rendered templates for a segment across ALL channels."""
     key = resolve_segment(segment)
     t = TEMPLATES[key]
     return {
@@ -225,16 +241,22 @@ def get_templates(segment: str, name: str = "", city: str = "") -> dict:
         "email_subject": t["email_subject"],
         "whatsapp_message": t["whatsapp"](name, city),
         "ai_script": [
-            {"label": s["label"], "text": s["text"].replace("{name}", name or "aap").replace("{city}", city or "aapke sheher")}
+            {
+                "label": s["label"],
+                "text": s["text"]
+                .replace("{name}", name or "aap")
+                .replace("{city}", city or "aapke sheher"),
+            }
             for s in t["ai_script"]
         ],
         "linkedin_message": linkedin_message(key, name, city),
         "facebook_message": facebook_message(key, name, city),
+        "instagram_message": instagram_message(key, name, city),
+        "instagram_post": _instagram_post(),
     }
 
 
 def channel_default_text(segment: str, channel: str) -> str:
-    """A representative script for a segment×channel — used by the approval UI."""
     key = resolve_segment(segment)
     t = TEMPLATES[key]
     if channel == "email":
@@ -254,11 +276,12 @@ def channel_default_text(segment: str, channel: str) -> str:
         return linkedin_message(key, "", "")
     if channel == "facebook":
         return facebook_message(key, "", "")
+    if channel == "instagram":
+        return instagram_message(key, "", "")
     return ""
 
 
 def whatsapp_for_lead(lead) -> str:
-    """Render the segment-appropriate WhatsApp intro message for a lead."""
     key = resolve_segment(lead.division or lead.segment)
     name = (lead.contact_name or "").split()[0] if lead.contact_name else ""
     return TEMPLATES[key]["whatsapp"](name, lead.city or "")
