@@ -439,9 +439,28 @@ def mi_evaluate(db, sku_id: int, channel: str, date: Optional[str] = None) -> di
     evidence: list[str] = []
     confidence = 40
 
-    if m.source_status == "NOT_CONNECTED" or (
-        m.missing_feeds and len(m.missing_feeds) >= 3 and m.units is None and m.osa_pct is None
-    ):
+    # DATA_GAP only when commercial signals are absent. Missing SOV/ads alone
+    # must not suppress a known OSA — otherwise sales+availability always
+    # becomes FIX_DATA and the hierarchy never reaches OSA_LOW.
+    has_commercial_signal = any(
+        v is not None
+        for v in (
+            m.osa_pct,
+            m.units,
+            m.price_gap_inr,
+            m.sov_delta_pct,
+            m.tacos_delta_pct,
+        )
+    )
+    hard_data_gap = m.source_status == "NOT_CONNECTED" and not has_commercial_signal
+    soft_data_gap = (
+        bool(m.missing_feeds)
+        and len(m.missing_feeds) >= 3
+        and m.units is None
+        and m.osa_pct is None
+    )
+
+    if hard_data_gap or soft_data_gap:
         primary = "DATA_GAP"
         action = "FIX_DATA"
         blockers.append("DATA_GAP")
@@ -452,6 +471,12 @@ def mi_evaluate(db, sku_id: int, channel: str, date: Optional[str] = None) -> di
         confidence = 95
         audit.append("DATA_GAP outranks every commercial hypothesis")
     else:
+        if m.source_status == "NOT_CONNECTED" and has_commercial_signal:
+            audit.append(
+                "source_status=NOT_CONNECTED but commercial signals present — "
+                "evaluate hierarchy on known metrics; missing feeds stay NULL"
+            )
+
         if m.osa_pct is not None and m.osa_pct < OSA_HEALTHY:
             primary = "OSA_LOW"
             action = "RESTORE_OSA_ABOVE_95"
@@ -568,21 +593,8 @@ def mi_evaluate(db, sku_id: int, channel: str, date: Optional[str] = None) -> di
     if action not in ("NONE",):
         # One OPEN proposal per (sku, channel, date).
         #
-        # This used to append unconditionally, so every call added a row: five
-        # evaluations of one SKU/date produced five identical proposals, and a
-        # scheduled evaluate_all_active would bury the founder in repeats of a
-        # single decision. The queue it feeds is the founder's whole interface
-        # to this system, so duplicates there are not cosmetic.
-        #
-        # Unchanged decision  -> refresh the evidence on the existing row and
-        #                        return its id. Re-evaluating is then free.
-        # Changed decision    -> mark the old row SUPERSEDED and open a new one,
-        #                        so the change stays inspectable rather than
-        #                        being overwritten. Same principle as
-        #                        founder_actions: history is appended, not
-        #                        edited.
-        # Either way exactly one FOUNDER_REVIEW row is open, which is what
-        # pending_founder_reviews filters on.
+        # Unchanged decision  -> refresh evidence on the existing row.
+        # Changed decision    -> SUPERSEDE old, open new (history preserved).
         existing = (
             db.query(MiRecommendation)
             .filter(
@@ -609,8 +621,6 @@ def mi_evaluate(db, sku_id: int, channel: str, date: Optional[str] = None) -> di
             keep.metrics_snapshot = metrics
             keep.blockers = blockers
             keep.audit = audit
-            # Any other open row for this key is a duplicate from before this
-            # fix, or a decision that has now converged on this one.
             for dupe in existing:
                 if dupe.id != keep.id:
                     dupe.status = "SUPERSEDED"
