@@ -67,7 +67,12 @@ module.exports = {
         SENDER_NAME: "Hiten Jain | Pure Pantry Provisions",
         ZOHO_APP_PASSWORD: need("ZOHO_APP_PASSWORD"),
         CEREBRAS_API_KEY: need("CEREBRAS_API_KEY"),
-        SHOPIFY_STORE: "purepantryprovisions.myshopify.com",
+        // The .myshopify.com domain, NOT the custom domain. Verified against the
+        // Admin API: purepantryprovisions.myshopify.com returns 404 on every API
+        // version, 55hd0v-ff.myshopify.com returns 200 with shop id 71263158459.
+        // The token was always valid; every Shopify call was hitting a store
+        // that does not exist.
+        SHOPIFY_STORE: "55hd0v-ff.myshopify.com",
         SHOPIFY_TOKEN: need("SHOPIFY_TOKEN"),
         GOOGLE_MAPS_API_KEY: need("GOOGLE_MAPS_API_KEY"),
       },
