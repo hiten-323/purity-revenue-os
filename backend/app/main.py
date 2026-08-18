@@ -17,6 +17,7 @@ from sqlalchemy import text
 from app.api.endpoints import router as api_router
 from app.api.founder_router import router as founder_router
 from app.api.whatsapp_gateway import router as whatsapp_gateway_router
+from app.api.marketplace_router import router as marketplace_router
 from app.database.database import engine, Base, get_db
 import redis
 
@@ -81,11 +82,23 @@ async def startup():
     import app.models.models
     import app.services.founder_actions  # noqa: F401
     import app.models.send_proof_fix  # noqa: F401
-    # Register WhatsApp Gateway ledger model so create_all builds the table.
     import app.services.whatsapp_gateway.models  # noqa: F401
+    import app.models.marketplace_intel  # noqa: F401
     from app.services.call_outcome_failclosed import install as _install_call_outcome
     _install_call_outcome()
     Base.metadata.create_all(bind=engine)
+
+    try:
+        from app.database.database import SessionLocal as _SeedSession
+        from app.services import marketplace_intel as _mi
+        _sdb = _SeedSession()
+        try:
+            _seed = _mi.seed_skus(_sdb)
+            print(f"[marketplace-intel] sku seed: {_seed}")
+        finally:
+            _sdb.close()
+    except Exception as _se:
+        print(f"[marketplace-intel] seed skipped: {_se}")
 
     from app.database.database import SessionLocal
     db = SessionLocal()
@@ -336,8 +349,8 @@ app.add_middleware(
 
 app.include_router(api_router, prefix="/api/v1")
 app.include_router(founder_router, prefix="/api/v1")
-# WhatsApp Gateway — Phase 2 (not connected to any live Klaviyo flow yet)
 app.include_router(whatsapp_gateway_router, prefix="/api/v1")
+app.include_router(marketplace_router, prefix="/api/v1")
 
 @app.get("/")
 def read_root():
