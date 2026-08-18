@@ -8,7 +8,6 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-import uuid
 from datetime import datetime
 from unittest.mock import patch
 
@@ -52,10 +51,12 @@ def isolated_db():
     Base.metadata.create_all(bind=engine)
     db = sessionmaker(bind=engine)()
 
-    # Unique per test as well as per database. Isolation alone is enough today;
-    # this keeps the suite green if shared state is ever reintroduced.
-    lead = B2BLead(company=f"DRYRUN Gate Co {uuid.uuid4().hex[:8]}",
-                   phone="9876543210", status="DISCOVERED")
+    # Deliberately a FIXED name. A uuid suffix would keep the suite green even
+    # if the isolation regressed, hiding the exact defect this fixture was
+    # rewritten to fix. If two tests ever collide on UNIQUE(company) again,
+    # that is the isolation breaking and the suite should say so loudly.
+    lead = B2BLead(company="DRYRUN Gate Co", phone="9876543210",
+                   status="DISCOVERED")
     db.add(lead)
     db.commit()
     db.refresh(lead)
