@@ -5,6 +5,10 @@ Key: profile_id + lifecycle_stage + source_event_id
 
 Uses the repository's existing SQLAlchemy session pattern.
 Unique constraint on idempotency_key makes concurrent duplicates safe.
+
+On SQLite, writers are further serialized with BEGIN IMMEDIATE so the
+check-then-insert path cannot invent multiple is_new=True winners under
+thread contention.
 """
 from __future__ import annotations
 
@@ -12,7 +16,8 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.services.whatsapp_gateway.models import WhatsAppSendLedger
@@ -25,6 +30,9 @@ TERMINAL_SENT_STATUSES = {
     "READ",
 }
 
+# How many times to re-read after losing a unique-key race.
+_CLAIM_RETRIES = 3
+
 
 class IdempotencyLedger:
     def __init__(self, db: Session):
@@ -36,6 +44,24 @@ class IdempotencyLedger:
             .filter(WhatsAppSendLedger.idempotency_key == idempotency_key)
             .first()
         )
+
+    def _begin_immediate(self) -> None:
+        """
+        Take a reserved write lock on SQLite before check+insert.
+
+        Without this, concurrent sessions can all pass get_by_key() before any
+        commit, rely solely on UNIQUE, and then hit connection/session state
+        races on IntegrityError recovery. BEGIN IMMEDIATE serializes writers.
+        On non-SQLite backends this is a no-op if the dialect rejects it.
+        """
+        bind = self.db.get_bind()
+        if bind is None or bind.dialect.name != "sqlite":
+            return
+        try:
+            self.db.execute(text("BEGIN IMMEDIATE"))
+        except OperationalError:
+            # Already inside a transaction — keep going under current lock.
+            pass
 
     def begin_send(
         self,
@@ -55,35 +81,73 @@ class IdempotencyLedger:
             (row, is_new)
             is_new=False means a prior row already exists — caller must NOT send again
             if that row is already in a sent/terminal state.
+
+        Under concurrent identical keys, exactly one caller gets is_new=True.
         """
         key = f"{profile_id}|{lifecycle_stage}|{source_event_id}"
+
+        last_err: Exception | None = None
+        for attempt in range(_CLAIM_RETRIES):
+            try:
+                self._begin_immediate()
+
+                existing = self.get_by_key(key)
+                if existing is not None:
+                    return existing, False
+
+                row = WhatsAppSendLedger(
+                    profile_id=profile_id,
+                    phone=phone,
+                    lifecycle_stage=lifecycle_stage,
+                    campaign_name=campaign_name,
+                    source_event_id=source_event_id,
+                    order_id=order_id,
+                    idempotency_key=key,
+                    status=initial_status,
+                    created_at=datetime.utcnow(),
+                )
+                self.db.add(row)
+                self.db.commit()
+                self.db.refresh(row)
+                return row, True
+
+            except IntegrityError as exc:
+                # Lost the unique-key race. Drop failed state and re-read winner.
+                last_err = exc
+                self.db.rollback()
+                self.db.expire_all()
+                existing = self.get_by_key(key)
+                if existing is not None:
+                    return existing, False
+                # Winner not visible yet — retry under a fresh IMMEDIATE lock.
+                logger.debug(
+                    "idempotency claim retry %s/%s for key=%s",
+                    attempt + 1,
+                    _CLAIM_RETRIES,
+                    key,
+                )
+                continue
+
+            except OperationalError as exc:
+                # busy/locked — rollback and retry
+                last_err = exc
+                try:
+                    self.db.rollback()
+                except Exception:
+                    pass
+                self.db.expire_all()
+                existing = self.get_by_key(key)
+                if existing is not None:
+                    return existing, False
+                continue
+
+        # Final visibility check before failing closed.
         existing = self.get_by_key(key)
         if existing is not None:
             return existing, False
-
-        row = WhatsAppSendLedger(
-            profile_id=profile_id,
-            phone=phone,
-            lifecycle_stage=lifecycle_stage,
-            campaign_name=campaign_name,
-            source_event_id=source_event_id,
-            order_id=order_id,
-            idempotency_key=key,
-            status=initial_status,
-            created_at=datetime.utcnow(),
-        )
-        self.db.add(row)
-        try:
-            self.db.commit()
-            self.db.refresh(row)
-            return row, True
-        except IntegrityError:
-            # Concurrent insert won the race.
-            self.db.rollback()
-            existing = self.get_by_key(key)
-            if existing is None:
-                raise
-            return existing, False
+        raise RuntimeError(
+            f"idempotency claim failed for key={key!r} after {_CLAIM_RETRIES} attempts"
+        ) from last_err
 
     def mark_blocked(self, row: WhatsAppSendLedger, status: str, error: str) -> WhatsAppSendLedger:
         row.status = status
