@@ -8,13 +8,17 @@ import hashlib
 import hmac
 import os
 import sys
+import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.orm import sessionmaker
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.services.whatsapp_gateway.security import is_production, require_admin_secret, verify_webhook
+from app.services.whatsapp_gateway.security import require_admin_secret, verify_webhook
 from app.services.whatsapp_gateway.sandbox import run_sandbox_send
 from app.services.whatsapp_gateway.models import WhatsAppSendRequest
 from app.services.whatsapp_gateway.idempotency import IdempotencyLedger
@@ -154,30 +158,51 @@ class SecurityTests(unittest.TestCase):
 
 
 class ConcurrentIdempotencyTests(unittest.TestCase):
+    """
+    File-backed SQLite + WAL + busy_timeout so 8 threads share one DB without
+    the closed-connection / separate-memory races of :memory: URIs.
+    """
+
     def setUp(self):
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import sessionmaker
         from app.database.database import Base
 
-        # file-based sqlite so connections from threads share the same DB
+        fd, self._db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+
         self.engine = create_engine(
-            "sqlite:///file:wa_gateway_concurrent?mode=memory&cache=shared",
-            connect_args={"check_same_thread": False, "uri": True},
+            f"sqlite:///{self._db_path}",
+            connect_args={"check_same_thread": False, "timeout": 30},
         )
+
+        @event.listens_for(self.engine, "connect")
+        def _pragma(dbapi_conn, _connection_record):
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA busy_timeout=30000")
+            cur.close()
+
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
 
     def tearDown(self):
         self.engine.dispose()
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.unlink(self._db_path + suffix)
+            except OSError:
+                pass
 
     def test_concurrent_claims_only_one_new(self):
-        results = []
+        results: list[bool] = []
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(8)
 
         def claim():
             db = self.Session()
             try:
+                barrier.wait(timeout=10)
                 ledger = IdempotencyLedger(db)
-                row, is_new = ledger.begin_send(
+                _row, is_new = ledger.begin_send(
                     profile_id="p-concurrent",
                     phone="919084958495",
                     lifecycle_stage="CHECKOUT",
@@ -186,6 +211,9 @@ class ConcurrentIdempotencyTests(unittest.TestCase):
                 )
                 results.append(is_new)
                 return is_new
+            except BaseException as exc:
+                errors.append(exc)
+                raise
             finally:
                 db.close()
 
@@ -194,14 +222,31 @@ class ConcurrentIdempotencyTests(unittest.TestCase):
             for f in as_completed(futures):
                 f.result()
 
-        self.assertEqual(sum(1 for x in results if x), 1)
-        self.assertEqual(sum(1 for x in results if not x), 7)
+        self.assertEqual(errors, [], msg=f"claim raised: {errors!r}")
+        self.assertEqual(len(results), 8)
+        self.assertEqual(sum(1 for x in results if x is True), 1)
+        self.assertEqual(sum(1 for x in results if x is False), 7)
+
+        # Single row persisted under the shared key.
+        db = self.Session()
+        try:
+            ledger = IdempotencyLedger(db)
+            row = ledger.get_by_key("p-concurrent|CHECKOUT|evt-concurrent-1")
+            self.assertIsNotNone(row)
+            count = db.execute(
+                text(
+                    "SELECT COUNT(*) FROM whatsapp_send_ledger "
+                    "WHERE idempotency_key = :k"
+                ),
+                {"k": "p-concurrent|CHECKOUT|evt-concurrent-1"},
+            ).scalar()
+            self.assertEqual(count, 1)
+        finally:
+            db.close()
 
 
 class SandboxTests(unittest.TestCase):
     def setUp(self):
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import sessionmaker
         from app.database.database import Base
 
         self.engine = create_engine("sqlite:///:memory:")
@@ -211,6 +256,7 @@ class SandboxTests(unittest.TestCase):
 
     def tearDown(self):
         self.db.close()
+        self.engine.dispose()
 
     def _req(self, **kwargs):
         defaults = dict(
