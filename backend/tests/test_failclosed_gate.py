@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import uuid
 from datetime import datetime
 from unittest.mock import patch
 
@@ -15,27 +16,46 @@ import pytest
 
 
 @pytest.fixture()
-def isolated_db(monkeypatch):
+def isolated_db():
+    """
+    A genuinely isolated database.
+
+    The previous version called monkeypatch.setenv("DATABASE_URL", ...) and then
+    imported SessionLocal. app.database.database reads DATABASE_URL at import
+    time, so by the time a test runs the module is already bound to the repo
+    database and the patch does nothing. Every test then inserted the same
+    company into one shared, persistent database and the second one died on
+    UNIQUE(b2b_leads.company) — so at most one fixture-based test could ever
+    pass, on any machine.
+
+    Binding an engine to the temp file directly is what makes the docstring's
+    promise ("never touch production data") true. The listeners still fire:
+    they are registered on the mapper, not the engine, and the strict
+    send-proof listener reads through the insert's own connection.
+    """
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{path}")
 
-    # Re-import path: database module may already be loaded with another URL.
-    # For unit isolation we still exercise the listeners on whatever engine
-    # SessionLocal is bound to; prefer a fresh process via the script for
-    # the hard gate. Here we assert contracts when imports succeed.
     backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if backend not in sys.path:
         sys.path.insert(0, backend)
 
-    from app.database.database import SessionLocal, engine, Base
-    import app.models.models  # noqa: F401
-    import app.models.send_proof_fix  # noqa: F401
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.database.database import Base
+    import app.models.models  # noqa: F401  registers mappers
+    import app.models.send_proof_fix  # noqa: F401  registers the strict listener
     from app.models.models import B2BLead, WorkflowEvent, ActionQueue
 
+    engine = create_engine(f"sqlite:///{path}")
     Base.metadata.create_all(bind=engine)
-    db = SessionLocal()
-    lead = B2BLead(company="DRYRUN Gate Co", phone="9876543210", status="DISCOVERED")
+    db = sessionmaker(bind=engine)()
+
+    # Unique per test as well as per database. Isolation alone is enough today;
+    # this keeps the suite green if shared state is ever reintroduced.
+    lead = B2BLead(company=f"DRYRUN Gate Co {uuid.uuid4().hex[:8]}",
+                   phone="9876543210", status="DISCOVERED")
     db.add(lead)
     db.commit()
     db.refresh(lead)
@@ -43,6 +63,7 @@ def isolated_db(monkeypatch):
     yield db, lead, WorkflowEvent, ActionQueue
 
     db.close()
+    engine.dispose()          # Windows keeps the file locked without this
     try:
         os.unlink(path)
     except OSError:

@@ -1,10 +1,50 @@
 """V3 acceptance tests — real API, real DB, cleaned up after."""
 import sys, httpx
-sys.path.insert(0, r"C:\Users\hiten\Desktop\ppp\claude\CODE\purity_beans_ai\jules_session\backend")
+import os
+_EXPECT_TREE = os.getenv(
+    "V3_TREE",
+    r"C:\Users\hiten\Desktop\ppp\claude\CODE\purity_beans_ai\jules_session\backend")
+sys.path.insert(0, _EXPECT_TREE)
+
+# Python caches modules: if another suite in this pytest session already
+# imported `app` from a different tree, the sys.path.insert above is silently
+# ignored and this file binds to THAT tree while still talking to the API
+# serving this one — it creates a lead through the API and cannot find it
+# locally. Verified: `first is second` is True across a path change.
+# Refuse to run against the wrong tree rather than report a misleading failure.
+import app.database.database as _dbmod
+if not os.path.abspath(_dbmod.__file__).startswith(os.path.abspath(_EXPECT_TREE)):
+    import pytest
+    pytest.skip(
+        f"app already loaded from {os.path.dirname(_dbmod.__file__)}, not the "
+        f"tree this suite targets. Run it in its own process: "
+        f"python tests/test_outreach_v3_acceptance.py",
+        allow_module_level=True)
 from app.database.database import SessionLocal
 from app.models.models import B2BLead, ActionQueue, LeadInteraction, WorkflowEvent
 
-B = "http://127.0.0.1:8001/api/v1"
+# Integration suite against a LIVE server. sys.path above deliberately points
+# at the deployed tree, because this file's database MUST be the same one the
+# API is serving — repointing the path at this repo while the API still runs
+# jules_session makes it create a lead through the API and then fail to find it
+# locally. Repoint both together at deploy time, never one alone.
+#
+# Port is overridable: the API has run on 8001 and 8003, and a hardcoded port
+# turns "server on another port" into a hard failure.
+import os
+B = os.getenv("API_BASE", "http://127.0.0.1:8003/api/v1")
+
+# Module-level code runs at IMPORT, so any failure here aborts pytest collection
+# for the whole directory — one unreachable server took down every other suite.
+# Skipping is the honest outcome: not run, not passed.
+try:
+    import httpx as _h
+    _h.get(f"{B}/health", timeout=5).raise_for_status()
+except Exception as _e:
+    import pytest
+    pytest.skip(f"live API not reachable at {B} ({_e.__class__.__name__}) — "
+                "integration suite skipped", allow_module_level=True)
+
 db = SessionLocal()
 res = []
 

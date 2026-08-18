@@ -149,4 +149,14 @@ else:
 db.close(); eng.dispose()
 try: os.unlink(path)
 except OSError: pass
-sys.exit(1 if fails else 0)
+# Runnable two ways. As a script it exits non-zero on failure, which the
+# pre-rotation gate relies on. Under pytest, a bare sys.exit() at module scope
+# raises SystemExit during collection and aborts the whole run with
+# INTERNALERROR, taking every other suite with it — so the exit is guarded and
+# the result is re-exposed as a real test.
+def test_all_checks_passed():
+    assert not fails, f"{len(fails)} failed: {fails}"
+
+
+if __name__ == "__main__":
+    sys.exit(1 if fails else 0)
