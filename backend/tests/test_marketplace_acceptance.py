@@ -176,16 +176,14 @@ def test_reevaluating_never_manufactures_consent(mi_db):
     print("\n  re-evaluate x3: founder_actions=0, all still FOUNDER_REVIEW")
 
 
-@pytest.mark.xfail(
-    reason="mi_evaluate appends a new mi_recommendation on every call: 5 "
-           "evaluations of one SKU/channel/date produce 5 identical proposals. "
-           "A scheduled evaluate_all_active would flood the founder's review "
-           "queue with duplicates of the same decision. Not a safety defect "
-           "(nothing executes, status stays FOUNDER_REVIEW) but it makes the "
-           "queue unusable. Fix: upsert on (sku_id, channel, date), or "
-           "supersede the previous open proposal.",
-    strict=False)
 def test_one_open_recommendation_per_sku_channel_date(mi_db):
+    """
+    Re-evaluating must not grow the founder's queue.
+
+    mi_evaluate used to append a row on every call, so five evaluations of one
+    SKU/channel/date produced five identical open proposals and a scheduled
+    evaluate_all_active would bury the founder in repeats of one decision.
+    """
     db, mi = mi_db
     from app.models.marketplace_intel import MiRecommendation, SkuChannelMap
     sku = _sku(db, mi)
@@ -195,14 +193,56 @@ def test_one_open_recommendation_per_sku_channel_date(mi_db):
     cm.status = "ACTIVE"
     db.commit()
 
+    ids = []
     for _ in range(5):
-        mi.mi_evaluate(db, sku.id, CHANNEL, DATE)
+        r = mi.mi_evaluate(db, sku.id, CHANNEL, DATE)
+        if r.get("recommendation_id"):
+            ids.append(r["recommendation_id"])
 
-    rows = db.query(MiRecommendation).filter(
+    open_rows = db.query(MiRecommendation).filter(
         MiRecommendation.sku_id == sku.id,
         MiRecommendation.channel == CHANNEL,
         MiRecommendation.date == DATE,
         MiRecommendation.status == "FOUNDER_REVIEW").all()
-    assert len(rows) == 1, (
-        f"{len(rows)} open proposals for one SKU/channel/date — the founder "
-        f"would see the same decision {len(rows)} times")
+    assert len(open_rows) == 1, (
+        f"{len(open_rows)} open proposals for one SKU/channel/date — the "
+        f"founder would see the same decision {len(open_rows)} times")
+
+    # The same row is reused, so the id is stable across evaluations.
+    assert len(set(ids)) == 1, f"recommendation id churned across runs: {ids}"
+
+    # And the queue the founder reads shows it once.
+    pend = mi.pending_founder_reviews(db)
+    assert pend["pending_count"] == 1, pend["pending_count"]
+    print(f"\n  5 evaluations -> {len(open_rows)} open proposal, " f"stable id={ids[0]}, queue shows {pend['pending_count']}")
+
+
+def test_changed_decision_supersedes_rather_than_overwrites(mi_db):
+    """A changed decision must stay inspectable, not silently replace the old."""
+    db, mi = mi_db
+    from app.models.marketplace_intel import MiRecommendation, SkuChannelMap
+    sku = _sku(db, mi)
+    cm = (db.query(SkuChannelMap)
+          .filter(SkuChannelMap.sku_id == sku.id,
+                  SkuChannelMap.channel == CHANNEL).first())
+    cm.status = "ACTIVE"
+    db.commit()
+
+    mi.mi_evaluate(db, sku.id, CHANNEL, DATE)
+    first = db.query(MiRecommendation).filter(
+        MiRecommendation.status == "FOUNDER_REVIEW").one()
+
+    # Force a different decision on the same key.
+    first.recommended_action = "SOMETHING_ELSE"
+    first.primary_diagnosis = "OTHER_DIAGNOSIS"
+    db.commit()
+
+    mi.mi_evaluate(db, sku.id, CHANNEL, DATE)
+
+    open_rows = db.query(MiRecommendation).filter(
+        MiRecommendation.status == "FOUNDER_REVIEW").all()
+    superseded = db.query(MiRecommendation).filter(
+        MiRecommendation.status == "SUPERSEDED").all()
+    assert len(open_rows) == 1, f"{len(open_rows)} open after a changed decision"
+    assert len(superseded) == 1, "the previous proposal was overwritten, not superseded"
+    print(f"\n  changed decision -> 1 open, {len(superseded)} superseded " f"(history preserved)")

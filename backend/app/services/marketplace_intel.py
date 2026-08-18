@@ -566,23 +566,80 @@ def mi_evaluate(db, sku_id: int, channel: str, date: Optional[str] = None) -> di
     }
 
     if action not in ("NONE",):
-        rec = MiRecommendation(
-            sku_id=sku_id,
-            channel=channel,
-            date=date,
-            primary_diagnosis=primary or "DATA_GAP",
-            secondary_diagnosis=secondary,
-            recommended_action=action,
-            status="FOUNDER_REVIEW",
-            confidence=confidence,
-            evidence=evidence,
-            metrics_snapshot=metrics,
-            blockers=blockers,
-            audit=audit,
+        # One OPEN proposal per (sku, channel, date).
+        #
+        # This used to append unconditionally, so every call added a row: five
+        # evaluations of one SKU/date produced five identical proposals, and a
+        # scheduled evaluate_all_active would bury the founder in repeats of a
+        # single decision. The queue it feeds is the founder's whole interface
+        # to this system, so duplicates there are not cosmetic.
+        #
+        # Unchanged decision  -> refresh the evidence on the existing row and
+        #                        return its id. Re-evaluating is then free.
+        # Changed decision    -> mark the old row SUPERSEDED and open a new one,
+        #                        so the change stays inspectable rather than
+        #                        being overwritten. Same principle as
+        #                        founder_actions: history is appended, not
+        #                        edited.
+        # Either way exactly one FOUNDER_REVIEW row is open, which is what
+        # pending_founder_reviews filters on.
+        existing = (
+            db.query(MiRecommendation)
+            .filter(
+                MiRecommendation.sku_id == sku_id,
+                MiRecommendation.channel == channel,
+                MiRecommendation.date == date,
+                MiRecommendation.status == "FOUNDER_REVIEW",
+            )
+            .order_by(MiRecommendation.created_at.desc())
+            .all()
         )
-        db.add(rec)
-        db.commit()
-        result["recommendation_id"] = rec.id
+
+        same = [
+            r for r in existing
+            if r.recommended_action == action
+            and (r.primary_diagnosis or "") == (primary or "DATA_GAP")
+        ]
+
+        if same:
+            keep = same[0]
+            keep.confidence = confidence
+            keep.secondary_diagnosis = secondary
+            keep.evidence = evidence
+            keep.metrics_snapshot = metrics
+            keep.blockers = blockers
+            keep.audit = audit
+            # Any other open row for this key is a duplicate from before this
+            # fix, or a decision that has now converged on this one.
+            for dupe in existing:
+                if dupe.id != keep.id:
+                    dupe.status = "SUPERSEDED"
+            db.commit()
+            result["recommendation_id"] = keep.id
+            result["recommendation_reused"] = True
+        else:
+            for stale in existing:
+                stale.status = "SUPERSEDED"
+            rec = MiRecommendation(
+                sku_id=sku_id,
+                channel=channel,
+                date=date,
+                primary_diagnosis=primary or "DATA_GAP",
+                secondary_diagnosis=secondary,
+                recommended_action=action,
+                status="FOUNDER_REVIEW",
+                confidence=confidence,
+                evidence=evidence,
+                metrics_snapshot=metrics,
+                blockers=blockers,
+                audit=audit,
+            )
+            db.add(rec)
+            db.commit()
+            result["recommendation_id"] = rec.id
+            result["recommendation_reused"] = False
+            if existing:
+                result["superseded"] = [r.id for r in existing]
 
     return result
 
