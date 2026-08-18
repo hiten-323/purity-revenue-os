@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -29,6 +29,7 @@ if _BACKEND not in sys.path:
 CHANNEL = "amazon"
 SKU_CODE = "PURISTA_50G"
 DATE = "2026-08-18"
+PREV = "2026-08-11"  # 7 days earlier — sales_delta baseline
 
 
 @pytest.fixture()
@@ -66,6 +67,16 @@ def _sku(db, mi):
     return db.query(SkuMaster).filter(SkuMaster.sku_code == SKU_CODE).first()
 
 
+def _activate_amazon(db, sku):
+    from app.models.marketplace_intel import SkuChannelMap
+    cm = (db.query(SkuChannelMap)
+          .filter(SkuChannelMap.sku_id == sku.id,
+                  SkuChannelMap.channel == CHANNEL).first())
+    cm.status, cm.channel_sku_id = "ACTIVE", "B0TESTASIN"
+    db.commit()
+    return cm
+
+
 def test_seed_creates_the_sku_and_channel_map(mi_db):
     db, mi = mi_db
     from app.models.marketplace_intel import SkuChannelMap
@@ -82,20 +93,12 @@ def test_full_pipeline_ends_in_founder_review_with_zero_execution(mi_db):
     db, mi = mi_db
     from app.models.marketplace_intel import (
         FpSalesDaily, FpAdsDaily, MiPriceSnapshot, MiAvailability,
-        MiMetricDaily, MiRecommendation, SkuChannelMap)
+        MiMetricDaily, MiRecommendation)
 
     sku = _sku(db, mi)
-
-    # Make the channel live, otherwise the SKU is NOT_LISTED on amazon.
-    cm = (db.query(SkuChannelMap)
-          .filter(SkuChannelMap.sku_id == sku.id,
-                  SkuChannelMap.channel == CHANNEL).first())
-    cm.status, cm.channel_sku_id = "ACTIVE", "B0TESTASIN"
-    db.commit()
+    _activate_amazon(db, sku)
 
     # ---- ingest -------------------------------------------------------
-    # Deliberately unhealthy: ad spend far above ad sales, and a competitor
-    # priced below us. A pipeline that returns NONE here proves nothing.
     db.add(FpSalesDaily(date=DATE, channel=CHANNEL, sku_id=sku.id,
                         units=12, gmv_inr=4188.0, net_revenue_inr=3400.0,
                         returns_units=1, source="manual_csv"))
@@ -110,7 +113,6 @@ def test_full_pipeline_ends_in_founder_review_with_zero_execution(mi_db):
     db.commit()
     print(f"\n  ingest: sales + ads + price + availability for {SKU_CODE}")
 
-    # ---- metrics ------------------------------------------------------
     m = mi.recompute_metrics(db, sku.id, CHANNEL, DATE)
     assert isinstance(m, MiMetricDaily)
     stored = (db.query(MiMetricDaily)
@@ -118,9 +120,7 @@ def test_full_pipeline_ends_in_founder_review_with_zero_execution(mi_db):
                       MiMetricDaily.channel == CHANNEL,
                       MiMetricDaily.date == DATE).all())
     assert len(stored) == 1, f"expected 1 metric row, got {len(stored)}"
-    print(f"  metrics: 1 row for {DATE}")
 
-    # ---- evaluate -----------------------------------------------------
     res = mi.mi_evaluate(db, sku.id, CHANNEL, DATE)
     assert isinstance(res, dict)
     for key in ("metrics", "audit"):
@@ -128,18 +128,13 @@ def test_full_pipeline_ends_in_founder_review_with_zero_execution(mi_db):
     print(f"  evaluate: diagnosis={res.get('primary_diagnosis')} "
           f"action={res.get('recommended_action')} conf={res.get('confidence')}")
 
-    # ---- recommendation is a PROPOSAL awaiting the founder -------------
     recs = db.query(MiRecommendation).all()
     if res.get("recommended_action") not in (None, "NONE"):
         assert recs, "an action was recommended but no mi_recommendation row exists"
     for r in recs:
         assert r.status == "FOUNDER_REVIEW", (
             f"recommendation {r.id} status={r.status}, expected FOUNDER_REVIEW")
-    print(f"  recommendation: {len(recs)} row(s), all FOUNDER_REVIEW")
 
-    # ---- ZERO EXECUTION ------------------------------------------------
-    # Nothing may have been sent, approved, or consented to. founder_actions is
-    # the only place consent can exist, and only a human may write it.
     from app.services.founder_actions import FounderAction
     from app.models.models import WorkflowEvent
     assert db.query(FounderAction).count() == 0, "the pipeline manufactured consent"
@@ -148,25 +143,116 @@ def test_full_pipeline_ends_in_founder_review_with_zero_execution(mi_db):
             ("EMAIL_SENT", "WHATSAPP_SENT", "OUTREACH_APPROVED",
              "PRICE_UPDATED", "AD_BUDGET_CHANGED"))).all()
     assert not executed, f"execution events written: {[e.event_type for e in executed]}"
-    print(f"  zero execution: founder_actions=0, execution events=0")
 
-    # And the queue the founder actually reads shows the proposal.
     pend = mi.pending_founder_reviews(db)
     assert isinstance(pend, dict)
-    print(f"  pending_founder_reviews: {pend.get('pending_count', len(recs))} awaiting")
+
+
+def test_osa_low_with_complete_commercial_observations(mi_db):
+    """
+    Business acceptance: sales decline + OSA 80% + competitor OSA 100%
+    → OSA_LOW → RESTORE_OSA_ABOVE_95 → FOUNDER_REVIEW → zero execution.
+
+    Missing SOV stays NULL (not zero). Price gap is secondary while OSA is low.
+    """
+    db, mi = mi_db
+    from app.models.marketplace_intel import (
+        FpSalesDaily, MiPriceSnapshot, MiAvailability, MiRecommendation,
+    )
+    from app.services.founder_actions import FounderAction
+    from app.models.models import WorkflowEvent
+
+    sku = _sku(db, mi)
+    _activate_amazon(db, sku)
+
+    # Prior week baseline + current decline
+    db.add(FpSalesDaily(date=PREV, channel=CHANNEL, sku_id=sku.id,
+                        units=20, gmv_inr=6380.0, source="manual_csv"))
+    db.add(FpSalesDaily(date=DATE, channel=CHANNEL, sku_id=sku.id,
+                        units=12, gmv_inr=3828.0, source="manual_csv"))
+
+    # Self OSA = 4/5 = 80% < 95
+    for pin, stock in (
+        ("110001", True),
+        ("400001", True),
+        ("560001", True),
+        ("700001", True),
+        ("600001", False),
+    ):
+        db.add(MiAvailability(
+            channel=CHANNEL, sku_id=sku.id, pincode=pin,
+            in_stock=stock, is_self=True, source="manual",
+        ))
+    # Competitor fully available
+    db.add(MiAvailability(
+        channel=CHANNEL, sku_id=None, pincode="110001",
+        in_stock=True, is_self=False, source="manual",
+    ))
+
+    # Self + competitor price (gap secondary while OSA low)
+    db.add(MiPriceSnapshot(
+        channel=CHANNEL, sku_id=sku.id, price_inr=319.0,
+        is_self=True, source="manual",
+    ))
+    db.add(MiPriceSnapshot(
+        channel=CHANNEL, sku_id=None, price_inr=299.0,
+        is_self=False, seller_name="comp_x", source="manual",
+    ))
+    db.commit()
+
+    res = mi.mi_evaluate(db, sku.id, CHANNEL, DATE)
+
+    assert res["metrics"]["osa_pct"] == 80.0, res["metrics"]
+    assert res["metrics"]["competitor_osa_pct"] == 100.0, res["metrics"]
+    assert res["metrics"]["sales_delta_pct"] is not None
+    assert res["metrics"]["sales_delta_pct"] < 0
+    # SOV not ingested — must stay NULL, never fabricated 0
+    assert res["metrics"]["sov_pct"] is None
+
+    assert res["primary_diagnosis"] == "OSA_LOW", res
+    assert res["recommended_action"] == "RESTORE_OSA_ABOVE_95", res
+    assert res["status"] == "FOUNDER_REVIEW"
+    assert "OSA_LOW" in (res.get("blockers") or [])
+
+    # Price gap may be secondary; never primary while OSA is broken
+    if res.get("secondary_diagnosis"):
+        assert res["secondary_diagnosis"] == "PRICE_UNDERCUT"
+
+    open_rows = db.query(MiRecommendation).filter(
+        MiRecommendation.status == "FOUNDER_REVIEW").all()
+    assert len(open_rows) == 1
+    assert open_rows[0].primary_diagnosis == "OSA_LOW"
+    assert open_rows[0].recommended_action == "RESTORE_OSA_ABOVE_95"
+
+    assert db.query(FounderAction).count() == 0
+    executed = db.query(WorkflowEvent).filter(
+        WorkflowEvent.event_type.in_(
+            ("EMAIL_SENT", "WHATSAPP_SENT", "PRICE_UPDATED", "AD_BUDGET_CHANGED")
+        )
+    ).all()
+    assert not executed
+
+    # Re-evaluate must reuse the same open proposal
+    res2 = mi.mi_evaluate(db, sku.id, CHANNEL, DATE)
+    assert res2.get("recommendation_reused") is True
+    assert res2["recommendation_id"] == res["recommendation_id"]
+    assert db.query(MiRecommendation).filter(
+        MiRecommendation.status == "FOUNDER_REVIEW").count() == 1
+
+    print(
+        f"\n  OSA_LOW path: osa={res['metrics']['osa_pct']}% "
+        f"sales_delta={res['metrics']['sales_delta_pct']}% "
+        f"→ {res['recommended_action']} FOUNDER_REVIEW id={res['recommendation_id']}"
+    )
 
 
 def test_reevaluating_never_manufactures_consent(mi_db):
     """Whatever else re-evaluation does, it must never write consent."""
     db, mi = mi_db
-    from app.models.marketplace_intel import MiRecommendation, SkuChannelMap
+    from app.models.marketplace_intel import MiRecommendation
     from app.services.founder_actions import FounderAction
     sku = _sku(db, mi)
-    cm = (db.query(SkuChannelMap)
-          .filter(SkuChannelMap.sku_id == sku.id,
-                  SkuChannelMap.channel == CHANNEL).first())
-    cm.status = "ACTIVE"
-    db.commit()
+    _activate_amazon(db, sku)
 
     for _ in range(3):
         mi.mi_evaluate(db, sku.id, CHANNEL, DATE)
@@ -177,21 +263,11 @@ def test_reevaluating_never_manufactures_consent(mi_db):
 
 
 def test_one_open_recommendation_per_sku_channel_date(mi_db):
-    """
-    Re-evaluating must not grow the founder's queue.
-
-    mi_evaluate used to append a row on every call, so five evaluations of one
-    SKU/channel/date produced five identical open proposals and a scheduled
-    evaluate_all_active would bury the founder in repeats of one decision.
-    """
+    """Re-evaluating must not grow the founder's queue."""
     db, mi = mi_db
-    from app.models.marketplace_intel import MiRecommendation, SkuChannelMap
+    from app.models.marketplace_intel import MiRecommendation
     sku = _sku(db, mi)
-    cm = (db.query(SkuChannelMap)
-          .filter(SkuChannelMap.sku_id == sku.id,
-                  SkuChannelMap.channel == CHANNEL).first())
-    cm.status = "ACTIVE"
-    db.commit()
+    _activate_amazon(db, sku)
 
     ids = []
     for _ in range(5):
@@ -205,34 +281,26 @@ def test_one_open_recommendation_per_sku_channel_date(mi_db):
         MiRecommendation.date == DATE,
         MiRecommendation.status == "FOUNDER_REVIEW").all()
     assert len(open_rows) == 1, (
-        f"{len(open_rows)} open proposals for one SKU/channel/date — the "
-        f"founder would see the same decision {len(open_rows)} times")
-
-    # The same row is reused, so the id is stable across evaluations.
+        f"{len(open_rows)} open proposals for one SKU/channel/date")
     assert len(set(ids)) == 1, f"recommendation id churned across runs: {ids}"
 
-    # And the queue the founder reads shows it once.
     pend = mi.pending_founder_reviews(db)
     assert pend["pending_count"] == 1, pend["pending_count"]
-    print(f"\n  5 evaluations -> {len(open_rows)} open proposal, " f"stable id={ids[0]}, queue shows {pend['pending_count']}")
+    print(f"\n  5 evaluations -> {len(open_rows)} open proposal, "
+          f"stable id={ids[0]}, queue shows {pend['pending_count']}")
 
 
 def test_changed_decision_supersedes_rather_than_overwrites(mi_db):
     """A changed decision must stay inspectable, not silently replace the old."""
     db, mi = mi_db
-    from app.models.marketplace_intel import MiRecommendation, SkuChannelMap
+    from app.models.marketplace_intel import MiRecommendation
     sku = _sku(db, mi)
-    cm = (db.query(SkuChannelMap)
-          .filter(SkuChannelMap.sku_id == sku.id,
-                  SkuChannelMap.channel == CHANNEL).first())
-    cm.status = "ACTIVE"
-    db.commit()
+    _activate_amazon(db, sku)
 
     mi.mi_evaluate(db, sku.id, CHANNEL, DATE)
     first = db.query(MiRecommendation).filter(
         MiRecommendation.status == "FOUNDER_REVIEW").one()
 
-    # Force a different decision on the same key.
     first.recommended_action = "SOMETHING_ELSE"
     first.primary_diagnosis = "OTHER_DIAGNOSIS"
     db.commit()
@@ -245,4 +313,4 @@ def test_changed_decision_supersedes_rather_than_overwrites(mi_db):
         MiRecommendation.status == "SUPERSEDED").all()
     assert len(open_rows) == 1, f"{len(open_rows)} open after a changed decision"
     assert len(superseded) == 1, "the previous proposal was overwritten, not superseded"
-    print(f"\n  changed decision -> 1 open, {len(superseded)} superseded " f"(history preserved)")
+    print(f"\n  changed decision -> 1 open, {len(superseded)} superseded")
