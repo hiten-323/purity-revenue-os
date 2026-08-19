@@ -18,17 +18,19 @@ function loadEnv(file) {
   return out;
 }
 
-const ENV = loadEnv(path.join(__dirname, "backend", ".env"));
+const ROOT = __dirname; // purity-revenue-os repo root
+const ENV = loadEnv(path.join(ROOT, "backend", ".env"));
 const need = (k) => {
   const v = ENV[k] || process.env[k] || "";
   if (!v) console.error(`[ecosystem] ${k} is missing from backend/.env`);
   return v;
 };
 
-const PYTHON = "C:\\Users\\hiten\\AppData\\Local\\Programs\\Python\\Python311\\python.exe";
+const PYTHON = "C:\\Users\\hiten\\AppData\\Local\\Programs\\Python\\Python312\\python.exe";
 const CLOUDFLARED = "C:\\Program Files (x86)\\cloudflared\\cloudflared.exe";
-const BACKEND_DIR = "C:\\Users\\hiten\\Desktop\\ppp\\claude\\CODE\\purity_beans_ai\\jules_session\\backend";
-const FRONTEND_DIR = "C:\\Users\\hiten\\Desktop\\ppp\\claude\\CODE\\purity_beans_ai\\jules_session\\frontend";
+// Code under test lives here — never jules_session after cutover.
+const BACKEND_DIR = path.join(ROOT, "backend");
+const FRONTEND_DIR = path.join(ROOT, "frontend");
 
 module.exports = {
   apps: [
@@ -45,11 +47,13 @@ module.exports = {
       env: {
         PYTHONUNBUFFERED: "1",
         AUTO_WARM_ENABLED: "0",
-        SENDER_EMAIL: "connect@purepantryprovisions.com",
-        SENDER_NAME: "Hiten Jain | Pure Pantry Provisions",
+        SMART_OUTREACH_ENABLED: "0",
+        AUTO_OUTREACH_ENABLED: "0",
+        SENDER_EMAIL: ENV.SENDER_EMAIL || "connect@purepantryprovisions.com",
+        SENDER_NAME: ENV.SENDER_NAME || "Hiten Jain | Pure Pantry Provisions",
         ZOHO_APP_PASSWORD: need("ZOHO_APP_PASSWORD"),
         CEREBRAS_API_KEY: need("CEREBRAS_API_KEY"),
-        SHOPIFY_STORE: "55hd0v-ff.myshopify.com",
+        SHOPIFY_STORE: ENV.SHOPIFY_STORE || "",
         SHOPIFY_TOKEN: need("SHOPIFY_TOKEN"),
         GOOGLE_MAPS_API_KEY: need("GOOGLE_MAPS_API_KEY"),
       },
@@ -66,9 +70,12 @@ module.exports = {
       min_uptime: 5000,
       env: {
         PYTHONUNBUFFERED: "1",
+        // Keep worker warm loop available; smart outreach stays OFF until gate.
         AUTO_WARM_ENABLED: "1",
-        SENDER_EMAIL: "connect@purepantryprovisions.com",
-        SENDER_NAME: "Hiten Jain | Pure Pantry Provisions",
+        SMART_OUTREACH_ENABLED: "0",
+        AUTO_OUTREACH_ENABLED: "0",
+        SENDER_EMAIL: ENV.SENDER_EMAIL || "connect@purepantryprovisions.com",
+        SENDER_NAME: ENV.SENDER_NAME || "Hiten Jain | Pure Pantry Provisions",
         ZOHO_APP_PASSWORD: need("ZOHO_APP_PASSWORD"),
         CEREBRAS_API_KEY: need("CEREBRAS_API_KEY"),
         GOOGLE_MAPS_API_KEY: need("GOOGLE_MAPS_API_KEY"),
@@ -86,14 +93,16 @@ module.exports = {
       min_uptime: 5000,
       env: {
         PYTHONUNBUFFERED: "1",
-        AUTO_OUTREACH_ENABLED: "1",
+        // Explicit OFF until controlled send + /health pass.
+        AUTO_OUTREACH_ENABLED: "0",
+        SMART_OUTREACH_ENABLED: "0",
         OUTREACH_INTERVAL_SECONDS: "900",
         OUTREACH_BATCH_SIZE: "20",
-        SENDER_EMAIL: "connect@purepantryprovisions.com",
-        SENDER_NAME: "Hiten Jain | Pure Pantry Provisions",
+        SENDER_EMAIL: ENV.SENDER_EMAIL || "connect@purepantryprovisions.com",
+        SENDER_NAME: ENV.SENDER_NAME || "Hiten Jain | Pure Pantry Provisions",
         ZOHO_APP_PASSWORD: need("ZOHO_APP_PASSWORD"),
         AISENSY_API_KEY: need("AISENSY_API_KEY"),
-        AISENSY_CAMPAIGN_NAME: need("AISENSY_CAMPAIGN_NAME"),
+        AISENSY_CAMPAIGN_NAME: ENV.AISENSY_CAMPAIGN_NAME || "",
       },
     },
     {
