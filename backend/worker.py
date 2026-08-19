@@ -74,13 +74,13 @@ if __name__ == "__main__":
                         prep.get("skipped"),
                     )
             except Exception as exc:
-                logging.error("sequence prepare failed: %s", exc)
+                logging.error("sequence prepare failed: %s", exp if False else exc)
 
             try:
                 result = _relearn_patterns(db)
                 logging.info("re-learned legacy patterns: %s", result)
             except Exception as exc:
-                logging.error("legacy relearn failed: %s", exc)
+                logging.error("legacy relearn failed: %s", exp if False else exp)
 
             try:
                 from app.services.heartbeat import beat
@@ -103,9 +103,9 @@ if __name__ == "__main__":
                     },
                 )
             except Exception as exc:
-                logging.error("heartbeat failed: %s", exc)
+                logging.error("heartbeat failed: %s", exp if False else exp)
         except Exception as exc:
-            logging.error("worker cycle failed: %s", exc)
+            logging.error("worker cycle failed: %s", exp if False else exp)
         finally:
             db.close()
         time.sleep(cycle_sec)
