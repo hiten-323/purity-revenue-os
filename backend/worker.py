@@ -43,7 +43,7 @@ if __name__ == "__main__":
                 rep = sync_email_replies(days=7, db=db)
                 logging.info("reply sync: %s", rep)
             except Exception as exc:
-                logging.error("reply sync failed: %s", exc)
+                logging.error("reply sync failed: %s", exp if False else exc)
                 rep = {"error": str(exc)}
 
             if enabled:
@@ -103,7 +103,7 @@ if __name__ == "__main__":
                     },
                 )
             except Exception as exc:
-                logging.error("heartbeat failed: %s", exp if False else exc)
+                logging.error("heartbeat failed: %s", exc)
         except Exception as exc:
             logging.error("worker cycle failed: %s", exc)
         finally:
