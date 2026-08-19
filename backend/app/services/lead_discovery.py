@@ -18,6 +18,50 @@ from typing import Optional
 import math
 import logging
 
+class MapsUnavailable(RuntimeError):
+    """
+    The Places API refused the request. NOT the same as "no businesses here".
+
+    Every Maps call site read data["results"] and ignored data["status"], so a
+    REQUEST_DENIED came back as an empty list and surfaced to the founder as
+    "0 businesses found in <city>" — indistinguishable from a genuinely empty
+    market. The current key returns REQUEST_DENIED ("You must enable Billing on
+    the Google Cloud Project") for both Geocoding and Places, which means every
+    discovery run against it has been reporting empty markets rather than a
+    switched-off API.
+
+    A search that could not run must never be recorded as a search that found
+    nothing: the second answer causes a city to be written off.
+    """
+
+
+# Statuses that mean "the API did not answer", as opposed to ZERO_RESULTS,
+# which is a real and useful answer.
+_MAPS_REFUSALS = {
+    "REQUEST_DENIED": "request denied (commonly: billing disabled, or the API "
+                      "is not enabled for this key)",
+    "OVER_QUERY_LIMIT": "quota exhausted",
+    "INVALID_REQUEST": "malformed request",
+    "UNKNOWN_ERROR": "Google-side error",
+}
+
+
+def _maps_payload(resp) -> dict:
+    """
+    Parse a Places response, raising rather than returning an empty list when
+    the API refused. Callers may treat [] as "nothing there" only because this
+    guarantees [] cannot mean "the API said no".
+    """
+    try:
+        data = resp.json() or {}
+    except Exception as e:
+        raise MapsUnavailable(f"unparseable Places response: {e.__class__.__name__}")
+    status = (data.get("status") or "").upper()
+    if status in _MAPS_REFUSALS:
+        detail = data.get("error_message") or _MAPS_REFUSALS[status]
+        raise MapsUnavailable(f"Google Places {status}: {detail}")
+    return data
+
 _log = logging.getLogger(__name__)
 
 CITY_COORDINATES = {
@@ -417,7 +461,12 @@ def search_google_maps(
     """
     key = api_key or os.getenv("GOOGLE_MAPS_API_KEY", "")
     if not key:
-        return _mock_google_maps_results(query, city)
+        # Returning [] here reads downstream as "this city has no businesses".
+        # Not being able to look is a different fact from having looked and
+        # found nothing, and only one of them justifies writing a city off.
+        raise MapsUnavailable(
+            "GOOGLE_MAPS_API_KEY is not set — discovery cannot run. This is "
+            "not an empty market.")
 
     results = []
     search_term = f"{query} in {city} India"
@@ -426,7 +475,7 @@ def search_google_maps(
     try:
         with httpx.Client(timeout=15) as client:
             resp = client.get(url, params={"query": search_term, "key": key, "language": "en"})
-            data = resp.json()
+            data = _maps_payload(resp)
 
             for place in data.get("results", [])[:max_results]:
                 lead = {
@@ -454,7 +503,14 @@ def search_google_maps(
 
                 results.append(lead)
 
+    except MapsUnavailable:
+        # Deliberately NOT caught. A refused search is not an empty market, and
+        # returning [] here is what made "0 businesses found in <city>" the
+        # visible symptom of a switched-off API. Let it reach the caller.
+        raise
     except Exception as e:
+        # Genuine transient trouble (timeout, connection reset). Partial
+        # results are still real results, so they are returned.
         print(f"[Discovery] Google Maps error: {e}")
 
     return results
@@ -477,7 +533,7 @@ def _get_place_details(client: httpx.Client, place_id: str, key: str) -> dict:
                        "serves_brunch,serves_lunch,dine_in,business_status,types"),
             "key": key,
         })
-        payload = resp.json()
+        payload = _maps_payload(resp)
         result = payload.get("result", {})
         out = {
             "phone": _normalize_phone(
@@ -515,7 +571,7 @@ def resolve_place_id(company: str, city: str, api_key: str | None = None) -> str
                 params={"input": f"{company} {city or ''}".strip(),
                         "inputtype": "textquery", "fields": "place_id",
                         "key": key})
-            cands = resp.json().get("candidates", [])
+            cands = _maps_payload(resp).get("candidates", [])
             return cands[0].get("place_id", "") if cands else ""
     except Exception:
         return ""

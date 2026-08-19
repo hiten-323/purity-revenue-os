@@ -104,8 +104,47 @@ Respond ONLY with valid JSON:
                 content = content[4:]
         parsed = json.loads(content)
         return parsed["subject"], parsed["body"]
-    except Exception:
-        return None, None  # Fall through to template
+    except Exception as e:
+        # Falling through to a template is the right behaviour — a draft still
+        # gets written and the founder still decides. What was wrong was doing
+        # it in silence: a rejected API key (the live one currently returns
+        # {"code":"wrong_api_key"}) is indistinguishable from a one-off timeout,
+        # so every email quietly became a template and nothing said so.
+        #
+        # An auth failure is a CONFIGURATION fault that will not fix itself, so
+        # it is named separately from a transient one.
+        detail = e.__class__.__name__
+        try:
+            if isinstance(e, KeyError):
+                detail = f"unexpected response shape (missing {e})"
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            if code in (401, 403):
+                detail = f"AUTH REJECTED ({code}) — CEREBRAS_API_KEY is invalid"
+        except Exception:
+            pass
+        print(f"[email_drafter] Cerebras unavailable, using template: {detail}")
+        _LLM_FAILURES.append(detail)
+        return None, None
+
+
+# Why a module-level list: the drafter is called in a loop by the worker, and a
+# per-call print scrolls past. This lets /health and the draft response report
+# "N drafts fell back to templates because the key is rejected" instead of the
+# founder discovering it from the tone of the emails.
+_LLM_FAILURES: list[str] = []
+
+
+def llm_status() -> dict:
+    """Whether LLM drafting is actually working, for /health and the UI."""
+    return {
+        "configured": bool(CEREBRAS_API_KEY),
+        "recent_failures": len(_LLM_FAILURES),
+        "last_failure": _LLM_FAILURES[-1] if _LLM_FAILURES else None,
+        "degraded": bool(_LLM_FAILURES),
+        "note": ("drafts are falling back to templates — they still require "
+                 "founder approval, but they are not LLM-written")
+        if _LLM_FAILURES else "ok",
+    }
 
 
 # ── Smart template fallbacks (used when LLM unavailable) ─────────────────────

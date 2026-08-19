@@ -4,13 +4,23 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database.database import Base
-from app.models.models import B2BLead
+from app.models.models import B2BLead, WorkflowEvent
 from app.services.smart_outreach import OutreachProfile, OutreachTouch, classify_lead, evaluate_next_action
 
 
 def _db():
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(engine, tables=[B2BLead.__table__, OutreachProfile.__table__, OutreachTouch.__table__])
+    # WorkflowEvent belongs in this list: three tests below insert one to give
+    # the lead a history, and without the table they failed with
+    # "no such table: workflow_events" rather than on anything they assert.
+    # An explicit table list is faster than create_all but silently omits
+    # whatever a test starts using later, which is how this drifted.
+    Base.metadata.create_all(engine, tables=[
+        B2BLead.__table__,
+        WorkflowEvent.__table__,
+        OutreachProfile.__table__,
+        OutreachTouch.__table__,
+    ])
     return sessionmaker(bind=engine)()
 
 
