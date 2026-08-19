@@ -3,7 +3,15 @@
 # backend/.env at load time, so the config file itself stays safe to track.
 .env
 *.env
+.env.*
 !.env.example
+
+# `*.env` matches only files ENDING in .env, so a working copy like
+# .env.bak-before-store-fix sat untracked and fully committable while holding
+# every live credential. `.env.*` closes that: any sidecar of a .env file is
+# ignored regardless of what is appended to it.
+*.env.*
+!.env.example.*
 
 # Lead data. purity_beans.db holds contact records for real businesses —
 # names, email addresses and phone numbers belonging to third parties who
