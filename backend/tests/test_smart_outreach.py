@@ -8,6 +8,21 @@ from app.models.models import B2BLead, WorkflowEvent
 from app.services.smart_outreach import OutreachProfile, OutreachTouch, classify_lead, evaluate_next_action
 
 
+def _sendable(**kw):
+    """
+    A lead the trust engine actually permits sending to.
+
+    These tests exercise classification and cadence, not the trust gate. Built
+    without trust fields, every lead is UNSEEN and decision_engine correctly
+    refuses — so the tests would have been asserting that an address with no
+    provenance may be emailed, which is the bypass this module used to have.
+    """
+    kw.setdefault("email_trust", "VERIFIED")
+    kw.setdefault("email_confidence", 80)
+    kw.setdefault("email_source", "FOUNDER_CALL")
+    return B2BLead(**kw)
+
+
 def _db():
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     # WorkflowEvent belongs in this list: three tests below insert one to give
@@ -38,7 +53,7 @@ def test_distributor_classification_uses_business_signal():
 
 def test_history_changes_intent_without_changing_category():
     db = _db()
-    lead = B2BLead(company="ABC Retail Mart", division="retail", industry="supermarket", status="DISCOVERED")
+    lead = _sendable(company="ABC Retail Mart", division="retail", industry="supermarket", email="buyer@abcretail.in", status="DISCOVERED")
     db.add(lead)
     db.commit()
     from app.models.models import WorkflowEvent
@@ -67,7 +82,7 @@ def test_negative_history_stops_automation():
 
 def test_cold_lead_defaults_to_email_warming():
     db = _db()
-    lead = B2BLead(company="Cold Office Pvt Ltd", division="corporate", industry="IT office", email="buyer@example.com", status="DISCOVERED")
+    lead = _sendable(company="Cold Office Pvt Ltd", division="corporate", industry="IT office", email="buyer@coldoffice.in", status="DISCOVERED")
     db.add(lead)
     db.commit()
     decision = evaluate_next_action(db, lead)
@@ -78,11 +93,18 @@ def test_cold_lead_defaults_to_email_warming():
 
 def test_followup_only_after_cadence():
     db = _db()
-    lead = B2BLead(company="Followup Co", division="corporate", email="buyer@example.com", status="EMAIL_SENT")
+    lead = _sendable(company="Followup Co", division="corporate", email="buyer@followupco.in", status="EMAIL_SENT")
     db.add(lead)
     db.commit()
     from app.models.models import WorkflowEvent
-    db.add(WorkflowEvent(lead_id=lead.id, event_type="EMAIL_SENT", actor="SYSTEM", channel="email", payload={}, occurred_at=datetime.utcnow() - timedelta(days=4)))
+    # A PROVEN send. payload={} is renamed EMAIL_SENT_UNPROVEN by the strict
+    # send-proof listener, and cadence deliberately ignores unproven sends:
+    # following up on one means emailing "just following up on my email" to
+    # someone who may never have received a first one. The recipient and
+    # provider message-id are what make this a send that actually happened.
+    db.add(WorkflowEvent(lead_id=lead.id, event_type="EMAIL_SENT", actor="SYSTEM", channel="email",
+                         payload={"to": lead.email, "message_id": "<followup-co-1@test>"},
+                         occurred_at=datetime.utcnow() - timedelta(days=4)))
     db.commit()
     decision = evaluate_next_action(db, lead)
     assert decision["action"] == "WARM_FOLLOW_UP"

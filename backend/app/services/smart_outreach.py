@@ -81,6 +81,42 @@ def _text(*values: Any) -> str:
     return " ".join(str(v or "") for v in values).lower()
 
 
+def _proven_sends(db: Session, lead_id: int) -> list[Any]:
+    """
+    Every PROVEN outbound email for this lead, newest first, from both ledgers.
+
+    Returns objects exposing .occurred_at. WorkflowEvent EMAIL_SENT is
+    authoritative (proof-enforced at insert); OutreachTouch rows are included
+    so cadence still works for channels that only write there.
+    """
+    from app.models.models import WorkflowEvent
+
+    events = (
+        db.query(WorkflowEvent)
+        .filter(WorkflowEvent.lead_id == lead_id,
+                WorkflowEvent.event_type == "EMAIL_SENT")
+        .all()
+    )
+    touches = _proven_email_touches(db, lead_id)
+    both = list(events) + list(touches)
+    return sorted(both,
+                  key=lambda r: getattr(r, "occurred_at", None) or datetime.min,
+                  reverse=True)
+
+
+def _mentions(haystack: str, *needles: str) -> bool:
+    """
+    Case-insensitive membership.
+
+    _text() lowercases what it builds, while every workflow event_type is
+    written UPPERCASE, so `"CATALOGUE_REQUESTED" in event_text` could never be
+    True. Warmth derived from history was therefore dead: a lead that had asked
+    for a catalogue, asked for pricing, or replied still classified as COLD,
+    and every warm follow-up path was unreachable in production.
+    """
+    return any(n.lower() in haystack for n in needles)
+
+
 def _history(db: Session, lead_id: int) -> list[Any]:
     try:
         from app.models.models import WorkflowEvent
@@ -91,8 +127,16 @@ def _history(db: Session, lead_id: int) -> list[Any]:
             .limit(50)
             .all()
         )
-    except Exception:
-        return []
+    except Exception as e:
+        # Returning [] here reads downstream as "this lead has no history",
+        # which classifies a warm buyer as COLD and silently suppresses the
+        # warm follow-up they were owed. That is how the case-mismatch above
+        # went unnoticed: the symptom (everyone COLD) had two possible causes
+        # and neither said anything. A history we could not read is not a
+        # history that is empty.
+        print(f"[smart_outreach] history unreadable for lead {lead_id}: "
+              f"{e.__class__.__name__} — treating as UNKNOWN, not cold")
+        raise
 
 
 def _proven_email_touches(db: Session, lead_id: int) -> list[OutreachTouch]:
@@ -166,18 +210,16 @@ def classify_lead(db: Session, lead: B2BLead) -> OutreachProfile:
     if prior_intent in ("OPTED_OUT", "NOT_INTERESTED", "DO_NOT_CONTACT", "COMPLAINT"):
         warmth, intent = "COOLDOWN", prior_intent
         evidence.append(f"memory:{prior_intent}")
-    elif prior_intent in ("PRICING_REQUESTED", "NEGOTIATION") or "PRICING_REQUESTED" in event_text or "NEGOTIATION" in event_text:
+    elif prior_intent in ("PRICING_REQUESTED", "NEGOTIATION") or _mentions(event_text, "PRICING_REQUESTED", "NEGOTIATION"):
         evidence.append("history:pricing_or_negotiation")
         warmth, intent = "HOT", "PRICING_REQUESTED"
-    elif prior_intent == "CATALOGUE_REQUESTED" or "CATALOGUE_REQUESTED" in event_text or "SAMPLE_REQUESTED" in event_text:
+    elif prior_intent == "CATALOGUE_REQUESTED" or _mentions(event_text, "CATALOGUE_REQUESTED", "SAMPLE_REQUESTED"):
         evidence.append("history:catalogue_or_sample")
         warmth, intent = "WARM", "CATALOGUE_REQUESTED"
-    elif prior_intent in ("INTERESTED", "CALLBACK", "MEETING_REQUESTED") or any(
-        x in event_text for x in ("REPLIED", "WHATSAPP_REPLY", "EMAIL_REPLIED", "MEETING_BOOKED", "EMAIL_REPLY")
-    ):
+    elif prior_intent in ("INTERESTED", "CALLBACK", "MEETING_REQUESTED") or _mentions(event_text, "REPLIED", "WHATSAPP_REPLY", "EMAIL_REPLIED", "MEETING_BOOKED", "EMAIL_REPLY"):
         evidence.append("history:reply")
         warmth, intent = "ENGAGED", prior_intent if prior_intent != "NONE" else "INTERESTED"
-    elif any(x in event_text for x in ("EMAIL_SENT", "WHATSAPP_SENT", "OUTREACH_SENT")) or _proven_email_touches(db, lead.id):
+    elif _mentions(event_text, "EMAIL_SENT", "WHATSAPP_SENT", "OUTREACH_SENT") or _proven_email_touches(db, lead.id):
         warmth, intent = "CONTACTED", "NONE"
     else:
         warmth, intent = "COLD", "NONE"
@@ -281,19 +323,72 @@ def _wa_text(lead: B2BLead, profile: OutreachProfile) -> str:
     )
 
 
+# Kept identical to decision_engine's suppression set on purpose. Two modules
+# disagreeing about what "stop contacting them" means is how a buyer who
+# unsubscribed keeps receiving automated outreach.
+SUPPRESSION_EVENTS = ("UNSUBSCRIBED", "DO_NOT_CONTACT", "NOT_INTERESTED",
+                      "OPTED_OUT", "COMPLAINT", "remove me")
+
+
 def _negative(history: list[Any]) -> bool:
+    """
+    Has this contact told us to stop?
+
+    This compared UPPERCASE needles against text _text() had already
+    lowercased, so nothing ever matched and UNSUBSCRIBED did not stop
+    automation — an opt-out was recorded and then ignored. decision_engine
+    honoured the same events correctly, which is precisely the damage two
+    decision authorities do.
+    """
     text = _text(*[(getattr(e, "event_type", ""), getattr(e, "payload", "")) for e in history])
-    return any(x in text for x in ("UNSUBSCRIBED", "DO_NOT_CONTACT", "NOT_INTERESTED", "OPTED_OUT", "COMPLAINT", "remove me"))
+    return _mentions(text, *SUPPRESSION_EVENTS)
 
 
 def evaluate_next_action(db: Session, lead: B2BLead, profile: OutreachProfile | None = None) -> dict:
-    """Single next-action authority for adaptive outreach."""
+    """
+    Chooses the SHAPE of an adaptive touch — which message, on which channel.
+
+    It is not a second gate. decision_engine.evaluate_next_action remains the
+    authority on whether this lead may be contacted at all (suppression, trust,
+    account frequency, sequence position, delivery guard), and this function
+    refuses whenever that one refuses.
+
+    Both modules used to answer "may we contact them?" independently, and they
+    disagreed: this one compared UPPERCASE event names against lowercased text,
+    so UNSUBSCRIBED never matched and an opt-out did not stop automation, while
+    decision_engine honoured the same event correctly. Whichever ran last won.
+    """
     profile = profile or classify_lead(db, lead)
     history = _history(db, lead.id)
+
+    # Local opt-out read stays as a cheap first pass, but it is no longer the
+    # only thing standing between an unsubscribe and an automated send.
     if _negative(history) or getattr(lead, "contact_status", "") in ("OPTED_OUT", "DO_NOT_CONTACT") or profile.intent in (
         "OPTED_OUT", "NOT_INTERESTED", "DO_NOT_CONTACT", "COMPLAINT"
     ):
         return {"action": "COOLDOWN", "channel": None, "reason": "negative/opt-out signal", "execute": False}
+
+    # The single authority. Consulted for permission only — its SEND verdict
+    # does not dictate which message goes out, which is what this module knows
+    # and it does not.
+    try:
+        from app.services.decision_engine import evaluate_next_action as _authority
+        verdict = _authority(lead, db)
+    except Exception as e:
+        # A gate that cannot answer must never read as permission.
+        return {"action": "FOUNDER_REVIEW", "channel": None, "execute": False,
+                "reason": f"decision engine unavailable ({e.__class__.__name__}) "
+                          f"— refusing to send without it"}
+
+    if verdict["action"] == "SUPPRESS":
+        return {"action": "COOLDOWN", "channel": None, "execute": False,
+                "reason": f"decision engine: {verdict['reason']}"}
+    if verdict["action"] in ("WAIT", "NONE", "ENRICH"):
+        return {"action": "NURTURE", "channel": None, "execute": False,
+                "reason": f"decision engine: {verdict['reason']}"}
+    if verdict["action"] == "FOUNDER_REVIEW":
+        return {"action": "FOUNDER_REVIEW", "channel": None, "execute": False,
+                "reason": f"decision engine: {verdict['reason']}"}
 
     if profile.intent in ("PRICING_REQUESTED", "NEGOTIATION"):
         return {
@@ -323,8 +418,16 @@ def evaluate_next_action(db: Session, lead: B2BLead, profile: OutreachProfile | 
             "execute": False,
         }
 
-    # Cadence from OutreachTouch proof (not only WorkflowEvent).
-    proven = _proven_email_touches(db, lead.id)
+    # Cadence from the system's single send ledger.
+    #
+    # This counted OutreachTouch rows only, so a send recorded the way the rest
+    # of the system records one — a WorkflowEvent EMAIL_SENT — was invisible
+    # here and the lead looked never-contacted. Two ledgers of "did we send"
+    # is the same duplication that put a second evaluate_next_action in this
+    # module. EMAIL_SENT is already the trustworthy one: the strict send-proof
+    # listener renames anything lacking a recipient and provider message-id to
+    # EMAIL_SENT_UNPROVEN, so counting EMAIL_SENT counts only real sends.
+    proven = _proven_sends(db, lead.id)
     sent = len(proven)
     if sent == 0:
         return {
