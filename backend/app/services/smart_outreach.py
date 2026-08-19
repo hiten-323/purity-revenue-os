@@ -9,10 +9,12 @@ Cold leads are warmed by email automatically. WhatsApp is never used for a
 cold business-initiated first touch unless a recorded consent/template path
 allows it. Provider absence is recorded as NOT_CONFIGURED rather than faked as
 sent. Every attempt is persisted in OutreachTouch.
+
+Cadence is driven by OutreachTouch proof so worker cycles cannot spam.
+Engaged conversations are not re-blasted; CONTINUE_CONVERSATION does not send.
 """
 from __future__ import annotations
 
-import re
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -70,6 +72,10 @@ CATEGORY_RULES = {
     "UNKNOWN": ("DISCOVERY", "DISCOVERY"),
 }
 
+PROVEN_SEND = ("SENT", "PROVIDER_ACCEPTED", "DELIVERED", "READ")
+WARM_ACTIONS = ("WARM_FIRST_TOUCH", "WARM_FOLLOW_UP", "SEND_CATALOGUE")
+FOLLOW_UP_AFTER_DAYS = 3
+
 
 def _text(*values: Any) -> str:
     return " ".join(str(v or "") for v in values).lower()
@@ -89,6 +95,21 @@ def _history(db: Session, lead_id: int) -> list[Any]:
         return []
 
 
+def _proven_email_touches(db: Session, lead_id: int) -> list[OutreachTouch]:
+    """Cadence source of truth — worker cycles must not re-send Day-0."""
+    return (
+        db.query(OutreachTouch)
+        .filter(
+            OutreachTouch.lead_id == lead_id,
+            OutreachTouch.channel == "email",
+            OutreachTouch.status.in_(PROVEN_SEND),
+            OutreachTouch.touch_type.in_(WARM_ACTIONS),
+        )
+        .order_by(OutreachTouch.occurred_at.desc())
+        .all()
+    )
+
+
 def classify_lead(db: Session, lead: B2BLead) -> OutreachProfile:
     """Classify from current evidence + recent interaction history.
 
@@ -103,7 +124,10 @@ def classify_lead(db: Session, lead: B2BLead) -> OutreachProfile:
         lead.company, lead.qualification_notes, lead.current_supplier,
     )
     history = _history(db, lead.id)
-    event_text = _text(*[(getattr(e, "event_type", ""), getattr(e, "channel", ""), getattr(e, "payload", "")) for e in history])
+    event_text = _text(*[
+        (getattr(e, "event_type", ""), getattr(e, "channel", ""), getattr(e, "payload", ""))
+        for e in history
+    ])
 
     category = "UNKNOWN"
     ordered = [
@@ -132,39 +156,43 @@ def classify_lead(db: Session, lead: B2BLead) -> OutreachProfile:
             "hotel": "HOTEL", "government": "PROCUREMENT", "private_label": "PRIVATE_LABEL",
         }
         category = aliases.get(d, "UNKNOWN")
-        if category != "UNKNOWN": evidence.append(f"division:{d}")
+        if category != "UNKNOWN":
+            evidence.append(f"division:{d}")
 
-    if "PRICING_REQUESTED" in event_text or "NEGOTIATION" in event_text:
+    # Prefer durable profile intent set by inbound memory when present.
+    profile = db.query(OutreachProfile).filter(OutreachProfile.lead_id == lead.id).first()
+    prior_intent = (profile.intent if profile else None) or "NONE"
+
+    if prior_intent in ("OPTED_OUT", "NOT_INTERESTED", "DO_NOT_CONTACT", "COMPLAINT"):
+        warmth, intent = "COOLDOWN", prior_intent
+        evidence.append(f"memory:{prior_intent}")
+    elif prior_intent in ("PRICING_REQUESTED", "NEGOTIATION") or "PRICING_REQUESTED" in event_text or "NEGOTIATION" in event_text:
         evidence.append("history:pricing_or_negotiation")
-        warmth = "HOT"
-        intent = "PRICING_REQUESTED"
-    elif "CATALOGUE_REQUESTED" in event_text or "SAMPLE_REQUESTED" in event_text:
+        warmth, intent = "HOT", "PRICING_REQUESTED"
+    elif prior_intent == "CATALOGUE_REQUESTED" or "CATALOGUE_REQUESTED" in event_text or "SAMPLE_REQUESTED" in event_text:
         evidence.append("history:catalogue_or_sample")
-        warmth = "WARM"
-        intent = "CATALOGUE_REQUESTED"
-    elif any(x in event_text for x in ("REPLIED", "WHATSAPP_REPLY", "EMAIL_REPLIED", "MEETING_BOOKED")):
+        warmth, intent = "WARM", "CATALOGUE_REQUESTED"
+    elif prior_intent in ("INTERESTED", "CALLBACK", "MEETING_REQUESTED") or any(
+        x in event_text for x in ("REPLIED", "WHATSAPP_REPLY", "EMAIL_REPLIED", "MEETING_BOOKED", "EMAIL_REPLY")
+    ):
         evidence.append("history:reply")
-        warmth = "ENGAGED"
-        intent = "INTERESTED"
-    elif any(x in event_text for x in ("EMAIL_SENT", "WHATSAPP_SENT", "OUTREACH_SENT")):
-        warmth = "CONTACTED"
-        intent = "NONE"
+        warmth, intent = "ENGAGED", prior_intent if prior_intent != "NONE" else "INTERESTED"
+    elif any(x in event_text for x in ("EMAIL_SENT", "WHATSAPP_SENT", "OUTREACH_SENT")) or _proven_email_touches(db, lead.id):
+        warmth, intent = "CONTACTED", "NONE"
     else:
-        warmth = "COLD"
-        intent = "NONE"
+        warmth, intent = "COLD", "NONE"
 
-    # Existing lifecycle state is stronger than a missing event in old data.
     if lead.status in ("REPLIED", "MEETING_BOOKED", "MEETING_COMPLETED", "SAMPLE_SENT", "PROPOSAL_SENT", "ORDER_WON"):
-        warmth = "ENGAGED"
-        intent = "INTERESTED" if intent == "NONE" else intent
-        evidence.append(f"status:{lead.status}")
+        if warmth not in ("COOLDOWN", "HOT"):
+            warmth = "ENGAGED"
+            intent = "INTERESTED" if intent == "NONE" else intent
+            evidence.append(f"status:{lead.status}")
 
-    category_name, angle = CATEGORY_RULES[category]
+    _, angle = CATEGORY_RULES[category]
     confidence = min(95, 45 + min(40, len(evidence) * 10))
     if category == "UNKNOWN":
         confidence = 25
 
-    profile = db.query(OutreachProfile).filter(OutreachProfile.lead_id == lead.id).first()
     if profile is None:
         profile = OutreachProfile(lead_id=lead.id)
         db.add(profile)
@@ -200,58 +228,152 @@ def render_email(lead: B2BLead, profile: OutreachProfile, touch_number: int = 1)
         return subject, body
 
     drafts = {
-        "DISTRIBUTOR": ("Distribution partnership — Purity Beans", f"Hi {n},\n\nI’m Hiten from Pure Pantry Provisions. We’re introducing Purity Beans premium instant coffee and are speaking with selected distribution partners in {city}.\n\nWould it be useful if I sent the catalogue and distributor commercial details?"),
-        "WHOLESALER": ("Wholesale coffee range — Purity Beans", f"Hi {n},\n\nI’m Hiten from Pure Pantry Provisions. We supply Purity Beans premium instant coffee for wholesale and repeat B2B supply.\n\nWould you like the catalogue and wholesale rate structure?"),
-        "RETAILER": ("Purity Beans — retail coffee partnership", f"Hi {n},\n\nWe’re introducing Purity Beans premium instant coffee for selected retail partners in {city}. The proposition is designed around shelf-ready packs and healthy retailer economics.\n\nMay I send the catalogue and trade details?"),
-        "HORECA": ("Coffee supply for {company}", f"Hi {n},\n\nI came across {company} and thought Purity Beans could be relevant for your coffee requirements. We supply premium instant coffee with consistent product and B2B supply support.\n\nWould you like me to send the range for evaluation?"),
-        "HOTEL": ("Purity Beans — hotel coffee supply", f"Hi {n},\n\nI’m Hiten from Pure Pantry Provisions. We’re onboarding selected hospitality partners for Purity Beans.\n\nIf coffee procurement is relevant at {company}, may I send the range and commercial information?"),
-        "CORPORATE": ("Office coffee option — Purity Beans", f"Hi {n},\n\nI’m Hiten from Pure Pantry Provisions. We’re introducing Purity Beans as a convenient premium coffee option for office/pantry requirements.\n\nIf you handle pantry or procurement, may I send the range and commercial details?"),
-        "PROCUREMENT": ("B2B coffee supply — Purity Beans", f"Hi {n},\n\nI’m reaching out from Pure Pantry Provisions regarding B2B supply of Purity Beans instant coffee. We can share product, pack-size, commercial and supply information for evaluation.\n\nAre you the right person for coffee/pantry procurement at {company}?"),
-        "GIFTING": ("Corporate coffee gifting — Purity Beans", f"Hi {n},\n\nWe’re developing premium Purity Beans coffee gifting options for corporate requirements, including bulk and customised programmes.\n\nWould you like me to send the catalogue?"),
-        "PRIVATE_LABEL": ("Private-label coffee — Pure Pantry Provisions", f"Hi {n},\n\nWe support private-label coffee programmes with custom packaging and B2B supply. If {company} is evaluating a coffee line, I can share our capabilities and MOQ details.\n\nWould you like the information?"),
-        "UNKNOWN": ("A quick coffee supply question", f"Hi {n},\n\nI’m Hiten from Pure Pantry Provisions. We’re introducing Purity Beans, a premium instant coffee range, and I wanted to check whether coffee sourcing is relevant at {company}.\n\nIf yes, may I send a short catalogue?"),
+        "DISTRIBUTOR": (
+            "Distribution partnership — Purity Beans",
+            f"Hi {n},\n\nI’m Hiten from Pure Pantry Provisions. We’re introducing Purity Beans premium instant coffee and are speaking with selected distribution partners in {city}.\n\nWould it be useful if I sent the catalogue and distributor commercial details?",
+        ),
+        "WHOLESALER": (
+            "Wholesale coffee range — Purity Beans",
+            f"Hi {n},\n\nI’m Hiten from Pure Pantry Provisions. We supply Purity Beans premium instant coffee for wholesale and repeat B2B supply.\n\nWould you like the catalogue and wholesale rate structure?",
+        ),
+        "RETAILER": (
+            "Purity Beans — retail coffee partnership",
+            f"Hi {n},\n\nWe’re introducing Purity Beans premium instant coffee for selected retail partners in {city}. The proposition is designed around shelf-ready packs and healthy retailer economics.\n\nMay I send the catalogue and trade details?",
+        ),
+        "HORECA": (
+            f"Coffee supply for {company}",
+            f"Hi {n},\n\nI came across {company} and thought Purity Beans could be relevant for your coffee requirements. We supply premium instant coffee with consistent product and B2B supply support.\n\nWould you like me to send the range for evaluation?",
+        ),
+        "HOTEL": (
+            "Purity Beans — hotel coffee supply",
+            f"Hi {n},\n\nI’m Hiten from Pure Pantry Provisions. We’re onboarding selected hospitality partners for Purity Beans.\n\nIf coffee procurement is relevant at {company}, may I send the range and commercial information?",
+        ),
+        "CORPORATE": (
+            "Office coffee option — Purity Beans",
+            f"Hi {n},\n\nI’m Hiten from Pure Pantry Provisions. We’re introducing Purity Beans as a convenient premium coffee option for office/pantry requirements.\n\nIf you handle pantry or procurement, may I send the range and commercial details?",
+        ),
+        "PROCUREMENT": (
+            "B2B coffee supply — Purity Beans",
+            f"Hi {n},\n\nI’m reaching out from Pure Pantry Provisions regarding B2B supply of Purity Beans instant coffee. We can share product, pack-size, commercial and supply information for evaluation.\n\nAre you the right person for coffee/pantry procurement at {company}?",
+        ),
+        "GIFTING": (
+            "Corporate coffee gifting — Purity Beans",
+            f"Hi {n},\n\nWe’re developing premium Purity Beans coffee gifting options for corporate requirements, including bulk and customised programmes.\n\nWould you like me to send the catalogue?",
+        ),
+        "PRIVATE_LABEL": (
+            "Private-label coffee — Pure Pantry Provisions",
+            f"Hi {n},\n\nWe support private-label coffee programmes with custom packaging and B2B supply. If {company} is evaluating a coffee line, I can share our capabilities and MOQ details.\n\nWould you like the information?",
+        ),
+        "UNKNOWN": (
+            "A quick coffee supply question",
+            f"Hi {n},\n\nI’m Hiten from Pure Pantry Provisions. We’re introducing Purity Beans, a premium instant coffee range, and I wanted to check whether coffee sourcing is relevant at {company}.\n\nIf yes, may I send a short catalogue?",
+        ),
     }
     return drafts.get(cat, drafts["UNKNOWN"])
 
 
 def _wa_text(lead: B2BLead, profile: OutreachProfile) -> str:
     n = _name(lead)
-    return f"Hi {n}, Hiten here from Pure Pantry Provisions. We’re introducing Purity Beans and thought it may be relevant for {lead.company or 'your business'}. Would you like me to send the catalogue?"
+    return (
+        f"Hi {n}, Hiten here from Pure Pantry Provisions. We’re introducing Purity Beans "
+        f"and thought it may be relevant for {lead.company or 'your business'}. "
+        "Would you like me to send the catalogue?"
+    )
 
 
 def _negative(history: list[Any]) -> bool:
     text = _text(*[(getattr(e, "event_type", ""), getattr(e, "payload", "")) for e in history])
-    return any(x in text for x in ("UNSUBSCRIBED", "DO_NOT_CONTACT", "NOT_INTERESTED", "OPTED_OUT", "COMPLAINT"))
+    return any(x in text for x in ("UNSUBSCRIBED", "DO_NOT_CONTACT", "NOT_INTERESTED", "OPTED_OUT", "COMPLAINT", "remove me"))
 
 
 def evaluate_next_action(db: Session, lead: B2BLead, profile: OutreachProfile | None = None) -> dict:
     """Single next-action authority for adaptive outreach."""
     profile = profile or classify_lead(db, lead)
     history = _history(db, lead.id)
-    if _negative(history) or getattr(lead, "contact_status", "") in ("OPTED_OUT", "DO_NOT_CONTACT"):
+    if _negative(history) or getattr(lead, "contact_status", "") in ("OPTED_OUT", "DO_NOT_CONTACT") or profile.intent in (
+        "OPTED_OUT", "NOT_INTERESTED", "DO_NOT_CONTACT", "COMPLAINT"
+    ):
         return {"action": "COOLDOWN", "channel": None, "reason": "negative/opt-out signal", "execute": False}
+
     if profile.intent in ("PRICING_REQUESTED", "NEGOTIATION"):
-        return {"action": "FOUNDER_REVIEW", "channel": "email", "reason": "commercial negotiation requires pricing policy", "execute": False}
+        return {
+            "action": "FOUNDER_REVIEW",
+            "channel": "email",
+            "reason": "commercial negotiation requires pricing policy",
+            "execute": False,
+        }
+
     if profile.intent == "CATALOGUE_REQUESTED":
-        return {"action": "SEND_CATALOGUE", "channel": "whatsapp" if (lead.consent_status or "UNKNOWN") in ("EXPLICIT", "OPTED_IN", "IMPLIED_B2B") else "email", "reason": "prospect explicitly requested catalogue", "execute": True}
-    if profile.warmth in ("ENGAGED", "WARM", "HOT"):
-        return {"action": "CONTINUE_CONVERSATION", "channel": profile.last_channel or "email", "reason": "response/intent history exists", "execute": True}
+        # Prefer WA only with recorded consent; else email catalogue.
+        consent = (getattr(lead, "consent_status", None) or "UNKNOWN").upper()
+        channel = "whatsapp" if consent in ("EXPLICIT", "OPTED_IN", "IMPLIED_B2B") else "email"
+        return {
+            "action": "SEND_CATALOGUE",
+            "channel": channel,
+            "reason": "prospect explicitly requested catalogue",
+            "execute": True,
+        }
 
-    # Cold leads: email is the default automatic warming channel.
-    sent = sum(1 for t in history if getattr(t, "event_type", "") in ("EMAIL_SENT", "OUTREACH_EMAIL_SENT"))
+    # Engaged = wait for human/intent path; do not auto-blast another warm email.
+    if profile.warmth in ("ENGAGED", "WARM", "HOT") and profile.intent not in ("CATALOGUE_REQUESTED",):
+        return {
+            "action": "CONTINUE_CONVERSATION",
+            "channel": profile.last_channel or "email",
+            "reason": "response/intent history exists — no automatic re-send",
+            "execute": False,
+        }
+
+    # Cadence from OutreachTouch proof (not only WorkflowEvent).
+    proven = _proven_email_touches(db, lead.id)
+    sent = len(proven)
     if sent == 0:
-        return {"action": "WARM_FIRST_TOUCH", "channel": "email", "reason": "cold lead with no proven email touch", "execute": True}
+        return {
+            "action": "WARM_FIRST_TOUCH",
+            "channel": "email",
+            "reason": "cold lead with no proven email touch",
+            "execute": True,
+        }
     if sent == 1:
-        last = next((t for t in history if getattr(t, "event_type", "") in ("EMAIL_SENT", "OUTREACH_EMAIL_SENT")), None)
-        if last and getattr(last, "occurred_at", None) and datetime.utcnow() - last.occurred_at >= timedelta(days=3):
-            return {"action": "WARM_FOLLOW_UP", "channel": "email", "reason": "no response after initial touch", "execute": True}
-    return {"action": "NURTURE", "channel": None, "reason": "cadence not yet due", "execute": False}
+        last = proven[0]
+        if last.occurred_at and datetime.utcnow() - last.occurred_at >= timedelta(days=FOLLOW_UP_AFTER_DAYS):
+            return {
+                "action": "WARM_FOLLOW_UP",
+                "channel": "email",
+                "reason": "no response after initial touch",
+                "execute": True,
+            }
+        return {
+            "action": "NURTURE",
+            "channel": None,
+            "reason": f"awaiting {FOLLOW_UP_AFTER_DAYS}d cadence after first touch",
+            "execute": False,
+        }
+    return {"action": "NURTURE", "channel": None, "reason": "cadence complete or not due", "execute": False}
 
 
-def _record(db: Session, lead: B2BLead, profile: OutreachProfile, channel: str, action: str, status: str, template: str, **payload: Any) -> OutreachTouch:
-    touch = OutreachTouch(lead_id=lead.id, profile_id=profile.id, channel=channel, touch_type=action, template_key=template, status=status, payload=payload)
+def _record(
+    db: Session,
+    lead: B2BLead,
+    profile: OutreachProfile,
+    channel: str,
+    action: str,
+    status: str,
+    template: str,
+    **payload: Any,
+) -> OutreachTouch:
+    touch = OutreachTouch(
+        lead_id=lead.id,
+        profile_id=profile.id,
+        channel=channel,
+        touch_type=action,
+        template_key=template,
+        status=status,
+        provider_message_id=payload.get("message_id") or payload.get("provider_message_id"),
+        payload=payload,
+    )
     db.add(touch)
-    profile.touch_count = (profile.touch_count or 0) + 1
+    if status in PROVEN_SEND:
+        profile.touch_count = (profile.touch_count or 0) + 1
     profile.last_channel = channel
     profile.next_action = action
     profile.updated_at = datetime.utcnow()
@@ -265,29 +387,89 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
     if not decision["execute"]:
         return {**decision, "status": "SKIPPED"}
 
+    # Hard duplicate guard: never two proven first touches.
+    if decision["action"] == "WARM_FIRST_TOUCH" and _proven_email_touches(db, lead.id):
+        return {**decision, "status": "SKIPPED", "reason": "duplicate first touch blocked"}
+
     if decision["channel"] == "email":
         from app.services.email_sender import build_outreach_email, send_email
-        count = profile.touch_count or 0
-        subject, body = render_email(lead, profile, 1 if count == 0 else 2)
-        email = build_outreach_email(lead.email or "", lead.contact_name or "", lead.company or "", subject, body, lead_id=lead.id)
+
+        proven_n = len(_proven_email_touches(db, lead.id))
+        subject, body = render_email(lead, profile, 1 if proven_n == 0 else 2)
+        if decision["action"] == "SEND_CATALOGUE":
+            import os
+
+            url = (os.getenv("PURITY_BEANS_CATALOGUE_URL") or "").strip()
+            if not url:
+                _record(db, lead, profile, "email", "SEND_CATALOGUE", "NOT_CONFIGURED", "catalogue_email", reason="PURITY_BEANS_CATALOGUE_URL missing")
+                db.commit()
+                return {**decision, "status": "NOT_CONFIGURED", "reason": "PURITY_BEANS_CATALOGUE_URL is not configured"}
+            subject = f"Purity Beans catalogue — {lead.company or 'your request'}"
+            body = (
+                f"Hi {_name(lead)},\n\nAs requested, here is our catalogue:\n{url}\n\n"
+                "Happy to share commercial details next if useful.\n\nBest,\nHiten\nPure Pantry Provisions"
+            )
         if not lead.email:
             _record(db, lead, profile, "email", decision["action"], "BLOCKED", "missing_email")
             db.commit()
             return {**decision, "status": "BLOCKED", "reason": "missing email"}
+        email = build_outreach_email(
+            lead.email or "",
+            lead.contact_name or "",
+            lead.company or "",
+            subject,
+            body,
+            lead_id=lead.id,
+        )
         result = send_email(email)
         status = "SENT" if result.status == "sent" else result.status.upper()
-        _record(db, lead, profile, "email", decision["action"], status, "typed_day0" if count == 0 else "typed_followup", error=result.error, message_id=result.message_id)
+        # Never claim SENT without a provider message id when status is sent
+        if status == "SENT" and not getattr(result, "message_id", None):
+            status = "UNPROVEN"
+        _record(
+            db,
+            lead,
+            profile,
+            "email",
+            decision["action"],
+            status,
+            "typed_day0" if proven_n == 0 and decision["action"] != "SEND_CATALOGUE" else (
+                "catalogue_email" if decision["action"] == "SEND_CATALOGUE" else "typed_followup"
+            ),
+            error=result.error,
+            message_id=result.message_id,
+        )
         db.commit()
         return {**decision, "status": status, "error": result.error, "message_id": result.message_id}
 
     if decision["channel"] == "whatsapp":
         from app.services.whatsapp_sender import send_whatsapp
+
         result = send_whatsapp(lead, _wa_text(lead, profile))
-        _record(db, lead, profile, "whatsapp", decision["action"], result.status.upper(), "catalogue_request", reason=result.reason, message_id=result.message_id)
+        _record(
+            db,
+            lead,
+            profile,
+            "whatsapp",
+            decision["action"],
+            result.status.upper(),
+            "catalogue_request",
+            reason=result.reason,
+            message_id=result.message_id,
+        )
         db.commit()
         return {**decision, "status": result.status.upper(), "reason": result.reason, "message_id": result.message_id}
 
-    _record(db, lead, profile, decision["channel"] or "unknown", decision["action"], "NOT_CONFIGURED", "none", reason="provider not configured")
+    _record(
+        db,
+        lead,
+        profile,
+        decision["channel"] or "unknown",
+        decision["action"],
+        "NOT_CONFIGURED",
+        "none",
+        reason="provider not configured",
+    )
     db.commit()
     return {**decision, "status": "NOT_CONFIGURED"}
 

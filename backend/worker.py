@@ -1,31 +1,26 @@
 """
 Auto-Warm background worker — runs in its OWN process.
 
-OUTREACH AUTOMATION
-Each cycle:
-  1. Pull real replies from Zoho IMAP (exit sequences on engagement)
-  2. Prepare due sequence drafts for founder approval (nothing sends)
-  3. Drain the approved send queue (founder already said yes)
-  4. Re-learn patterns from outcomes
+Each cycle syncs replies, updates conversation memory, classifies leads, and
+— only when SMART_OUTREACH_ENABLED is explicitly on — executes due
+consent-safe automatic email/WhatsApp outreach and learns measured
+category/channel reply rates.
 
-The founder's only required action is approve/reject at /api/v1/founder/pending.
-Those decisions land in the founder_actions table.
+Ordinary outreach requires no founder approval. Commercial pricing/discount
+policy remains governed by its existing gates.
+
+Default: SMART_OUTREACH_ENABLED=0 so merge ≠ live sending.
 """
 import logging
+import os
 import sys
 import time
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [auto-warm] %(message)s",
-    stream=sys.stdout,
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [auto-warm] %(message)s", stream=sys.stdout)
 
 if __name__ == "__main__":
-    # Fail-closed EMAIL_SENT proof before any drain can write events.
-    # Worker does not run FastAPI startup, so this import is required here.
     import app.models.models  # noqa: F401
-    import app.models.send_proof_fix  # noqa: F401
+    import app.models.send_proof_listener  # noqa: F401
 
     from app.api.endpoints import start_auto_warm_worker, _relearn_patterns
     from app.database.database import SessionLocal
@@ -33,61 +28,84 @@ if __name__ == "__main__":
     logging.info("Auto-Warm worker starting (separate process)")
     start_auto_warm_worker()
 
-    CYCLE_SEC = 600
+    cycle_sec = int(os.getenv("SMART_OUTREACH_CYCLE_SECONDS", "600"))
+    # Default OFF: production must opt in after /health + controlled send proof.
+    enabled = os.getenv("SMART_OUTREACH_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+    limit = max(1, min(100, int(os.getenv("SMART_OUTREACH_LIMIT", "20"))))
+    logging.info("Adaptive outreach: enabled=%s limit=%s cycle=%ss", enabled, limit, cycle_sec)
+
     while True:
+        db = SessionLocal()
         try:
-            db = SessionLocal()
             try:
                 from app.api.endpoints import sync_email_replies
+
                 rep = sync_email_replies(days=7, db=db)
-                logging.info(f"reply sync: {rep}")
+                logging.info("reply sync: %s", rep)
             except Exception as e:
-                logging.error(f"reply sync failed: {e}")
+                logging.error("reply sync failed: %s", e)
                 rep = {"error": str(e)}
+
+            if enabled:
+                try:
+                    from app.services.outreach_lifecycle import run_automatic_cycle
+
+                    result = run_automatic_cycle(db, limit=limit)
+                    logging.info(
+                        "smart outreach: processed=%s memory=%s learning=%s",
+                        result.get("processed"),
+                        result.get("memory"),
+                        result.get("learning"),
+                    )
+                except Exception as e:
+                    logging.error("smart outreach cycle failed: %s", e)
+            else:
+                logging.info("smart outreach disabled (set SMART_OUTREACH_ENABLED=1 after runtime gate)")
 
             try:
                 from app.services.sequence_engine import prepare_due_drafts
+
                 prep = prepare_due_drafts(db)
                 if prep.get("created") or prep.get("due"):
                     logging.info(
-                        f"sequence drafts: created={prep.get('created')} "
-                        f"due={prep.get('due')} skipped={prep.get('skipped')} "
-                        f"— {prep.get('founder_next')}"
+                        "legacy sequence drafts: created=%s due=%s skipped=%s",
+                        prep.get("created"),
+                        prep.get("due"),
+                        prep.get("skipped"),
                     )
             except Exception as e:
-                logging.error(f"sequence prepare failed: {e}")
-
-            try:
-                from app.services.send_queue import drain
-                q = drain(db)
-                if q.get("approved_waiting") or q.get("sent"):
-                    logging.info(
-                        f"send queue: {q.get('sent')} sent, "
-                        f"{q.get('held')} held, {q.get('blocked')} blocked, "
-                        f"{q.get('approved_waiting')} approved waiting"
-                    )
-            except Exception as e:
-                logging.error(f"send queue drain failed: {e}")
-
-            try:
-                from app.services.heartbeat import beat
-                beat("worker", db, {
-                    "reply_sync": str(rep)[:120],
-                    "sequence": "prepared",
-                    "send_queue": "drained",
-                })
-                beat("sequence_engine", db, {"note": "prepare_due_drafts ran"})
-                beat("send_queue", db, {"note": "drain ran"})
-            except Exception as e:
-                logging.error(f"heartbeat failed: {e}")
+                logging.error("sequence prepare failed: %s", e)
 
             try:
                 result = _relearn_patterns(db)
-                logging.info(f"re-learned patterns from real outcomes: {result}")
+                logging.info("re-learned legacy patterns: %s", result)
             except Exception as e:
-                logging.error(f"relearn failed: {e}")
+                logging.error("legacy relearn failed: %s", e)
 
-            db.close()
+            try:
+                from app.services.heartbeat import beat
+
+                beat(
+                    "worker",
+                    db,
+                    {
+                        "reply_sync": str(rep)[:120],
+                        "smart_outreach": "enabled" if enabled else "disabled",
+                    },
+                )
+                beat(
+                    "smart_outreach",
+                    db,
+                    {
+                        "note": "classify -> evaluate_next_action -> execute -> learn",
+                        "limit": limit,
+                        "enabled": enabled,
+                    },
+                )
+            except Exception as e:
+                logging.error("heartbeat failed: %s", e)
         except Exception as e:
-            logging.error(f"worker cycle failed: {e}")
-        time.sleep(CYCLE_SEC)
+            logging.error("worker cycle failed: %s", e)
+        finally:
+            db.close()
+        time.sleep(cycle_sec)
