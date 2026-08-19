@@ -1,13 +1,4 @@
 // Credentials come from backend/.env, never from this file.
-//
-// Seven live secrets were inlined here and this file is tracked in git, so
-// every key was readable in history — the same exposure as backend/.env, which
-// has now been untracked. This file stays tracked because it holds the process
-// definitions, which belong in version control; only the secrets move out.
-//
-// Parsed by hand rather than via `dotenv` on purpose: pm2 must always be able
-// to read this config, and a missing node_module would stop every process from
-// starting. A missing .env now yields empty strings and a loud warning instead.
 const fs = require("fs");
 const path = require("path");
 
@@ -22,8 +13,7 @@ function loadEnv(file) {
       out[line.slice(0, i).trim()] = line.slice(i + 1).trim().replace(/^["']|["']$/g, "");
     }
   } catch (e) {
-    console.error(`[ecosystem] could not read ${file}: ${e.message} — ` +
-                  `processes will start WITHOUT credentials`);
+    console.error(`[ecosystem] could not read ${file}: ${e.message} — processes start WITHOUT credentials`);
   }
   return out;
 }
@@ -45,10 +35,6 @@ module.exports = {
     {
       name: "purity-api",
       script: PYTHON,
-      // run_server.py forces the Windows SelectorEventLoop. With the default
-      // Proactor loop, uvicorn's accept coroutine dies on WinError 64 ("Accept
-      // failed on a socket") — the port stays LISTENING and pm2 shows "online"
-      // while the API silently stops accepting every connection.
       args: "run_server.py",
       cwd: BACKEND_DIR,
       interpreter: "none",
@@ -58,30 +44,17 @@ module.exports = {
       min_uptime: 3000,
       env: {
         PYTHONUNBUFFERED: "1",
-        // Continuous in-process enrichment starves the ASGI event loop
-        // (CPU-bound HTML parsing holds the GIL) and made the dashboard
-        // unresponsive after sleep. Off by default; enrichment still runs
-        // on-demand from discovery/page actions. Set to "1" to re-enable.
         AUTO_WARM_ENABLED: "0",
         SENDER_EMAIL: "connect@purepantryprovisions.com",
         SENDER_NAME: "Hiten Jain | Pure Pantry Provisions",
         ZOHO_APP_PASSWORD: need("ZOHO_APP_PASSWORD"),
         CEREBRAS_API_KEY: need("CEREBRAS_API_KEY"),
-        // The .myshopify.com domain, NOT the custom domain. Verified against the
-        // Admin API: purepantryprovisions.myshopify.com returns 404 on every API
-        // version, 55hd0v-ff.myshopify.com returns 200 with shop id 71263158459.
-        // The token was always valid; every Shopify call was hitting a store
-        // that does not exist.
         SHOPIFY_STORE: "55hd0v-ff.myshopify.com",
         SHOPIFY_TOKEN: need("SHOPIFY_TOKEN"),
         GOOGLE_MAPS_API_KEY: need("GOOGLE_MAPS_API_KEY"),
       },
     },
     {
-      // Auto-Warm enrichment in its OWN process. It used to run as a thread
-      // inside purity-api, where its CPU-bound HTML parsing held the GIL and
-      // froze the ASGI event loop (hence AUTO_WARM_ENABLED=0 above). Isolated
-      // here it can run continuously without ever touching API latency.
       name: "purity-worker",
       script: PYTHON,
       args: "worker.py",
@@ -93,12 +66,34 @@ module.exports = {
       min_uptime: 5000,
       env: {
         PYTHONUNBUFFERED: "1",
-        AUTO_WARM_ENABLED: "1",   // enabled ONLY in this isolated process
+        AUTO_WARM_ENABLED: "1",
         SENDER_EMAIL: "connect@purepantryprovisions.com",
         SENDER_NAME: "Hiten Jain | Pure Pantry Provisions",
         ZOHO_APP_PASSWORD: need("ZOHO_APP_PASSWORD"),
         CEREBRAS_API_KEY: need("CEREBRAS_API_KEY"),
         GOOGLE_MAPS_API_KEY: need("GOOGLE_MAPS_API_KEY"),
+      },
+    },
+    {
+      name: "purity-outreach",
+      script: PYTHON,
+      args: "smart_outreach_worker.py",
+      cwd: BACKEND_DIR,
+      interpreter: "none",
+      autorestart: true,
+      restart_delay: 10000,
+      max_restarts: 20,
+      min_uptime: 5000,
+      env: {
+        PYTHONUNBUFFERED: "1",
+        AUTO_OUTREACH_ENABLED: "1",
+        OUTREACH_INTERVAL_SECONDS: "900",
+        OUTREACH_BATCH_SIZE: "20",
+        SENDER_EMAIL: "connect@purepantryprovisions.com",
+        SENDER_NAME: "Hiten Jain | Pure Pantry Provisions",
+        ZOHO_APP_PASSWORD: need("ZOHO_APP_PASSWORD"),
+        AISENSY_API_KEY: need("AISENSY_API_KEY"),
+        AISENSY_CAMPAIGN_NAME: need("AISENSY_CAMPAIGN_NAME"),
       },
     },
     {
