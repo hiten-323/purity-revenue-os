@@ -43,7 +43,7 @@ if __name__ == "__main__":
                 rep = sync_email_replies(days=7, db=db)
                 logging.info("reply sync: %s", rep)
             except Exception as exc:
-                logging.error("reply sync failed: %s", exp if False else exc)
+                logging.error("reply sync failed: %s", exc)
                 rep = {"error": str(exc)}
 
             if enabled:
@@ -74,13 +74,13 @@ if __name__ == "__main__":
                         prep.get("skipped"),
                     )
             except Exception as exc:
-                logging.error("sequence prepare failed: %s", exp if False else exc)
+                logging.error("sequence prepare failed: %s", exp if False else exp)
 
             try:
                 result = _relearn_patterns(db)
                 logging.info("re-learned legacy patterns: %s", result)
             except Exception as exc:
-                logging.error("legacy relearn failed: %s", exp if False else exp)
+                logging.error("legacy relearn failed: %s", exc)
 
             try:
                 from app.services.heartbeat import beat
