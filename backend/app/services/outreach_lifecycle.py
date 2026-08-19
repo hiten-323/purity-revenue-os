@@ -1,17 +1,16 @@
 """Lifecycle memory and learning for automatic B2B outreach.
 
-This module does not create a second decision engine.  It feeds observed
+This module does not create a second decision engine. It feeds observed
 interaction history into smart_outreach.evaluate_next_action(), records intent,
 and learns measured conversion patterns from the real lifecycle.
 
-Automatic means no founder approval is required for ordinary outreach.  Provider
+Automatic means no founder approval is required for ordinary outreach. Provider
 and compliance gates remain absolute: email trust/deliverability gates and the
 WhatsApp consent/template gate cannot be bypassed here.
 """
 from __future__ import annotations
 
-import os
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -26,17 +25,18 @@ from app.services.smart_outreach import (
     execute_one,
 )
 
-
 POSITIVE_INTENTS = {
-    "CATALOGUE_REQUESTED",
-    "PRICING_REQUESTED",
-    "SAMPLE_REQUESTED",
-    "MEETING_REQUESTED",
-    "CALLBACK",
-    "INTERESTED",
-    "NEGOTIATION",
+    "CATALOGUE_REQUESTED", "PRICING_REQUESTED", "SAMPLE_REQUESTED",
+    "MEETING_REQUESTED", "CALLBACK", "INTERESTED", "NEGOTIATION",
 }
 NEGATIVE_INTENTS = {"NOT_INTERESTED", "OPTED_OUT", "DO_NOT_CONTACT", "COMPLAINT"}
+
+
+def ensure_schema() -> None:
+    """Create the outreach tables on a worker-only deployment too."""
+    from app.database.database import Base, engine
+    import app.services.smart_outreach  # noqa: F401 - registers ORM models
+    Base.metadata.create_all(bind=engine)
 
 
 def _text(value: Any) -> str:
@@ -51,7 +51,7 @@ def infer_intent(event: WorkflowEvent) -> str:
     """Classify an observed inbound event without inventing facts."""
     text = _text(event.event_type) + " " + _text(event.payload)
     if any(x in text for x in ("unsubscribe", "opted_out", "do_not_contact", "remove me", "not interested")):
-        return "OPTED_OUT" if "unsubscribe" in text or "opted_out" in text else "NOT_INTERESTED"
+        return "OPTED_OUT" if any(x in text for x in ("unsubscribe", "opted_out")) else "NOT_INTERESTED"
     if any(x in text for x in ("price", "pricing", "rate", "wholesale", "best price", "moq")):
         return "PRICING_REQUESTED"
     if any(x in text for x in ("catalogue", "catalog", "send it", "send details", "share details")):
@@ -72,36 +72,31 @@ def _latest_inbound_events(db: Session, since_hours: int = 48) -> list[WorkflowE
     return (
         db.query(WorkflowEvent)
         .filter(WorkflowEvent.occurred_at >= cutoff)
-        .filter(WorkflowEvent.event_type.in_(
-            [
-                "EMAIL_REPLY_RECEIVED", "REPLY_RECEIVED", "WHATSAPP_REPLY",
-                "UNSUBSCRIBED", "OPTED_OUT", "DO_NOT_CONTACT", "COMPLAINT",
-            ]
-        ))
+        .filter(WorkflowEvent.event_type.in_([
+            "EMAIL_REPLY_RECEIVED", "REPLY_RECEIVED", "WHATSAPP_REPLY",
+            "UNSUBSCRIBED", "OPTED_OUT", "DO_NOT_CONTACT", "COMPLAINT",
+        ]))
         .order_by(WorkflowEvent.occurred_at.asc())
         .all()
     )
 
 
 def sync_inbound_memory(db: Session, since_hours: int = 48) -> dict:
-    """Turn inbound events into durable lead/profile memory exactly once."""
+    """Turn inbound events into durable lead/profile memory."""
+    ensure_schema()
     events = _latest_inbound_events(db, since_hours=since_hours)
     updated = 0
     by_intent: Counter[str] = Counter()
-    seen = set()
     for event in events:
-        key = (event.id, event.event_type)
-        if key in seen or not event.lead_id:
+        if not event.lead_id:
             continue
-        seen.add(key)
         lead = db.query(B2BLead).filter(B2BLead.id == event.lead_id).first()
         if not lead:
             continue
-        profile = classify_lead(db, lead)
         intent = infer_intent(event)
         if intent == "NONE":
             continue
-
+        profile = classify_lead(db, lead)
         profile.last_intent = intent
         profile.intent = intent
         profile.last_channel = (event.channel or "").lower() or profile.last_channel
@@ -117,7 +112,6 @@ def sync_inbound_memory(db: Session, since_hours: int = 48) -> dict:
         profile.next_action_at = datetime.utcnow()
         by_intent[intent] += 1
         updated += 1
-
     if updated:
         db.commit()
     return {"events_seen": len(events), "profiles_updated": updated, "intents": dict(by_intent)}
@@ -131,26 +125,29 @@ def _metric_row(db: Session, category: str, channel: str) -> dict:
         .all()
     )
     lead_ids = {t.lead_id for t in touches}
-    replies = (
-        db.query(WorkflowEvent)
-        .filter(WorkflowEvent.lead_id.in_(lead_ids) if lead_ids else False)
-        .filter(WorkflowEvent.event_type.in_(("EMAIL_REPLY_RECEIVED", "REPLY_RECEIVED", "WHATSAPP_REPLY")))
-        .count()
-    ) if lead_ids else 0
+    if not lead_ids:
+        replies = 0
+    else:
+        replies = (
+            db.query(WorkflowEvent)
+            .filter(WorkflowEvent.lead_id.in_(lead_ids))
+            .filter(WorkflowEvent.event_type.in_(("EMAIL_REPLY_RECEIVED", "REPLY_RECEIVED", "WHATSAPP_REPLY")))
+            .count()
+        )
     sent = sum(1 for t in touches if t.status in ("SENT", "PROVIDER_ACCEPTED", "DELIVERED", "READ"))
     return {"sent": sent, "replies": replies, "reply_rate": (replies / sent * 100.0) if sent else 0.0}
 
 
 def learn_from_lifecycle(db: Session, min_sample: int = 5) -> dict:
     """Persist measured category/channel reply rates; thin samples stay inert."""
+    ensure_schema()
     profiles = db.query(OutreachProfile).all()
     categories = sorted({p.category for p in profiles if p.category})
-    channels = ("email", "whatsapp")
     learned = 0
     for category in categories:
-        for channel in channels:
-            m = _metric_row(db, category, channel)
-            if m["sent"] < min_sample:
+        for channel in ("email", "whatsapp"):
+            metric = _metric_row(db, category, channel)
+            if metric["sent"] < min_sample:
                 continue
             row = (
                 db.query(LearnedPattern)
@@ -160,15 +157,11 @@ def learn_from_lifecycle(db: Session, min_sample: int = 5) -> dict:
                 .first()
             )
             if row is None:
-                row = LearnedPattern(
-                    scope="category_channel",
-                    key=f"{category}:{channel}",
-                    metric="reply_rate_pct",
-                )
+                row = LearnedPattern(scope="category_channel", key=f"{category}:{channel}", metric="reply_rate_pct")
                 db.add(row)
-            row.value = round(m["reply_rate"], 2)
-            row.sample_size = m["sent"]
-            row.wins = m["replies"]
+            row.value = round(metric["reply_rate"], 2)
+            row.sample_size = metric["sent"]
+            row.wins = metric["replies"]
             row.updated_at = datetime.utcnow()
             learned += 1
     if learned:
@@ -176,10 +169,9 @@ def learn_from_lifecycle(db: Session, min_sample: int = 5) -> dict:
     return {"patterns_updated": learned}
 
 
-def _best_channel(db: Session, category: str, eligible: tuple[str, ...] = ("email", "whatsapp")) -> str:
-    """Choose the historically better eligible channel, with email as the cold default."""
+def _best_channel(db: Session, category: str) -> str:
     candidates = []
-    for channel in eligible:
+    for channel in ("email", "whatsapp"):
         row = (
             db.query(LearnedPattern)
             .filter(LearnedPattern.scope == "category_channel")
@@ -194,8 +186,8 @@ def _best_channel(db: Session, category: str, eligible: tuple[str, ...] = ("emai
 
 def run_automatic_cycle(db: Session, limit: int = 20) -> dict:
     """Sync memory, execute due outreach, then relearn from outcomes."""
+    ensure_schema()
     memory = sync_inbound_memory(db)
-
     leads = (
         db.query(B2BLead)
         .filter(B2BLead.contact_status.notin_(("OPTED_OUT", "DO_NOT_CONTACT", "BOUNCED")))
@@ -207,9 +199,6 @@ def run_automatic_cycle(db: Session, limit: int = 20) -> dict:
     for lead in leads:
         try:
             profile = classify_lead(db, lead)
-            # Historical learning influences only channel selection when the
-            # channel is legally/provider eligible. It never overrides
-            # evaluate_next_action() or the provider gates.
             decision = evaluate_next_action(db, lead, profile)
             if decision.get("execute") and decision.get("action") in ("WARM_FIRST_TOUCH", "WARM_FOLLOW_UP"):
                 preferred = _best_channel(db, profile.category)
@@ -224,6 +213,5 @@ def run_automatic_cycle(db: Session, limit: int = 20) -> dict:
         except Exception as exc:
             db.rollback()
             results.append({"lead_id": lead.id, "company": lead.company, "status": "FAILED", "error": str(exc)[:300]})
-
     learning = learn_from_lifecycle(db)
     return {"memory": memory, "processed": len(results), "results": results, "learning": learning}
