@@ -42,9 +42,9 @@ if __name__ == "__main__":
 
                 rep = sync_email_replies(days=7, db=db)
                 logging.info("reply sync: %s", rep)
-            except Exception as exc:
-                logging.error("reply sync failed: %s", exc)
-                rep = {"error": str(exc)}
+            except Exception as e:
+                logging.error("reply sync failed: %s", e)
+                rep = {"error": str(e)}
 
             if enabled:
                 try:
@@ -57,8 +57,8 @@ if __name__ == "__main__":
                         result.get("memory"),
                         result.get("learning"),
                     )
-                except Exception as exc:
-                    logging.error("smart outreach cycle failed: %s", exc)
+                except Exception as e:
+                    logging.error("smart outreach cycle failed: %s", e)
             else:
                 logging.info("smart outreach disabled (set SMART_OUTREACH_ENABLED=1 after runtime gate)")
 
@@ -73,14 +73,14 @@ if __name__ == "__main__":
                         prep.get("due"),
                         prep.get("skipped"),
                     )
-            except Exception as exc:
-                logging.error("sequence prepare failed: %s", exp if False else exp)
+            except Exception as e:
+                logging.error("sequence prepare failed: %s", e)
 
             try:
                 result = _relearn_patterns(db)
                 logging.info("re-learned legacy patterns: %s", result)
-            except Exception as exc:
-                logging.error("legacy relearn failed: %s", exc)
+            except Exception as e:
+                logging.error("legacy relearn failed: %s", e)
 
             try:
                 from app.services.heartbeat import beat
@@ -102,10 +102,10 @@ if __name__ == "__main__":
                         "enabled": enabled,
                     },
                 )
-            except Exception as exc:
-                logging.error("heartbeat failed: %s", exp if False else exp)
-        except Exception as exc:
-            logging.error("worker cycle failed: %s", exp if False else exp)
+            except Exception as e:
+                logging.error("heartbeat failed: %s", e)
+        except Exception as e:
+            logging.error("worker cycle failed: %s", e)
         finally:
             db.close()
         time.sleep(cycle_sec)
