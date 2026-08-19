@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.database.database import get_db
 from app.models.models import B2BLead
-from app.services.smart_outreach import classify_lead, evaluate_next_action, execute_one, run_cycle
+from app.services.smart_outreach import classify_lead, plan_touch, execute_one, run_cycle
 
 router = APIRouter(prefix="/smart-outreach", tags=["Smart Outreach"])
 

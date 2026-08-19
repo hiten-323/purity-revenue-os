@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database.database import Base
 from app.models.models import B2BLead, WorkflowEvent
-from app.services.smart_outreach import OutreachProfile, OutreachTouch, classify_lead, evaluate_next_action
+from app.services.smart_outreach import OutreachProfile, OutreachTouch, classify_lead, plan_touch
 
 
 def _sendable(**kw):
@@ -63,7 +63,7 @@ def test_history_changes_intent_without_changing_category():
     assert profile.category == "RETAILER"
     assert profile.warmth == "WARM"
     assert profile.intent == "CATALOGUE_REQUESTED"
-    action = evaluate_next_action(db, lead, profile)
+    action = plan_touch(db, lead, profile)
     assert action["action"] == "SEND_CATALOGUE"
 
 
@@ -75,7 +75,7 @@ def test_negative_history_stops_automation():
     from app.models.models import WorkflowEvent
     db.add(WorkflowEvent(lead_id=lead.id, event_type="UNSUBSCRIBED", actor="PROSPECT", channel="email", payload={}, occurred_at=datetime.utcnow()))
     db.commit()
-    decision = evaluate_next_action(db, lead)
+    decision = plan_touch(db, lead)
     assert decision["action"] == "COOLDOWN"
     assert decision["execute"] is False
 
@@ -85,7 +85,7 @@ def test_cold_lead_defaults_to_email_warming():
     lead = _sendable(company="Cold Office Pvt Ltd", division="corporate", industry="IT office", email="buyer@coldoffice.in", status="DISCOVERED")
     db.add(lead)
     db.commit()
-    decision = evaluate_next_action(db, lead)
+    decision = plan_touch(db, lead)
     assert decision["action"] == "WARM_FIRST_TOUCH"
     assert decision["channel"] == "email"
     assert decision["execute"] is True
@@ -106,6 +106,6 @@ def test_followup_only_after_cadence():
                          payload={"to": lead.email, "message_id": "<followup-co-1@test>"},
                          occurred_at=datetime.utcnow() - timedelta(days=4)))
     db.commit()
-    decision = evaluate_next_action(db, lead)
+    decision = plan_touch(db, lead)
     assert decision["action"] == "WARM_FOLLOW_UP"
     assert decision["channel"] == "email"

@@ -1,6 +1,7 @@
 """Adaptive B2B outreach for Purity Beans.
 
-One authority owns the next step: evaluate_next_action().  Classification is
+decision_engine.evaluate_next_action owns permission; plan_touch shapes the
+touch within it.  Classification is
 an evidence/memory layer, not a competing director.  The engine learns from
 lead fields and WorkflowEvent history, renders category-specific copy, and
 executes only channels that have a valid provider/compliance path.
@@ -344,9 +345,17 @@ def _negative(history: list[Any]) -> bool:
     return _mentions(text, *SUPPRESSION_EVENTS)
 
 
-def evaluate_next_action(db: Session, lead: B2BLead, profile: OutreachProfile | None = None) -> dict:
+def plan_touch(db: Session, lead: B2BLead, profile: OutreachProfile | None = None) -> dict:
     """
     Chooses the SHAPE of an adaptive touch — which message, on which channel.
+
+    Named plan_touch, not evaluate_next_action. Two functions sharing that name
+    is how this module came to re-answer questions decision_engine already
+    owned: at a call site `evaluate_next_action(...)` gave no hint which
+    authority you were invoking, and the two disagreed — this one let an
+    unsubscribed contact through and emailed addresses the trust engine had
+    never approved. The name now states the hierarchy: one engine evaluates,
+    this plans within its verdict.
 
     It is not a second gate. decision_engine.evaluate_next_action remains the
     authority on whether this lead may be contacted at all (suppression, trust,
@@ -486,7 +495,7 @@ def _record(
 
 def execute_one(db: Session, lead: B2BLead) -> dict:
     profile = classify_lead(db, lead)
-    decision = evaluate_next_action(db, lead, profile)
+    decision = plan_touch(db, lead, profile)
     if not decision["execute"]:
         return {**decision, "status": "SKIPPED"}
 

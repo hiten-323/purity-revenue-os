@@ -1,7 +1,7 @@
 """Lifecycle memory and learning for automatic B2B outreach.
 
 This module does not create a second decision engine. It feeds observed
-interaction history into smart_outreach.evaluate_next_action(), records intent,
+interaction history into smart_outreach.plan_touch(), records intent,
 and learns measured conversion patterns from the real lifecycle.
 
 Automatic means no founder approval is required for ordinary outreach. Provider
@@ -22,7 +22,7 @@ from app.services.smart_outreach import (
     OutreachProfile,
     OutreachTouch,
     classify_lead,
-    evaluate_next_action,
+    plan_touch,
     execute_one,
 )
 
@@ -136,7 +136,7 @@ def sync_inbound_memory(db: Session, since_hours: int = 48) -> dict:
             profile.warmth = "HOT"
         elif intent in POSITIVE_INTENTS:
             profile.warmth = "WARM"
-        profile.next_action = evaluate_next_action(db, lead, profile).get("action")
+        profile.next_action = plan_touch(db, lead, profile).get("action")
         profile.next_action_at = datetime.utcnow()
         by_intent[intent] += 1
         updated += 1
@@ -224,7 +224,7 @@ def _best_channel(db: Session, category: str) -> str:
 def run_automatic_cycle(db: Session, limit: int = 20) -> dict:
     """Sync memory, execute due outreach, fulfil explicit catalogue requests, then learn.
 
-    Catalogue and warm sends go through execute_one / evaluate_next_action so
+    Catalogue and warm sends go through execute_one / plan_touch so
     email fallback and touch idempotency stay in one place.
     """
     ensure_schema()
@@ -240,7 +240,7 @@ def run_automatic_cycle(db: Session, limit: int = 20) -> dict:
     for lead in leads:
         try:
             profile = classify_lead(db, lead)
-            decision = evaluate_next_action(db, lead, profile)
+            decision = plan_touch(db, lead, profile)
             if decision.get("execute") and decision.get("action") in (
                 "WARM_FIRST_TOUCH",
                 "WARM_FOLLOW_UP",
