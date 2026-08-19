@@ -24,9 +24,32 @@ import sys
 BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BACKEND)
 
+ENV_PATH = os.path.join(BACKEND, ".env")
+
+# What the FILE says, read independently of the process environment.
+def _file_values(path: str) -> dict:
+    out = {}
+    if not os.path.exists(path):
+        return out
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for raw in fh:
+            t = raw.strip()
+            if not t or t.startswith("#") or "=" not in t:
+                continue
+            k, v = t.split("=", 1)
+            out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+FILE_ENV = _file_values(ENV_PATH)
+
 try:
     from dotenv import load_dotenv
-    load_dotenv(os.path.join(BACKEND, ".env"))
+    # NOT override=True on purpose: this must see exactly what the application
+    # sees. python-dotenv leaves an existing OS variable in place, so if one
+    # shadows the file the app uses the OS value and so must this check. The
+    # shadow report below is what makes that visible instead of silent.
+    load_dotenv(ENV_PATH)
 except Exception:
     pass
 
@@ -48,6 +71,18 @@ def record(name: str, ok: bool, detail: str, value: str | None = None):
 def env(name: str) -> str:
     return (os.getenv(name) or "").strip()
 
+
+# ── 0. Is anything shadowing the .env? ───────────────────────────────────
+# A rotated key in .env is inert if a stale OS environment variable holds the
+# old value: load_dotenv() does not override an existing variable, so every
+# process keeps using the old credential. AISENSY_API_KEY was found set as a
+# Windows User variable with the pre-rotation value while .env already held the
+# new one — the rotation looked done and changed nothing.
+_shadowed = []
+for _k, _fileval in FILE_ENV.items():
+    _live = os.getenv(_k)
+    if _live is not None and _fileval and _live != _fileval:
+        _shadowed.append(_k)
 
 print("POST-ROTATION CREDENTIAL VERIFICATION")
 print("(read-only probes; no message is sent and no secret is printed)\n")
@@ -160,6 +195,15 @@ for a, b in pairs:
                "independently generated secrets")
     elif va and vb:
         record(f"{a} != {b}", True, "distinct values")
+
+# ── 9. Shadowing is a failure in its own right ───────────────────────────
+for _k in _shadowed:
+    record(f"{_k} (.env vs OS env)", False,
+           "an OS environment variable overrides .env — the rotated value in "
+           "the file is NOT what the application will use. Remove the OS "
+           "variable, then reopen the shell.")
+if not _shadowed:
+    record("no OS env shadows .env", True, "file values are what the app sees")
 
 failed = [n for n, ok, _ in results if not ok]
 print("\n" + "=" * 64)
