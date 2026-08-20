@@ -333,7 +333,13 @@ def build_draft(lead, memory: dict | None, sent_count: int, replied: bool,
     mem = memory or {}
     p = pitch_for(getattr(lead, "division", "") or "")
     stage = choose_stage(sent_count, replied, days_since_last)
-    company = (lead.company or "").strip()
+    # Customer-facing name, never the raw directory string. Nine subject
+    # templates across four modules interpolate this, and one produced
+    # "A sample for WrkPod | Coworking Space in Coimbatore | Shared Office
+    # Space?" as a live subject. Cleaning at each derivation keeps the raw
+    # value on the record for provenance while nothing customer-facing sees it.
+    from app.services.lead_quality import display_name
+    company = display_name(lead.company or "")
 
     used = []
     dm = (mem.get("decision_maker") or "").strip()

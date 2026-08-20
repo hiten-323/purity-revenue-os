@@ -151,7 +151,13 @@ def llm_status() -> dict:
 
 def _template_email(lead: B2BLead, follow_up_type: str) -> tuple[str, str]:
     first = (lead.contact_name or "").split()[0] if lead.contact_name else "there"
-    company = lead.company
+    # Customer-facing name, never the raw directory string. Nine subject
+    # templates across four modules interpolate this, and one produced
+    # "A sample for WrkPod | Coworking Space in Coimbatore | Shared Office
+    # Space?" as a live subject. Cleaning at each derivation keeps the raw
+    # value on the record for provenance while nothing customer-facing sees it.
+    from app.services.lead_quality import display_name
+    company = display_name(lead.company or "")
     city = lead.city or "your city"
 
     if follow_up_type == "nudge":

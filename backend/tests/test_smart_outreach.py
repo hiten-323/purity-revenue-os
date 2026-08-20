@@ -20,6 +20,11 @@ def _sendable(**kw):
     kw.setdefault("email_trust", "VERIFIED")
     kw.setdefault("email_confidence", 80)
     kw.setdefault("email_source", "FOUNDER_CALL")
+    # Category evidence. The record-quality gate treats coffee_buying_score 0
+    # as "no evidence matched" -> NEEDS_ENRICHMENT, so a lead built without it
+    # is never sendable and these tests would be asserting that an unclassified
+    # business may be cold-emailed. 70 is the real score for a restaurant.
+    kw.setdefault("coffee_buying_score", 70)
     return B2BLead(**kw)
 
 

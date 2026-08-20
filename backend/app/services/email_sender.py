@@ -674,7 +674,16 @@ def generate_b2b_pitch_email(lead: B2BLead) -> tuple[str, str]:
       - Role-safe greeting; institutional buyers get a neutral salutation
     """
     cat = _resolve_email_category(lead)
-    company = (lead.company or "").strip()
+    # Customer-facing name, not the raw directory string. This produced
+    # "A sample for WrkPod | Coworking Space in Coimbatore | Shared Office
+    # Space?" as a live subject line — a scraped listing shown to a buyer, and
+    # an unmistakable signal that nobody wrote the message. The raw value stays
+    # on the record for provenance; only what the buyer reads is cleaned.
+    try:
+        from app.services.lead_quality import display_name
+        company = display_name(lead.company or "")
+    except Exception:
+        company = (lead.company or "").strip()
     greeting = _greeting_for(lead)
     city_part = f" in {lead.city}" if lead.city else ""
 

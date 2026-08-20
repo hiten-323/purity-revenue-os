@@ -173,7 +173,13 @@ def _result(
 
 def generate_email_preview(lead) -> dict:
     name = lead.contact_name or "Procurement Team"
-    company = lead.company or "your organization"
+    # Customer-facing name, never the raw directory string. Nine subject
+    # templates across four modules interpolate this, and one produced
+    # "A sample for WrkPod | Coworking Space in Coimbatore | Shared Office
+    # Space?" as a live subject. Cleaning at each derivation keeps the raw
+    # value on the record for provenance while nothing customer-facing sees it.
+    from app.services.lead_quality import display_name
+    company = display_name(lead.company or "") or "your organization"
     division = (lead.division or "corporate").lower()
     city = lead.city or "your city"
 

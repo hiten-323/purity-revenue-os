@@ -955,6 +955,37 @@ def evaluate_next_action(lead, db) -> dict:
                          blockers, f,
                          audit + ["a commitment outranks any scheduled touch"])
 
+    # 2c. Is the RECORD fit to put in front of a business?
+    #
+    # Distinct from trust, which asks whether the ADDRESS can receive mail.
+    # This asks whether what we know about the company is good enough to
+    # contact them at all. A preview of the next 20 sends produced the subject
+    # "A sample for WrkPod | Coworking Space in Coimbatore | Shared Office
+    # Space?" — a scraped directory listing shown to a buyer — alongside leads
+    # whose name said Mohali while the record said Bathinda.
+    #
+    # Placed AFTER the commitment gate on purpose: a catalogue promised on a
+    # call is still owed even if the stored name is messy. It only governs
+    # outreach we initiate.
+    try:
+        from app.services.lead_quality import classify_candidate, READY_TO_SEND
+        q = classify_candidate(lead, db)
+        f["quality"] = q
+        if q["bucket"] != READY_TO_SEND:
+            blockers.append(q["bucket"].lower())
+            # NEEDS_ENRICHMENT means "we have not looked", not "no" — it routes
+            # to enrichment. Everything else waits for a human or a fix.
+            act = "ENRICH" if q["bucket"] == "NEEDS_ENRICHMENT" else "DRAFT_ONLY"
+            return _decision(act, f"{q['bucket']}: {q['reason']}", 88, blockers, f,
+                             audit + ["record quality gate — identity before outreach"])
+    except Exception as e:
+        # A gate that cannot answer must never read as permission.
+        blockers.append("quality_gate_unavailable")
+        return _decision("FOUNDER_REVIEW",
+                         f"quality gate unavailable ({e.__class__.__name__})",
+                         80, blockers, f,
+                         audit + ["refusing to send without the quality gate"])
+
     # 3. May this address be used at all?
     if not f["trust"]["may_send"]:
         blockers.append("not_sendable")
