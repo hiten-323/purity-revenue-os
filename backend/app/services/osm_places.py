@@ -27,10 +27,8 @@ _OVERPASS = os.getenv(
     "OVERPASS_URL", "https://overpass-api.de/api/interpreter"
 )
 
-# Last Nominatim call monotonic time — enforce ≥1.1s between requests.
 _last_nominatim = 0.0
 
-# Query text fragments → Overpass tag filters
 _QUERY_TAGS: list[tuple[re.Pattern, list[str]]] = [
     (re.compile(r"cafe|coffee|restaurant|hotel|cater", re.I),
      ['node["amenity"~"^(cafe|restaurant|hotel|fast_food)$"]',
@@ -77,19 +75,13 @@ def _norm_phone(phone: str) -> str:
 
 
 def geocode_city(city: str, country: str = "India") -> Optional[tuple[float, float, dict]]:
-    """Return (lat, lon, bbox_dict) or None."""
     q = f"{city}, {country}".strip()
     _throttle_nominatim()
     try:
         with httpx.Client(timeout=25, headers={"User-Agent": _UA}) as client:
             r = client.get(
                 f"{_NOMINATIM}/search",
-                params={
-                    "q": q,
-                    "format": "json",
-                    "limit": 1,
-                    "addressdetails": 1,
-                },
+                params={"q": q, "format": "json", "limit": 1, "addressdetails": 1},
             )
             r.raise_for_status()
             data = r.json() or []
@@ -98,12 +90,10 @@ def geocode_city(city: str, country: str = "India") -> Optional[tuple[float, flo
             hit = data[0]
             lat = float(hit["lat"])
             lon = float(hit["lon"])
-            # bb: south,north,west,east from nominatim sometimes as string
             bb = hit.get("boundingbox") or []
             if len(bb) == 4:
                 south, north, west, east = map(float, bb)
             else:
-                # ~8km box around point
                 d = 0.08
                 south, north, west, east = lat - d, lat + d, lon - d, lon + d
             return lat, lon, {"south": south, "north": north, "west": west, "east": east}
@@ -133,23 +123,17 @@ def search_osm_places(
     city: str,
     max_results: int = 20,
 ) -> list[dict]:
-    """
-    Find businesses near city matching query intent via Overpass.
-    Same lead dict shape as Google path; ratings left NULL.
-    """
     geo = geocode_city(city)
     if not geo:
         return []
     _lat, _lon, bb = geo
     tag_filters = _tags_for_query(query)
-    # Overpass QL: union of filters in bbox
     parts = []
     for tf in tag_filters:
-        # tf like node["amenity"~"..."] — inject bbox
-        if tf.startswith("node"):
-            parts.append(f"  {tf}({bb['south']},{bb['west']},{bb['north']},{bb['east']});")
-        elif tf.startswith("way"):
-            parts.append(f"  {tf}({bb['south']},{bb['west']},{bb['north']},{bb['east']});")
+        if tf.startswith("node") or tf.startswith("way"):
+            parts.append(
+                f"  {tf}({bb['south']},{bb['west']},{bb['north']},{bb['east']});"
+            )
     body = (
         "[out:json][timeout:45];\n"
         "(\n" + "\n".join(parts) + "\n);\n"
@@ -192,7 +176,6 @@ def search_osm_places(
             tags.get("addr:city", "") or city,
         ]
         address = ", ".join(p for p in addr_parts if p)
-
         osm_id = f"{el.get('type', 'node')}/{el.get('id', '')}"
         results.append({
             "company": re.sub(r"\s+", " ", name),
@@ -213,14 +196,41 @@ def search_osm_places(
         })
         if len(results) >= max_results:
             break
-
     return results
 
 
 def discovery_maps_provider() -> str:
-    """
-    google | osm | auto
-
-    auto = try Google when key present; on MapsUnavailable/missing key use OSM.
-    """
+    """google | osm | auto (default)."""
     return (os.getenv("DISCOVERY_MAPS_PROVIDER") or "auto").strip().lower()
+
+
+def install_osm_maps_fallback() -> None:
+    """
+    Patch lead_discovery.search_google_maps so OSM is used when:
+      DISCOVERY_MAPS_PROVIDER=osm  → always OSM
+      DISCOVERY_MAPS_PROVIDER=auto → OSM if no key or Google raises MapsUnavailable
+    """
+    from app.services import lead_discovery as ld
+
+    if getattr(ld, "_osm_fallback_installed", False):
+        return
+    original = ld.search_google_maps
+
+    def search_google_maps(query, city, api_key=None, max_results=20):
+        provider = discovery_maps_provider()
+        key = api_key or os.getenv("GOOGLE_MAPS_API_KEY", "")
+        if provider == "osm":
+            return search_osm_places(query, city, max_results=max_results)
+        if provider == "auto" and not key:
+            return search_osm_places(query, city, max_results=max_results)
+        try:
+            return original(query, city, api_key=api_key, max_results=max_results)
+        except ld.MapsUnavailable:
+            if provider in ("auto", "osm"):
+                print(f"[OSM] Google unavailable — falling back for {city!r}/{query!r}")
+                return search_osm_places(query, city, max_results=max_results)
+            raise
+
+    ld.search_google_maps = search_google_maps  # type: ignore
+    ld._osm_fallback_installed = True
+    print(f"[OSM] maps provider={discovery_maps_provider()} (search_google_maps patched)")
