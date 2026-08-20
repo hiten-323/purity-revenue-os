@@ -1,17 +1,7 @@
 """
 Post-rotation credential verification.
 
-Run AFTER rotating, against the .env the live process actually loads. Proves
-each new credential works before the PM2 cutover, so a bad key is found here
-rather than by a silent outreach failure at 2am.
-
-NEVER prints a secret. Each check reports PASS/FAIL, the length, and a short
-SHA-256 fingerprint — enough to confirm a value CHANGED without revealing it.
-
-Read-only. Sends no email, no WhatsApp, places no order, writes nothing.
-
-  exit 0  every configured credential verified
-  exit 1  at least one failed or is missing
+NEVER prints a secret. exit 0 = all configured credentials verified.
 """
 from __future__ import annotations
 
@@ -26,7 +16,7 @@ sys.path.insert(0, BACKEND)
 
 ENV_PATH = os.path.join(BACKEND, ".env")
 
-# What the FILE says, read independently of the process environment.
+
 def _file_values(path: str) -> dict:
     out = {}
     if not os.path.exists(path):
@@ -45,10 +35,6 @@ FILE_ENV = _file_values(ENV_PATH)
 
 try:
     from dotenv import load_dotenv
-    # NOT override=True on purpose: this must see exactly what the application
-    # sees. python-dotenv leaves an existing OS variable in place, so if one
-    # shadows the file the app uses the OS value and so must this check. The
-    # shadow report below is what makes that visible instead of silent.
     load_dotenv(ENV_PATH)
 except Exception:
     pass
@@ -57,7 +43,6 @@ results: list[tuple[str, bool, str]] = []
 
 
 def fp(v: str) -> str:
-    """Fingerprint, not the value: proves rotation happened, reveals nothing."""
     return hashlib.sha256(v.encode()).hexdigest()[:12]
 
 
@@ -72,12 +57,6 @@ def env(name: str) -> str:
     return (os.getenv(name) or "").strip()
 
 
-# ── 0. Is anything shadowing the .env? ───────────────────────────────────
-# A rotated key in .env is inert if a stale OS environment variable holds the
-# old value: load_dotenv() does not override an existing variable, so every
-# process keeps using the old credential. AISENSY_API_KEY was found set as a
-# Windows User variable with the pre-rotation value while .env already held the
-# new one — the rotation looked done and changed nothing.
 _shadowed = []
 for _k, _fileval in FILE_ENV.items():
     _live = os.getenv(_k)
@@ -87,7 +66,6 @@ for _k, _fileval in FILE_ENV.items():
 print("POST-ROTATION CREDENTIAL VERIFICATION")
 print("(read-only probes; no message is sent and no secret is printed)\n")
 
-# ── 1. Cerebras ──────────────────────────────────────────────────────────
 k = env("CEREBRAS_API_KEY")
 if not k:
     record("CEREBRAS_API_KEY", False, "missing from .env")
@@ -101,15 +79,12 @@ else:
     except Exception as e:
         record("CEREBRAS_API_KEY", False, f"{e.__class__.__name__}", k)
 
-# ── 2. AiSensy ───────────────────────────────────────────────────────────
 k = env("AISENSY_API_KEY")
 if not k:
     record("AISENSY_API_KEY", False, "missing from .env")
 else:
     try:
         import httpx
-        # Unauthenticated -> 401. Any non-401 means the key was accepted at
-        # the auth layer, which is what we are proving here.
         r = httpx.get("https://backend.aisensy.com/direct-apis/t1/users",
                       headers={"Authorization": f"Bearer {k}"}, timeout=20)
         record("AISENSY_API_KEY", r.status_code != 401,
@@ -117,7 +92,6 @@ else:
     except Exception as e:
         record("AISENSY_API_KEY", False, f"{e.__class__.__name__}", k)
 
-# ── 3. Zoho SMTP ─────────────────────────────────────────────────────────
 k = env("ZOHO_APP_PASSWORD")
 sender = env("SENDER_EMAIL") or "connect@purepantryprovisions.com"
 if not k:
@@ -126,29 +100,52 @@ else:
     try:
         ctx = ssl.create_default_context()
         with smtplib.SMTP_SSL("smtp.zoho.in", 465, context=ctx, timeout=25) as s:
-            s.login(sender, k)          # login only; nothing is sent
+            s.login(sender, k)
         record("ZOHO_APP_PASSWORD", True, f"SMTP login OK as {sender}", k)
     except smtplib.SMTPAuthenticationError:
         record("ZOHO_APP_PASSWORD", False, "SMTP auth REJECTED", k)
     except Exception as e:
         record("ZOHO_APP_PASSWORD", False, f"{e.__class__.__name__}", k)
 
-# ── 4. Google Maps ───────────────────────────────────────────────────────
-k = env("GOOGLE_MAPS_API_KEY")
-if not k:
-    record("GOOGLE_MAPS_API_KEY", False, "missing from .env")
-else:
+# Maps: OSM mode does not require Google.
+_maps_provider = (env("DISCOVERY_MAPS_PROVIDER") or "auto").lower()
+if _maps_provider == "osm":
     try:
         import httpx
-        r = httpx.get("https://maps.googleapis.com/maps/api/geocode/json",
-                      params={"address": "Abohar, Punjab", "key": k}, timeout=20)
-        st = (r.json() or {}).get("status", "?")
-        record("GOOGLE_MAPS_API_KEY", st in ("OK", "ZERO_RESULTS"),
-               f"geocode status={st}", k)
+        ua = env("OSM_USER_AGENT") or (
+            "PurityRevenueOS/1.0 (credential-check; contact=connect@purepantryprovisions.com)")
+        r = httpx.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": "Abohar, India", "format": "json", "limit": 1},
+            headers={"User-Agent": ua},
+            timeout=25,
+        )
+        ok = r.status_code == 200 and isinstance(r.json(), list) and len(r.json()) > 0
+        record("DISCOVERY_MAPS_PROVIDER=osm", ok,
+               f"Nominatim geocode Abohar -> HTTP {r.status_code} hits={len(r.json()) if r.status_code==200 else 0}")
     except Exception as e:
-        record("GOOGLE_MAPS_API_KEY", False, f"{e.__class__.__name__}", k)
+        record("DISCOVERY_MAPS_PROVIDER=osm", False, f"{e.__class__.__name__}")
+    record("GOOGLE_MAPS_API_KEY", True,
+           "skipped — DISCOVERY_MAPS_PROVIDER=osm (Google not required)")
+else:
+    k = env("GOOGLE_MAPS_API_KEY")
+    if not k:
+        if _maps_provider == "auto":
+            record("GOOGLE_MAPS_API_KEY", True,
+                   "missing but auto mode will use OSM fallback")
+        else:
+            record("GOOGLE_MAPS_API_KEY", False, "missing from .env")
+    else:
+        try:
+            import httpx
+            r = httpx.get("https://maps.googleapis.com/maps/api/geocode/json",
+                          params={"address": "Abohar, Punjab", "key": k}, timeout=20)
+            st = (r.json() or {}).get("status", "?")
+            record("GOOGLE_MAPS_API_KEY", st in ("OK", "ZERO_RESULTS"),
+                   f"geocode status={st}", k)
+        except Exception as e:
+            record("GOOGLE_MAPS_API_KEY", False, f"{e.__class__.__name__}", k)
 
-# ── 5. Shopify Admin token ───────────────────────────────────────────────
 k = env("SHOPIFY_TOKEN")
 store = env("SHOPIFY_STORE") or "55hd0v-ff.myshopify.com"
 if not k:
@@ -163,10 +160,6 @@ else:
     except Exception as e:
         record("SHOPIFY_TOKEN", False, f"{e.__class__.__name__}", k)
 
-# ── 6/7. Shared webhook secrets ──────────────────────────────────────────
-# These are verified by the SENDER, so there is no endpoint to ask. What can be
-# checked is that a value exists, is not a placeholder, and is long enough that
-# an HMAC over it is worth anything.
 for name in ("SHOPIFY_WEBHOOK_SECRET", "WHATSAPP_WEBHOOK_SECRET"):
     v = env(name)
     if not v:
@@ -178,12 +171,6 @@ for name in ("SHOPIFY_WEBHOOK_SECRET", "WHATSAPP_WEBHOOK_SECRET"):
            "placeholder value" if weak else
            ("too short (<16 chars)" if len(v) < 16 else "present"), v)
 
-# ── 8. No credential may be reused for two purposes ──────────────────────
-# WHATSAPP_WEBHOOK_SECRET was found holding the SAME value as AISENSY_API_KEY.
-# That is two failures in one: rotating the API key silently breaks webhook
-# auth, and the webhook secret is shared with a third party for verification
-# while the API key can SEND messages — so leaking the verifier leaks the
-# sender. They must be independently generated values.
 pairs = [("AISENSY_API_KEY", "WHATSAPP_WEBHOOK_SECRET"),
          ("SHOPIFY_TOKEN", "SHOPIFY_WEBHOOK_SECRET"),
          ("ZOHO_APP_PASSWORD", "CEREBRAS_API_KEY")]
@@ -191,31 +178,16 @@ for a, b in pairs:
     va, vb = env(a), env(b)
     if va and vb and va == vb:
         record(f"{a} != {b}", False,
-               "SAME VALUE reused for two purposes — rotate both to "
-               "independently generated secrets")
+               "SAME VALUE reused for two purposes — rotate both")
     elif va and vb:
         record(f"{a} != {b}", True, "distinct values")
 
-# ── 9. Shadowing is a failure in its own right ───────────────────────────
 for _k in _shadowed:
     record(f"{_k} (.env vs OS env)", False,
-           "an OS environment variable overrides .env — the rotated value in "
-           "the file is NOT what the application will use. Remove the OS "
-           "variable, then reopen the shell.")
+           "OS env overrides .env — remove the OS variable")
 if not _shadowed:
     record("no OS env shadows .env", True, "file values are what the app sees")
 
-# ── 10. Credentials living ONLY in the OS environment ────────────────────
-# GEMINI_API_KEY and KLAVIYO_PRIVATE_KEY were found set as Windows User
-# variables while appearing in neither .env nor .env.example nor anywhere in
-# this repo's code. That makes them invisible to every control built here: they
-# are not rotated with the rest, not fingerprinted, and not documented — yet
-# PM2 inherits the user environment, so they are injected into every process
-# and appear in full in `pm2 jlist` output. Two of them leaked that way.
-#
-# Anything credential-shaped in the OS environment that .env.example does not
-# declare is unmanaged by definition, so it is reported rather than assumed
-# harmless.
 _CRED_RE = __import__("re").compile(
     r"(API_KEY|_TOKEN|_SECRET|PASSWORD|PRIVATE_KEY|ACCESS_KEY)$")
 _declared = set(FILE_ENV) | {
@@ -229,9 +201,7 @@ _unmanaged = sorted(
     if _CRED_RE.search(k) and k not in _declared)
 for _k in _unmanaged:
     record(f"{_k} (unmanaged)", False,
-           "credential-shaped variable in the OS environment but not declared "
-           "in .env or .env.example — it is not rotated, not fingerprinted, "
-           "and PM2 injects it into every process env (visible in pm2 jlist)")
+           "credential-shaped OS env not declared in .env/.env.example")
 if not _unmanaged:
     record("no unmanaged OS credentials", True,
            "every credential-shaped env var is declared")
