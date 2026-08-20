@@ -463,6 +463,43 @@ def plan_touch(db: Session, lead: B2BLead, profile: OutreachProfile | None = Non
     return {"action": "NURTURE", "channel": None, "reason": "cadence complete or not due", "execute": False}
 
 
+def _mirror_to_workflow_event(db: Session, lead: B2BLead, channel: str,
+                              payload: dict) -> None:
+    """
+    Mirror a proven send into the WorkflowEvent ledger.
+
+    execute_one recorded an OutreachTouch and nothing else, while
+    account_graph.can_contact_new counts only WorkflowEvent EMAIL_SENT /
+    WHATSAPP_SENT. Automated sends were therefore invisible to the ACCOUNT
+    FREQUENCY CAP — the guarantee that stops 27 More Supermarket branches being
+    contacted as 27 opportunities. The first live automated send (REBOOT, lead
+    272) wrote a touch at 11:23 and left EMAIL_SENT sitting at 41 with its most
+    recent row days old.
+
+    Two ledgers again, the same split that hid cadence state earlier. The touch
+    table stays as the outreach-domain record; this mirrors the fact into the
+    ledger every governance check already reads, so the cap, /health's
+    last_successful_send and the sequence engine all see one truth.
+
+    Written WITH proof (to + message_id), so the strict listener keeps it as
+    EMAIL_SENT. A send lacking either is renamed EMAIL_SENT_UNPROVEN, which is
+    the correct outcome: it should not consume an account slot.
+    """
+    from app.models.models import WorkflowEvent
+
+    mid = payload.get("message_id") or payload.get("provider_message_id")
+    to = payload.get("to") or getattr(lead, "email", None)
+    if not mid or not to:
+        return
+    db.add(WorkflowEvent(
+        lead_id=lead.id,
+        event_type="EMAIL_SENT" if channel == "email" else "WHATSAPP_SENT",
+        actor="SMART_OUTREACH", channel=channel,
+        payload={"to": to, "message_id": mid,
+                 "touch_type": payload.get("touch_type"), "automated": True},
+        occurred_at=datetime.utcnow()))
+
+
 def _record(
     db: Session,
     lead: B2BLead,
@@ -486,6 +523,7 @@ def _record(
     db.add(touch)
     if status in PROVEN_SEND:
         profile.touch_count = (profile.touch_count or 0) + 1
+        _mirror_to_workflow_event(db, lead, channel, payload)
     profile.last_channel = channel
     profile.next_action = action
     profile.updated_at = datetime.utcnow()
