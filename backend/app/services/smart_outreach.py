@@ -427,40 +427,47 @@ def plan_touch(db: Session, lead: B2BLead, profile: OutreachProfile | None = Non
             "execute": False,
         }
 
-    # Cadence from the system's single send ledger.
+    # Cadence is NOT decided here.
     #
-    # This counted OutreachTouch rows only, so a send recorded the way the rest
-    # of the system records one — a WorkflowEvent EMAIL_SENT — was invisible
-    # here and the lead looked never-contacted. Two ledgers of "did we send"
-    # is the same duplication that put a second evaluate_next_action in this
-    # module. EMAIL_SENT is already the trustworthy one: the strict send-proof
-    # listener renames anything lacking a recipient and provider message-id to
-    # EMAIL_SENT_UNPROVEN, so counting EMAIL_SENT counts only real sends.
-    proven = _proven_sends(db, lead.id)
-    sent = len(proven)
-    if sent == 0:
-        return {
-            "action": "WARM_FIRST_TOUCH",
-            "channel": "email",
-            "reason": "cold lead with no proven email touch",
-            "execute": True,
-        }
-    if sent == 1:
-        last = proven[0]
-        if last.occurred_at and datetime.utcnow() - last.occurred_at >= timedelta(days=FOLLOW_UP_AFTER_DAYS):
-            return {
-                "action": "WARM_FOLLOW_UP",
-                "channel": "email",
-                "reason": "no response after initial touch",
-                "execute": True,
-            }
-        return {
-            "action": "NURTURE",
-            "channel": None,
-            "reason": f"awaiting {FOLLOW_UP_AFTER_DAYS}d cadence after first touch",
-            "execute": False,
-        }
-    return {"action": "NURTURE", "channel": None, "reason": "cadence complete or not due", "execute": False}
+    # This module used to count proven sends and cap the sequence at two
+    # touches, while sequence_engine runs five (intro, nudge, proof, ask,
+    # breakup) and evaluate_next_action already consults it. The two disagreed
+    # and deadlocked: the engine returned SEND for REBOOT and three hotels,
+    # plan_touch answered "cadence complete", and because the selector is
+    # fit-ordered those same four occupied every eligible slot on every cycle.
+    # Automation was ON and structurally incapable of sending anything.
+    #
+    # Counting touches is a "may we?" question, and that belongs to the single
+    # authority. This function decides only the SHAPE of the touch, so it reads
+    # which touch is next in order to choose the message — never to decide
+    # whether one is owed.
+    seq = _sequence_state(db, lead)
+    touch = (seq.get("next_touch") or "").lower()
+    variant = {
+        "intro": "WARM_FIRST_TOUCH",
+        "nudge": "WARM_FOLLOW_UP",
+        "proof": "WARM_FOLLOW_UP",
+        "ask": "WARM_FOLLOW_UP",
+        "breakup": "WARM_FOLLOW_UP",
+    }.get(touch, "WARM_FIRST_TOUCH" if not seq.get("touches") else "WARM_FOLLOW_UP")
+
+    return {
+        "action": variant,
+        "channel": "email",
+        "reason": f"touch '{touch or 'intro'}' per sequence_engine"
+                  f" (#{(seq.get('touches') or 0) + 1})",
+        "execute": True,
+    }
+
+
+def _sequence_state(db: Session, lead: B2BLead) -> dict:
+    """Which touch the cadence authority says is next. Read-only."""
+    try:
+        from app.services import sequence_engine as se
+        return se.state(lead, db) or {}
+    except Exception:
+        return {}
+
 
 
 def _mirror_to_workflow_event(db: Session, lead: B2BLead, channel: str,
@@ -718,8 +725,28 @@ def run_cycle(db: Session, limit: int = 20) -> dict:
             except Exception:
                 db.rollback()
             results.append({"lead_id": lead.id, "company": lead.company, "status": "FAILED", "error": str(exc)[:300]})
-    # Report the scan too. "processed 20" hid that 16 slots were spent on
-    # leads with no address; eligible/scanned makes the real yield visible.
-    return {"processed": len(results), "eligible": len(leads),
-            "scanned": len(candidates), "skipped_ineligible": skipped_ineligible,
-            "results": results}
+    # Truthful funnel, not one number.
+    #
+    # "processed 20" concealed that 16 of those slots went to leads with no
+    # address. A lead is not processed because it was scanned. Each stage is
+    # counted separately so the yield is visible and the learning dataset later
+    # has honest denominators:
+    #
+    #   160 scanned -> 12 eligible -> 7 due -> 4 selected -> 4 sent
+    #
+    # rather than "20 processed".
+    from collections import Counter
+    by_status = Counter(str(r.get("status") or "UNKNOWN") for r in results)
+    return {
+        "scanned": len(candidates),          # had a channel and passed the DB filter
+        "eligible": len(leads),              # the authority returned a send action
+        "selected": len(results),            # actually handed to execute_one
+        "sent": by_status.get("SENT", 0),
+        "blocked": by_status.get("BLOCKED", 0) + by_status.get("FAILED", 0),
+        "deferred": by_status.get("SKIPPED", 0),
+        "skipped_ineligible": skipped_ineligible,
+        "by_status": dict(by_status),
+        # Kept for callers/logs that still read it; equals `selected`.
+        "processed": len(results),
+        "results": results,
+    }
