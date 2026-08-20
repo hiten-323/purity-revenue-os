@@ -18,6 +18,7 @@
 # never agreed to appear in a public repository. The schema lives in
 # backend/app/models/, so the application is fully reproducible without it.
 *.db
+*.db.*
 *.sqlite
 *.sqlite3
 *.db-wal
