@@ -205,6 +205,37 @@ for _k in _shadowed:
 if not _shadowed:
     record("no OS env shadows .env", True, "file values are what the app sees")
 
+# ── 10. Credentials living ONLY in the OS environment ────────────────────
+# GEMINI_API_KEY and KLAVIYO_PRIVATE_KEY were found set as Windows User
+# variables while appearing in neither .env nor .env.example nor anywhere in
+# this repo's code. That makes them invisible to every control built here: they
+# are not rotated with the rest, not fingerprinted, and not documented — yet
+# PM2 inherits the user environment, so they are injected into every process
+# and appear in full in `pm2 jlist` output. Two of them leaked that way.
+#
+# Anything credential-shaped in the OS environment that .env.example does not
+# declare is unmanaged by definition, so it is reported rather than assumed
+# harmless.
+_CRED_RE = __import__("re").compile(
+    r"(API_KEY|_TOKEN|_SECRET|PASSWORD|PRIVATE_KEY|ACCESS_KEY)$")
+_declared = set(FILE_ENV) | {
+    ln.split("=", 1)[0].strip()
+    for ln in open(os.path.join(BACKEND, ".env.example"), encoding="utf-8",
+                   errors="replace").read().splitlines()
+    if "=" in ln and not ln.strip().startswith("#")
+}
+_unmanaged = sorted(
+    k for k in os.environ
+    if _CRED_RE.search(k) and k not in _declared)
+for _k in _unmanaged:
+    record(f"{_k} (unmanaged)", False,
+           "credential-shaped variable in the OS environment but not declared "
+           "in .env or .env.example — it is not rotated, not fingerprinted, "
+           "and PM2 injects it into every process env (visible in pm2 jlist)")
+if not _unmanaged:
+    record("no unmanaged OS credentials", True,
+           "every credential-shaped env var is declared")
+
 failed = [n for n, ok, _ in results if not ok]
 print("\n" + "=" * 64)
 if failed:
