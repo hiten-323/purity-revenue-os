@@ -1,5 +1,5 @@
 """
-OpenStreetMap places discovery — no API key, no Google billing.
+OpenStreetMap places discovery — default maps provider (no API key, no billing).
 
 Nominatim: city → lat/lng (public instance: max ~1 req/s, required User-Agent).
 Overpass: POIs in a bbox by amenity/shop/office tags.
@@ -8,6 +8,9 @@ Honest limits vs Google Places:
   - no review counts / star ratings (always NULL)
   - phone/website only when tagged in OSM
   - coverage uneven in India
+
+Default: DISCOVERY_MAPS_PROVIDER=osm
+Override: google | auto (Google first, OSM on failure)
 """
 from __future__ import annotations
 
@@ -200,15 +203,23 @@ def search_osm_places(
 
 
 def discovery_maps_provider() -> str:
-    """google | osm | auto (default)."""
-    return (os.getenv("DISCOVERY_MAPS_PROVIDER") or "auto").strip().lower()
+    """
+    Default is OSM — free, no billing.
+
+    google = Google Places only
+    auto   = Google first, OSM if key missing or MapsUnavailable
+    osm    = OpenStreetMap only (default)
+    """
+    return (os.getenv("DISCOVERY_MAPS_PROVIDER") or "osm").strip().lower()
 
 
 def install_osm_maps_fallback() -> None:
     """
-    Patch lead_discovery.search_google_maps so OSM is used when:
-      DISCOVERY_MAPS_PROVIDER=osm  → always OSM
-      DISCOVERY_MAPS_PROVIDER=auto → OSM if no key or Google raises MapsUnavailable
+    Patch lead_discovery.search_google_maps.
+
+    Default (osm): always OSM — Google is never called for discovery.
+    auto: Google first; OSM if no key or MapsUnavailable.
+    google: Google only (no OSM).
     """
     from app.services import lead_discovery as ld
 
@@ -219,18 +230,24 @@ def install_osm_maps_fallback() -> None:
     def search_google_maps(query, city, api_key=None, max_results=20):
         provider = discovery_maps_provider()
         key = api_key or os.getenv("GOOGLE_MAPS_API_KEY", "")
-        if provider == "osm":
+
+        # Default path: OSM only
+        if provider == "osm" or provider not in ("google", "auto", "osm"):
+            if provider not in ("google", "auto", "osm"):
+                print(f"[OSM] unknown provider {provider!r} — using osm")
             return search_osm_places(query, city, max_results=max_results)
+
         if provider == "auto" and not key:
             return search_osm_places(query, city, max_results=max_results)
+
         try:
             return original(query, city, api_key=api_key, max_results=max_results)
         except ld.MapsUnavailable:
-            if provider in ("auto", "osm"):
-                print(f"[OSM] Google unavailable — falling back for {city!r}/{query!r}")
+            if provider == "auto":
+                print(f"[OSM] Google unavailable — fallback for {city!r}/{query!r}")
                 return search_osm_places(query, city, max_results=max_results)
             raise
 
     ld.search_google_maps = search_google_maps  # type: ignore
     ld._osm_fallback_installed = True
-    print(f"[OSM] maps provider={discovery_maps_provider()} (search_google_maps patched)")
+    print(f"[OSM] discovery maps provider={discovery_maps_provider()} (default=osm)")
