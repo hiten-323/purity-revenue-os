@@ -624,34 +624,87 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
     return {**decision, "status": "NOT_CONFIGURED"}
 
 
+# Actions that can actually put a message in front of a buyer.
+#
+# An ALLOWLIST, not a denylist: a denylist of ("SUPPRESS","WAIT","NONE","ENRICH")
+# let DRAFT_ONLY through, and DRAFT_ONLY is precisely "we may write this but not
+# send it". Hotel M.S Residency reached SMTP that way and was refused by the
+# trust gate — a wasted slot and a log line that reads like a failure when it
+# was the system working. Any action added later is excluded until someone
+# decides it belongs here.
+SEND_ELIGIBLE_ACTIONS = frozenset({
+    "SEND", "SEND_INTRO", "SEND_CATALOGUE", "SEND_PRICING",
+    "SEND_SAMPLE", "SEND_WHATSAPP",
+})
+
+
 def run_cycle(db: Session, limit: int = 20) -> dict:
     """Classify and execute due outreach without founder approval.
+
+    `limit` counts SEND-ELIGIBLE leads, not raw candidates.
+
+    It used to take the top `limit` by fit and then discover most of them were
+    uncontactable: the first live cycle processed 20 and found 16 with no
+    address at all, 1 refused by the trust gate and 1 with no email — one real
+    send out of twenty. The nominal "20 per cycle" and the 10/hour cap were
+    describing work that mostly could not happen, so both were meaningless as
+    rate controls.
+
+    Now the pool is filtered before it is ranked: a channel must exist, the
+    contact must not be suppressed, and the lead must not be in a terminal
+    state. Leads are then walked in fit order and executed until `limit`
+    ELIGIBLE ones have been handled or the scan window is exhausted.
+
+    The window is bounded (limit * SCAN_FACTOR) so a cycle cannot walk 1,800
+    leads looking for work. Deliberately not solved by raising the batch size:
+    the objective is the best eligible opportunities, not the most emails.
 
     Never invents a send: every provider result is persisted and every blocked
     or unconfigured path is explicit. Negative/opted-out contacts stop.
     """
-    leads = (
+    SCAN_FACTOR = 8
+
+    candidates = (
         db.query(B2BLead)
         .filter(B2BLead.contact_status.notin_(["OPTED_OUT", "DO_NOT_CONTACT", "BOUNCED"]))
+        .filter(B2BLead.status.notin_(["DO_NOT_CONTACT", "CLOSED_LOST", "DISQUALIFIED",
+                                       "ORDER_WON"]))
+        # A channel must actually exist. This is the filter whose absence made
+        # 16 of 20 slots unusable — they were ranked, fetched and executed only
+        # to be told there was no address on file.
+        .filter(
+            ((B2BLead.email.isnot(None)) & (B2BLead.email != ""))
+            | ((B2BLead.whatsapp_number.isnot(None)) & (B2BLead.whatsapp_number != ""))
+        )
         # Fit first, and deliberately NOT B2BLead.score: that column is 0 on
         # 1,749 of 1,831 leads, so ordering by it was ordering by insertion id.
-        #
-        # coffee_buying_score is real, discriminating evidence assigned at
-        # discovery from category signals — cafe 95, hotel 90, restaurant 70,
-        # kirana 65, office 45 — and until now nothing read it back. Ordering
-        # by it puts the businesses that actually drink coffee at the front of
-        # the queue instead of whoever happened to be discovered first.
-        #
-        # 0 means "no evidence matched", i.e. UNCLASSIFIED, not low fit (the
-        # lowest real score is 40). Those sort last so they cannot outrank a
-        # known-good prospect, but they are never dropped — they need
-        # classifying, and silently suppressing 139 leads would be the wrong
-        # answer to "we don't know yet".
+        # coffee_buying_score is real category evidence — cafe 95, hotel 90,
+        # restaurant 70, kirana 65, office 45. 0 means UNCLASSIFIED, not low
+        # fit, so those sort last but are never dropped.
         .order_by(B2BLead.coffee_buying_score.desc().nullslast(),
                   B2BLead.score.desc(), B2BLead.id.asc())
-        .limit(limit)
+        .limit(max(limit, limit * SCAN_FACTOR))
         .all()
     )
+
+    leads, skipped_ineligible = [], 0
+    for lead in candidates:
+        if len(leads) >= limit:
+            break
+        # The single authority decides eligibility; this only asks it early
+        # instead of after fetching and executing.
+        try:
+            from app.services.decision_engine import evaluate_next_action
+            verdict = evaluate_next_action(lead, db)
+        except Exception:
+            # A gate that cannot answer is not permission — skip, do not send.
+            skipped_ineligible += 1
+            continue
+        if verdict["action"] not in SEND_ELIGIBLE_ACTIONS:
+            skipped_ineligible += 1
+            continue
+        leads.append(lead)
+
     results = []
     for lead in leads:
         try:
@@ -665,4 +718,8 @@ def run_cycle(db: Session, limit: int = 20) -> dict:
             except Exception:
                 db.rollback()
             results.append({"lead_id": lead.id, "company": lead.company, "status": "FAILED", "error": str(exc)[:300]})
-    return {"processed": len(results), "results": results}
+    # Report the scan too. "processed 20" hid that 16 slots were spent on
+    # leads with no address; eligible/scanned makes the real yield visible.
+    return {"processed": len(results), "eligible": len(leads),
+            "scanned": len(candidates), "skipped_ineligible": skipped_ineligible,
+            "results": results}
