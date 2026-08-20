@@ -124,6 +124,7 @@ def due_now(db, limit: int = 0) -> list[dict]:
         st = state(l, db)
         if st["active"] and st.get("ready"):
             out.append({"lead_id": l.id, "company": l.company, "city": l.city,
+                        "fit": getattr(l, "coffee_buying_score", 0) or 0,
                         "category": l.division, "email": l.email,
                         "touch": st["next_touch"], "purpose": st["purpose"],
                         "touch_number": st["touches"] + 1,
@@ -131,7 +132,16 @@ def due_now(db, limit: int = 0) -> list[dict]:
                         "confidence": getattr(l, "email_confidence", None)})
     # Highest confidence first: if the daily cap bites, spend it on the
     # contacts most likely to land rather than whoever sorted first.
-    out.sort(key=lambda x: (-(x["confidence"] or 0), -x["overdue_days"]))
+    # Fit first, then confidence, then how overdue.
+    #
+    # Sorting on confidence alone ranked "we are sure we can reach them" above
+    # "they are likely to buy", which is why three hospitals and two coworking
+    # spaces — coffee_buying_score 0 — sat ahead of a cafe scoring 95 and three
+    # hotels scoring 90. Deliverability decides IF a message can land; fit
+    # decides whether it is worth landing.
+    out.sort(key=lambda x: (-(x.get("fit") or 0),
+                            -(x["confidence"] or 0),
+                            -x["overdue_days"]))
     return out[:limit] if limit else out
 
 

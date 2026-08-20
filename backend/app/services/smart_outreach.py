@@ -595,7 +595,22 @@ def run_cycle(db: Session, limit: int = 20) -> dict:
     leads = (
         db.query(B2BLead)
         .filter(B2BLead.contact_status.notin_(["OPTED_OUT", "DO_NOT_CONTACT", "BOUNCED"]))
-        .order_by(B2BLead.score.desc(), B2BLead.id.asc())
+        # Fit first, and deliberately NOT B2BLead.score: that column is 0 on
+        # 1,749 of 1,831 leads, so ordering by it was ordering by insertion id.
+        #
+        # coffee_buying_score is real, discriminating evidence assigned at
+        # discovery from category signals — cafe 95, hotel 90, restaurant 70,
+        # kirana 65, office 45 — and until now nothing read it back. Ordering
+        # by it puts the businesses that actually drink coffee at the front of
+        # the queue instead of whoever happened to be discovered first.
+        #
+        # 0 means "no evidence matched", i.e. UNCLASSIFIED, not low fit (the
+        # lowest real score is 40). Those sort last so they cannot outrank a
+        # known-good prospect, but they are never dropped — they need
+        # classifying, and silently suppressing 139 leads would be the wrong
+        # answer to "we don't know yet".
+        .order_by(B2BLead.coffee_buying_score.desc().nullslast(),
+                  B2BLead.score.desc(), B2BLead.id.asc())
         .limit(limit)
         .all()
     )
