@@ -94,8 +94,10 @@ module.exports = {
       env: {
         PYTHONUNBUFFERED: "1",
         // Explicit OFF until controlled send + /health pass.
-        AUTO_OUTREACH_ENABLED: "0",
-        SMART_OUTREACH_ENABLED: "0",
+        // ENABLED — automated outreach is live. api/worker stay 0; only this
+        // process sends. MAX_PER_HOUR=10 and a 45s gap govern the rate.
+        AUTO_OUTREACH_ENABLED: "1",
+        SMART_OUTREACH_ENABLED: "1",
         OUTREACH_INTERVAL_SECONDS: "900",
         OUTREACH_BATCH_SIZE: "20",
         SENDER_EMAIL: ENV.SENDER_EMAIL || "connect@purepantryprovisions.com",
