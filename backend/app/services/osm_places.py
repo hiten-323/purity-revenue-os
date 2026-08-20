@@ -1,16 +1,12 @@
 """
-OpenStreetMap places discovery — default maps provider (no API key, no billing).
+OpenStreetMap places discovery — the ONLY maps provider for lead discovery.
 
-Nominatim: city → lat/lng (public instance: max ~1 req/s, required User-Agent).
-Overpass: POIs in a bbox by amenity/shop/office tags.
+Nominatim + Overpass. No Google Places / Geocoding calls.
 
-Honest limits vs Google Places:
-  - no review counts / star ratings (always NULL)
+Honest limits:
+  - ratings / review counts always NULL
   - phone/website only when tagged in OSM
-  - coverage uneven in India
-
-Default: DISCOVERY_MAPS_PROVIDER=osm
-Override: google | auto (Google first, OSM on failure)
+  - coverage uneven in India; respect Nominatim ~1 req/s
 """
 from __future__ import annotations
 
@@ -26,9 +22,7 @@ _UA = os.getenv(
     "PurityRevenueOS/1.0 (B2B lead discovery; contact=connect@purepantryprovisions.com)",
 )
 _NOMINATIM = os.getenv("NOMINATIM_URL", "https://nominatim.openstreetmap.org").rstrip("/")
-_OVERPASS = os.getenv(
-    "OVERPASS_URL", "https://overpass-api.de/api/interpreter"
-)
+_OVERPASS = os.getenv("OVERPASS_URL", "https://overpass-api.de/api/interpreter")
 
 _last_nominatim = 0.0
 
@@ -203,51 +197,24 @@ def search_osm_places(
 
 
 def discovery_maps_provider() -> str:
-    """
-    Default is OSM — free, no billing.
-
-    google = Google Places only
-    auto   = Google first, OSM if key missing or MapsUnavailable
-    osm    = OpenStreetMap only (default)
-    """
-    return (os.getenv("DISCOVERY_MAPS_PROVIDER") or "osm").strip().lower()
+    """Always osm for discovery. Env kept for docs only."""
+    return "osm"
 
 
 def install_osm_maps_fallback() -> None:
     """
-    Patch lead_discovery.search_google_maps.
-
-    Default (osm): always OSM — Google is never called for discovery.
-    auto: Google first; OSM if no key or MapsUnavailable.
-    google: Google only (no OSM).
+    Replace lead_discovery.search_google_maps with OSM-only search.
+    Google is not called for discovery.
     """
     from app.services import lead_discovery as ld
 
     if getattr(ld, "_osm_fallback_installed", False):
         return
-    original = ld.search_google_maps
 
-    def search_google_maps(query, city, api_key=None, max_results=20):
-        provider = discovery_maps_provider()
-        key = api_key or os.getenv("GOOGLE_MAPS_API_KEY", "")
+    def search_places(query, city, api_key=None, max_results=20):
+        # api_key ignored — discovery does not use Google
+        return search_osm_places(query, city, max_results=max_results)
 
-        # Default path: OSM only
-        if provider == "osm" or provider not in ("google", "auto", "osm"):
-            if provider not in ("google", "auto", "osm"):
-                print(f"[OSM] unknown provider {provider!r} — using osm")
-            return search_osm_places(query, city, max_results=max_results)
-
-        if provider == "auto" and not key:
-            return search_osm_places(query, city, max_results=max_results)
-
-        try:
-            return original(query, city, api_key=api_key, max_results=max_results)
-        except ld.MapsUnavailable:
-            if provider == "auto":
-                print(f"[OSM] Google unavailable — fallback for {city!r}/{query!r}")
-                return search_osm_places(query, city, max_results=max_results)
-            raise
-
-    ld.search_google_maps = search_google_maps  # type: ignore
+    ld.search_google_maps = search_places  # type: ignore
     ld._osm_fallback_installed = True
-    print(f"[OSM] discovery maps provider={discovery_maps_provider()} (default=osm)")
+    print("[OSM] discovery maps = OpenStreetMap only (Google removed from discovery)")
