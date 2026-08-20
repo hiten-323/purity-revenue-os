@@ -2,6 +2,7 @@
 Post-rotation credential verification.
 
 NEVER prints a secret. exit 0 = all configured credentials verified.
+Discovery uses OpenStreetMap only — Google Maps is not required.
 """
 from __future__ import annotations
 
@@ -107,44 +108,26 @@ else:
     except Exception as e:
         record("ZOHO_APP_PASSWORD", False, f"{e.__class__.__name__}", k)
 
-# Maps: OSM mode does not require Google.
-_maps_provider = (env("DISCOVERY_MAPS_PROVIDER") or "auto").lower()
-if _maps_provider == "osm":
-    try:
-        import httpx
-        ua = env("OSM_USER_AGENT") or (
-            "PurityRevenueOS/1.0 (credential-check; contact=connect@purepantryprovisions.com)")
-        r = httpx.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": "Abohar, India", "format": "json", "limit": 1},
-            headers={"User-Agent": ua},
-            timeout=25,
-        )
-        ok = r.status_code == 200 and isinstance(r.json(), list) and len(r.json()) > 0
-        record("DISCOVERY_MAPS_PROVIDER=osm", ok,
-               f"Nominatim geocode Abohar -> HTTP {r.status_code} hits={len(r.json()) if r.status_code==200 else 0}")
-    except Exception as e:
-        record("DISCOVERY_MAPS_PROVIDER=osm", False, f"{e.__class__.__name__}")
-    record("GOOGLE_MAPS_API_KEY", True,
-           "skipped — DISCOVERY_MAPS_PROVIDER=osm (Google not required)")
-else:
-    k = env("GOOGLE_MAPS_API_KEY")
-    if not k:
-        if _maps_provider == "auto":
-            record("GOOGLE_MAPS_API_KEY", True,
-                   "missing but auto mode will use OSM fallback")
-        else:
-            record("GOOGLE_MAPS_API_KEY", False, "missing from .env")
-    else:
-        try:
-            import httpx
-            r = httpx.get("https://maps.googleapis.com/maps/api/geocode/json",
-                          params={"address": "Abohar, Punjab", "key": k}, timeout=20)
-            st = (r.json() or {}).get("status", "?")
-            record("GOOGLE_MAPS_API_KEY", st in ("OK", "ZERO_RESULTS"),
-                   f"geocode status={st}", k)
-        except Exception as e:
-            record("GOOGLE_MAPS_API_KEY", False, f"{e.__class__.__name__}", k)
+# Discovery maps = OpenStreetMap only (Google removed from discovery path)
+try:
+    import httpx
+    ua = env("OSM_USER_AGENT") or (
+        "PurityRevenueOS/1.0 (credential-check; contact=connect@purepantryprovisions.com)")
+    r = httpx.get(
+        "https://nominatim.openstreetmap.org/search",
+        params={"q": "Abohar, India", "format": "json", "limit": 1},
+        headers={"User-Agent": ua},
+        timeout=25,
+    )
+    hits = r.json() if r.status_code == 200 else []
+    ok = r.status_code == 200 and isinstance(hits, list) and len(hits) > 0
+    record("OSM_DISCOVERY (Nominatim)", ok,
+           f"geocode Abohar -> HTTP {r.status_code} hits={len(hits) if isinstance(hits, list) else 0}")
+except Exception as e:
+    record("OSM_DISCOVERY (Nominatim)", False, f"{e.__class__.__name__}")
+
+record("GOOGLE_MAPS_API_KEY", True,
+       "not used for discovery (OSM only)")
 
 k = env("SHOPIFY_TOKEN")
 store = env("SHOPIFY_STORE") or "55hd0v-ff.myshopify.com"
