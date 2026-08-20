@@ -22,15 +22,12 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models.models import Base, B2BLead, WorkflowEvent
 from app.services import account_graph as ag
+from app.models.send_proof_fix as _spl
 
-# Ensure fail-closed EMAIL_SENT → EMAIL_SENT_UNPROVEN listener is registered
-# when this module is imported under pytest (same contract as production).
-try:
-    from app.models import send_proof_listener as _spl
-
-    _spl.install()
-except Exception:
-    pass
+# Fail closed: EMAIL_SENT without proof becomes EMAIL_SENT_UNPROVEN.
+# Must succeed — a swallowed ImportError would leave the suite green while
+# check 9-10 asserted nothing.
+_spl.install()
 
 
 @pytest.fixture
