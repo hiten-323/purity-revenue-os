@@ -120,8 +120,18 @@ def classify_osm_entity(name: str, tags: dict | None, searched: str = "") -> str
         return "hospital"
     if amenity in ("school", "college", "university", "canteen", "food_court") or office or _CANTEEN_NAME.search(n):
         return "canteen_org"
-    if searched in ENTITIES:
-        return searched
+
+    # No evidence -> unknown. NEVER `return searched`.
+    #
+    # That line made the classifier answer with whatever was asked for, so a
+    # place=village node with no business tags came back as "cafe" simply
+    # because "cafe" was the query. Searching Abohar returned the villages
+    # Abohar, Alamgarh, Dharampura, Kirkarkhera... once per entity type — the
+    # same 15 settlements presented as 15 cafes, 15 hotels and 15 hospitals.
+    # Ingesting that would have invented 75 businesses that do not exist.
+    #
+    # lead_discovery states the rule this broke: "Search intent never becomes
+    # category truth."
     return "unknown"
 
 
@@ -129,10 +139,21 @@ def _is_internet_cafe(name: str) -> bool:
     return bool(_INTERNET_CAFE.search(name or ""))
 
 
+# Settlements, boundaries and landuse are not businesses, whatever else they
+# are tagged with.
+_NOT_A_BUSINESS = ("place", "boundary", "landuse", "natural", "admin_level")
+
+
 def _keep_for_entity(entity: str, name: str, tags: dict) -> bool:
     if _is_internet_cafe(name):
         return False
+    # A village node can carry a name and nothing else; without this it reaches
+    # the classifier and is kept on the strength of the search term alone.
+    if any(k in (tags or {}) for k in _NOT_A_BUSINESS):
+        return False
     got = classify_osm_entity(name, tags, searched=entity)
+    if got == "unknown":
+        return False
     if entity == "cafe":
         return got == "cafe"
     if entity == "restaurant":
