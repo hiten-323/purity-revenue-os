@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [auto-warm] %(messag
 
 if __name__ == "__main__":
     import app.models.models  # noqa: F401
-    import app.models.send_proof_listener  # noqa: F401
+    import app.models.send_proof_fix  # noqa: F401  — fail-closed EMAIL_SENT proof
 
     from app.api.endpoints import start_auto_warm_worker, _relearn_patterns
     from app.database.database import SessionLocal
