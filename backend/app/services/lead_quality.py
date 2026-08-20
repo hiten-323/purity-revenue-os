@@ -58,7 +58,7 @@ def display_name(raw: str) -> str:
     n = _TAIL.sub("", n)
     n = _LOC_SUFFIX.sub("", n)
     n = _LEGAL.sub("", n)
-    n = re.sub(r"\s{2,}", " ", n).strip(" -–—|,")
+    n = re.sub(r"\s{2,}", " ", n).strip(" -–—|,.")
     # ALLCAPS reads as shouting in a subject line; Title Case unless it is an
     # acronym short enough to be deliberate (BG, OASIS, IBM).
     if n.isupper() and len(n) > 6:
@@ -137,13 +137,25 @@ def classify_candidate(lead: Any, db: Any = None) -> dict:
         return {"bucket": LOW_FIT, "reason": f"fit {fit} — coffee not part of the business",
                 "display_name": display_name(raw)}
 
-    if name_needs_cleanup(raw):
-        return {"bucket": NAME_CLEANUP,
-                "reason": "raw directory name unfit for a subject line",
-                "display_name": display_name(raw)}
+    clean = display_name(raw)
 
-    return {"bucket": READY_TO_SEND, "reason": f"fit {fit}, identity clean",
-            "display_name": display_name(raw)}
+    # NAME_CLEANUP only withholds when cleaning CANNOT produce a usable name.
+    #
+    # It used to block on "the stored name is messy", which was right while raw
+    # values reached subject lines. Now every renderer derives the customer-
+    # facing name through display_name, so a messy record no longer reaches a
+    # buyer — and withholding 25 otherwise-good leads for a problem already
+    # solved downstream is a gate punishing the wrong thing.
+    if not clean or len(clean) < 3:
+        return {"bucket": NAME_CLEANUP,
+                "reason": f"cannot derive a usable display name from {raw[:40]!r}",
+                "display_name": clean}
+
+    return {"bucket": READY_TO_SEND,
+            "reason": f"fit {fit}, identity clean"
+                      + ("" if clean == raw.strip() else f" (shown as \"{clean}\")"),
+            "display_name": clean,
+            "name_cleaned": clean != raw.strip()}
 
 
 def preview(db, leads: list) -> dict:
