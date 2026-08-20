@@ -1,12 +1,14 @@
 """
 OpenStreetMap places discovery — the ONLY maps provider for lead discovery.
 
-Primary: Overpass around: (node + name) on public mirrors. overpass-api.de 504s;
-maps.mail.ru has been the reliable host for India POIs.
-Secondary: Photon (komoot) with lat/lon bias + hard distance filter.
-Tertiary: Nominatim POI search (weak for small Indian towns).
+Order (fail fast; do not wait on 504 hosts):
+  1. overpass.openstreetmap.fr  (measured ~1s for Abohar hospitality)
+  2. other Overpass mirrors in parallel, short timeout
+  3. OSM map API bbox (api.openstreetmap.org) — no Overpass, ~2s
+  4. Photon with 20 km hard filter
 
-Honest limits: ratings NULL; phones/websites only if OSM-tagged.
+cafe/coffee expands to cafe|restaurant|fast_food: Abohar has restaurants
+in OSM, zero cafe nodes. Returning 0 would fake an empty market.
 """
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ import math
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import httpx
@@ -24,51 +27,60 @@ _UA = os.getenv(
 )
 _NOMINATIM = os.getenv("NOMINATIM_URL", "https://nominatim.openstreetmap.org").rstrip("/")
 _PHOTON = os.getenv("PHOTON_URL", "https://photon.komoot.io/api/").rstrip("/") + "/"
+_OSM_MAP = os.getenv("OSM_MAP_URL", "https://api.openstreetmap.org/api/0.6/map")
 _OVERPASS_MIRRORS = [
     u.strip() for u in (os.getenv("OVERPASS_URL") or "").split(",") if u.strip()
 ] or [
+    "https://overpass.openstreetmap.fr/api/interpreter",
     "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
-    "https://overpass-api.de/api/interpreter",
 ]
+_OVERPASS_TIMEOUT = float(os.getenv("OVERPASS_TIMEOUT_SEC", "12"))
 
 _last_nominatim = 0.0
 
-# query fragment -> Overpass node filter (named POIs only)
-# cafe/coffee expands to hospitality: OSM in small Indian towns often tags
-# restaurants, not cafes. Returning 0 for "cafe" when restaurants exist is a
-# false empty market — same class of bug Google REQUEST_DENIED caused.
-_INTENT: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"cafe|coffee|restaurant|dhaba|cater", re.I),
-     'node["name"]["amenity"~"^(cafe|restaurant|fast_food)$"]'),
-    (re.compile(r"hotel|lodging|resort", re.I),
-     'node["name"]["tourism"~"^(hotel|guest_house)$"]'),
-    (re.compile(r"grocery|kirana|supermarket|retail|mart", re.I),
-     'node["name"]["shop"~"^(supermarket|convenience|grocery|general|department_store)$"]'),
-    (re.compile(r"hospital|clinic|nursing", re.I),
-     'node["name"]["amenity"="hospital"]'),
-    (re.compile(r"school|college|university|hostel", re.I),
-     'node["name"]["amenity"~"^(school|college|university)$"]'),
-    (re.compile(r"office|corporate|cowork", re.I),
-     'node["name"]["office"]'),
-    (re.compile(r"distributor|wholesale|warehouse|fmcg", re.I),
-     'node["name"]["shop"~"^(wholesale|yes)$"]'),
+_HOSPITALITY = {"cafe", "restaurant", "fast_food"}
+_HOTEL = {"hotel", "guest_house", "motel"}
+_GROCERY = {"supermarket", "convenience", "grocery", "general", "department_store", "marketplace"}
+_SCHOOL = {"school", "college", "university"}
+
+_INTENT: list[tuple[re.Pattern, set[str], str]] = [
+    (re.compile(r"cafe|coffee|restaurant|dhaba|cater", re.I), _HOSPITALITY, "amenity"),
+    (re.compile(r"hotel|lodging|resort", re.I), _HOTEL, "tourism"),
+    (re.compile(r"grocery|kirana|supermarket|retail|mart", re.I), _GROCERY, "shop"),
+    (re.compile(r"hospital|clinic|nursing", re.I), {"hospital"}, "amenity"),
+    (re.compile(r"school|college|university|hostel", re.I), _SCHOOL, "amenity"),
+    (re.compile(r"office|corporate|cowork", re.I), set(), "office"),
+    (re.compile(r"distributor|wholesale|warehouse|fmcg", re.I), {"wholesale"}, "shop"),
 ]
 
-_BROAD = (
-    'node["name"]["amenity"~"^(cafe|restaurant|fast_food|hospital|school|college|university)$"]',
-    'node["name"]["shop"]',
-    'node["name"]["tourism"~"^(hotel|guest_house)$"]',
-    'node["name"]["office"]',
-)
 
-
-def _overpass_filters(query: str) -> list[str]:
-    for rx, filt in _INTENT:
+def _intent(query: str) -> tuple[set[str], str]:
+    for rx, values, key in _INTENT:
         if rx.search(query or ""):
-            return [filt]
-    return list(_BROAD)
+            return values, key
+    return set(), ""
+
+
+def _overpass_filter(query: str) -> str:
+    values, key = _intent(query)
+    if key == "office":
+        return 'node["name"]["office"]'
+    if values and key:
+        alt = "|".join(sorted(values))
+        return f'node["name"]["{key}"~"^({alt})$"]'
+    return 'node["name"]["amenity"]'
+
+
+def _keep_tags(query: str, tags: dict) -> bool:
+    values, key = _intent(query)
+    if not key:
+        return bool(tags.get("amenity") or tags.get("shop") or tags.get("tourism") or tags.get("office"))
+    if key == "office":
+        return bool(tags.get("office"))
+    raw = (tags.get(key) or tags.get("amenity") or tags.get("shop") or tags.get("tourism") or "").lower()
+    return raw in values
 
 
 def _throttle_nominatim() -> None:
@@ -120,6 +132,33 @@ def _lead(name: str, city: str, *, lat, lon, address="", phone="",
     }
 
 
+def _from_tags(el_or_tags, city: str, lat=None, lon=None, osm_id="") -> Optional[dict]:
+    if isinstance(el_or_tags, dict) and "tags" in el_or_tags:
+        el = el_or_tags
+        tags = el.get("tags") or {}
+        lat = el.get("lat", lat)
+        lon = el.get("lon", lon)
+        osm_id = f"{el.get('type', 'node')}/{el.get('id', '')}"
+    else:
+        tags = el_or_tags or {}
+    name = (tags.get("name") or tags.get("name:en") or "").strip()
+    if not name:
+        return None
+    types = [str(tags[k]).lower() for k in ("amenity", "shop", "office", "tourism") if tags.get(k)]
+    addr = ", ".join(p for p in (
+        tags.get("addr:housenumber", ""),
+        tags.get("addr:street", ""),
+        tags.get("addr:city", "") or city,
+    ) if p)
+    return _lead(
+        name, city, lat=lat, lon=lon, address=addr,
+        phone=tags.get("phone") or tags.get("contact:phone") or "",
+        website=tags.get("website") or tags.get("contact:website") or "",
+        email=tags.get("email") or tags.get("contact:email") or "",
+        types=types, place_id=f"osm:{osm_id}" if osm_id else "",
+    )
+
+
 def geocode_city(city: str, country: str = "India") -> Optional[tuple[float, float, dict]]:
     q = f"{city}, {country}".strip()
     _throttle_nominatim()
@@ -140,7 +179,7 @@ def geocode_city(city: str, country: str = "India") -> Optional[tuple[float, flo
             if len(bb) == 4:
                 south, north, west, east = map(float, bb)
             else:
-                d = 0.08
+                d = 0.10
                 south, north, west, east = lat - d, lat + d, lon - d, lon + d
             return lat, lon, {"south": south, "north": north, "west": west, "east": east}
     except Exception as e:
@@ -148,70 +187,101 @@ def geocode_city(city: str, country: str = "India") -> Optional[tuple[float, flo
         return None
 
 
-def _from_overpass_el(el: dict, city: str) -> Optional[dict]:
-    tags = el.get("tags") or {}
-    name = (tags.get("name") or tags.get("name:en") or "").strip()
-    if not name:
-        return None
-    types = [str(tags[k]).lower() for k in ("amenity", "shop", "office", "tourism") if tags.get(k)]
-    addr = ", ".join(p for p in (
-        tags.get("addr:housenumber", ""),
-        tags.get("addr:street", ""),
-        tags.get("addr:city", "") or city,
-    ) if p)
-    return _lead(
-        name, city,
-        lat=el.get("lat"), lon=el.get("lon"),
-        address=addr,
-        phone=tags.get("phone") or tags.get("contact:phone") or "",
-        website=tags.get("website") or tags.get("contact:website") or "",
-        email=tags.get("email") or tags.get("contact:email") or "",
-        types=types,
-        place_id=f"osm:{el.get('type', 'node')}/{el.get('id', '')}",
-    )
+def _overpass_one(url: str, body: bytes) -> list[dict]:
+    with httpx.Client(timeout=_OVERPASS_TIMEOUT, headers={"User-Agent": _UA}) as client:
+        r = client.post(url, content=body)
+        r.raise_for_status()
+        return (r.json() or {}).get("elements") or []
 
 
 def _overpass(query: str, lat: float, lon: float, city: str, max_results: int,
               radius_m: int = 12000) -> list[dict]:
-    filts = _overpass_filters(query)
-    union = "\n".join(f"  {f}(around:{radius_m},{lat},{lon});" for f in filts)
-    body = f"[out:json][timeout:18];\n(\n{union}\n);\nout tags {max(max_results, 40)};"
-    last_err = None
-    for url in _OVERPASS_MIRRORS:
-        try:
-            with httpx.Client(timeout=22, headers={"User-Agent": _UA}) as client:
-                r = client.post(url, content=body.encode("utf-8"))
-                r.raise_for_status()
-                elements = (r.json() or {}).get("elements") or []
-        except Exception as e:
-            last_err = e
-            print(f"[OSM] Overpass {url} failed: {e}")
+    filt = _overpass_filter(query)
+    body = (
+        f"[out:json][timeout:{int(_OVERPASS_TIMEOUT)}];\n"
+        f"{filt}(around:{radius_m},{lat},{lon});\n"
+        f"out tags {max(max_results, 40)};"
+    ).encode("utf-8")
+
+    # First mirror sequentially (usually fr, ~1s). Rest in parallel if needed.
+    first, rest = _OVERPASS_MIRRORS[0], _OVERPASS_MIRRORS[1:]
+    try:
+        elements = _overpass_one(first, body)
+        print(f"[OSM] Overpass {first} -> {len(elements)} raw")
+    except Exception as e:
+        print(f"[OSM] Overpass {first} failed: {e}")
+        elements = []
+        with ThreadPoolExecutor(max_workers=min(4, len(rest) or 1)) as pool:
+            futs = {pool.submit(_overpass_one, u, body): u for u in rest}
+            for fut in as_completed(futs, timeout=_OVERPASS_TIMEOUT + 2):
+                try:
+                    elements = fut.result()
+                    print(f"[OSM] Overpass {futs[fut]} -> {len(elements)} raw")
+                    break
+                except Exception as e2:
+                    print(f"[OSM] Overpass {futs[fut]} failed: {e2}")
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for el in elements:
+        lead = _from_tags(el, city)
+        if not lead:
             continue
-        out: list[dict] = []
-        seen: set[str] = set()
-        for el in elements:
-            lead = _from_overpass_el(el, city)
-            if not lead:
+        key = lead["company"].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(lead)
+        if len(out) >= max_results:
+            break
+    return out
+
+
+def _osm_map_bbox(query: str, lat: float, lon: float, city: str, max_results: int) -> list[dict]:
+    """Main OSM editing API — no Overpass. Small bbox only."""
+    d = 0.08  # ~9 km
+    bbox = f"{lon-d},{lat-d},{lon+d},{lat+d}"
+    try:
+        with httpx.Client(timeout=25, headers={"User-Agent": _UA, "Accept": "application/json"}) as client:
+            r = client.get(_OSM_MAP, params={"bbox": bbox})
+            r.raise_for_status()
+            payload = r.json() if "json" in (r.headers.get("content-type") or "") else None
+            if payload is None:
+                # XML fallback is large; skip if not JSON
+                return []
+            elements = payload.get("elements") or []
+    except Exception as e:
+        print(f"[OSM] map API failed: {e}")
+        return []
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for el in elements:
+        if el.get("type") not in ("node", None):
+            tags = el.get("tags") or {}
+            if not tags.get("name"):
                 continue
-            key = lead["company"].lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(lead)
-            if len(out) >= max_results:
-                break
-        print(f"[OSM] Overpass {url} -> {len(out)} hits for {city!r}/{query!r}")
-        return out
-    if last_err:
-        print(f"[OSM] all Overpass mirrors failed (last: {last_err})")
-    return []
+        tags = el.get("tags") or {}
+        if not _keep_tags(query, tags):
+            continue
+        lead = _from_tags(el, city)
+        if not lead:
+            continue
+        key = lead["company"].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(lead)
+        if len(out) >= max_results:
+            break
+    print(f"[OSM] map API -> {len(out)} hits for {city!r}/{query!r}")
+    return out
 
 
 def _photon(query: str, lat: float, lon: float, city: str, max_results: int) -> list[dict]:
-    """Komoot Photon — OSM search. Must be within 20km of the city or we drop it."""
     amenity_word = re.split(r"\s+", (query or "cafe").strip())[0]
     try:
-        with httpx.Client(timeout=20, headers={"User-Agent": _UA}) as client:
+        with httpx.Client(timeout=12, headers={"User-Agent": _UA}) as client:
             r = client.get(_PHOTON, params={
                 "q": f"{amenity_word} {city}",
                 "lat": lat, "lon": lon, "limit": max(max_results * 3, 15),
@@ -223,7 +293,6 @@ def _photon(query: str, lat: float, lon: float, city: str, max_results: int) -> 
         return []
     out: list[dict] = []
     seen: set[str] = set()
-    city_l = (city or "").lower()
     for f in feats:
         p = f.get("properties") or {}
         coords = (f.get("geometry") or {}).get("coordinates") or [None, None]
@@ -233,19 +302,13 @@ def _photon(query: str, lat: float, lon: float, city: str, max_results: int) -> 
         name = (p.get("name") or "").strip()
         if not name or name.lower() in seen:
             continue
-        feat_city = (p.get("city") or p.get("district") or "").lower()
-        if feat_city and city_l and feat_city != city_l and city_l not in feat_city:
-            # keep if distance already passed — nearby towns are ok within 20km
-            pass
         seen.add(name.lower())
         types = [t for t in (p.get("osm_value"), p.get("osm_key")) if t]
         osm_type = "node" if p.get("osm_type") in (None, "N") else str(p.get("osm_type"))
         out.append(_lead(
-            name, city,
-            lat=lat2, lon=lon2,
+            name, city, lat=lat2, lon=lon2,
             address=", ".join(x for x in (p.get("street"), p.get("city") or city, p.get("state")) if x),
-            types=types,
-            place_id=f"osm:{osm_type}/{p.get('osm_id', '')}",
+            types=types, place_id=f"osm:{osm_type}/{p.get('osm_id', '')}",
         ))
         if len(out) >= max_results:
             break
@@ -268,8 +331,10 @@ def search_osm_places(
         return results[:max_results]
 
     seen = {r["company"].lower() for r in results}
-    for extra in (_photon(query, lat, lon, city, max_results),
-                  _overpass("", lat, lon, city, max_results) if query else []):
+    for extra in (
+        _osm_map_bbox(query, lat, lon, city, max_results),
+        _photon(query, lat, lon, city, max_results),
+    ):
         for r in extra:
             if r["company"].lower() in seen:
                 continue
