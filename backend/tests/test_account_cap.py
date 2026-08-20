@@ -22,7 +22,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models.models import Base, B2BLead, WorkflowEvent
 from app.services import account_graph as ag
-from app.models.send_proof_fix as _spl
+from app.models import send_proof_fix as _spl
 
 # Fail closed: EMAIL_SENT without proof becomes EMAIL_SENT_UNPROVEN.
 # Must succeed — a swallowed ImportError would leave the suite green while
