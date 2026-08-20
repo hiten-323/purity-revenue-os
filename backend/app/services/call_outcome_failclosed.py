@@ -7,6 +7,9 @@ guidance — not a second decision engine. Falling back reintroduced dual author
 
 This module replaces apply_call_outcome so engine failure queues FOUNDER_REVIEW.
 Loaded from main.py after models/services are importable.
+
+Also installs the OSM discovery fallback (Nominatim + Overpass) when
+DISCOVERY_MAPS_PROVIDER is osm/auto.
 """
 from __future__ import annotations
 
@@ -92,7 +95,6 @@ def install() -> None:
         ))
         db.commit()
 
-        # One decision authority. Registry is presentation only.
         try:
             from app.services.phone_intelligence import decide_after_call
             decided = decide_after_call(lead, db, key, cap, cap.get("remark") or "")
@@ -103,7 +105,6 @@ def install() -> None:
             if decided.get("blocked"):
                 reason += f" (blocked: {decided['blocked']})"
         except Exception as e:
-            # Fail closed — never invent a next action from oc.next_action.
             action_type, delay = "FOUNDER_REVIEW", 0
             reason = (
                 f"call outcome {key} — decision engine unavailable "
@@ -127,3 +128,9 @@ def install() -> None:
         }
 
     m.apply_call_outcome = apply_call_outcome
+
+    try:
+        from app.services.osm_places import install_osm_maps_fallback
+        install_osm_maps_fallback()
+    except Exception as e:
+        print(f"[OSM] maps fallback not installed: {e}")
