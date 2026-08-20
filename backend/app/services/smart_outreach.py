@@ -255,6 +255,12 @@ def _name(lead: B2BLead) -> str:
     return (lead.contact_name or "").strip().split()[0] if lead.contact_name else "there"
 
 
+def _audience(category: str | None) -> str:
+    """Buyer-facing plural for a category; never the raw internal key."""
+    from app.services.lead_quality import audience_label
+    return audience_label(category)
+
+
 def render_email(lead: B2BLead, profile: OutreachProfile, touch_number: int = 1) -> tuple[str, str]:
     n = _name(lead)
     company = lead.company or "your company"
@@ -264,7 +270,7 @@ def render_email(lead: B2BLead, profile: OutreachProfile, touch_number: int = 1)
         subject = f"Following up — Purity Beans for {company}"
         body = (
             f"Hi {n},\n\nJust following up on my note about Purity Beans. "
-            f"We are speaking with selected {cat.lower()} businesses in {city}. "
+            f"We are speaking with selected {_audience(cat)} in {city}. "
             "If coffee sourcing is relevant, I can send the range and commercial details.\n\n"
             "Would you like me to send them?"
         )

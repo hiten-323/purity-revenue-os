@@ -312,11 +312,36 @@ def build_outreach_email(
     body: str,
     lead_id: int | None = None,
 ) -> OutreachEmail:
-    signature = (
-        f"\n\n--\n{SENDER_NAME}\n"
-        f"Pure Pantry Provisions\n"
-        f"{SENDER_EMAIL}"
-    )
+    # SENDER_NAME is "Hiten Jain | Pure Pantry Provisions", so a hardcoded
+    # company line repeated it in every email:
+    #     Hiten Jain | Pure Pantry Provisions
+    #     Pure Pantry Provisions
+    # Add the company line only when the sender name does not already carry it.
+    _company = "Pure Pantry Provisions"
+    _sig = [SENDER_NAME]
+    if _company.lower() not in (SENDER_NAME or "").lower():
+        _sig.append(_company)
+    _sig.append(SENDER_EMAIL)
+
+    # Website in the SIGNATURE, so every template carries it from one place.
+    # Nine subject/body templates exist across four modules; adding a link to
+    # each is the "N call sites" pattern that has already caused three bugs
+    # here. Verified reachable: p3online.in 301s to https://www.p3online.in/
+    # (200). purepantryprovisions.com does not resolve at all, so it is not a
+    # candidate however plausible it looks.
+    _site = (os.getenv("WEBSITE_URL", "https://www.p3online.in") or "").strip()
+    if _site:
+        _sig.append(_site)
+
+    # Catalogue link ONLY if one is configured. When CATALOGUE_URL is unset the
+    # line is omitted entirely — never "catalogue coming soon" or a placeholder
+    # URL. An invented link in a cold email is the fastest way to lose a buyer
+    # who clicks it, and a broken one is worse than none.
+    _cat = (os.getenv("CATALOGUE_URL", "") or "").strip()
+    if _cat.lower().startswith(("http://", "https://")):
+        _sig.append(f"Catalogue: {_cat}")
+
+    signature = "\n\n--\n" + "\n".join(_sig)
     body_text = body + signature
 
     # Embed tracking pixel in HTML version

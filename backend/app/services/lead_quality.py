@@ -176,3 +176,49 @@ def preview(db, leads: list) -> dict:
     return {"total": len(leads),
             "buckets": {b: out[b] for b in order if out[b]},
             "ready": len(out[READY_TO_SEND])}
+
+# ── How a category is described TO A BUYER ───────────────────────────────────
+# Internal taxonomy is not English. render_email interpolated the raw division
+# into "We are speaking with selected {cat} businesses in {city}", which for
+# 502 leads produced "selected retail_kirana businesses" and "selected
+# corporate_office businesses" — underscores and all — while HORECA is trade
+# jargon a Ludhiana hotelier would read as a typo.
+#
+# Plural nouns, so the sentence reads "selected hotels in Ludhiana" rather than
+# the clumsy "selected hotel businesses in Ludhiana".
+_AUDIENCE = {
+    "cafe": "cafés",
+    "restaurant": "restaurants",
+    "hotel": "hotels",
+    "horeca": "hotels and restaurants",
+    "distributor": "distributors",
+    "wholesaler": "wholesalers",
+    "supermarket": "supermarkets",
+    "modern_trade": "retail chains",
+    "retail_kirana": "kirana and grocery stores",
+    "retail": "retailers",
+    "retailer": "retailers",
+    "corporate_office": "offices",
+    "corporate": "offices",
+    "office_pantry": "office pantries",
+    "facility_management": "facilities and pantry teams",
+    "manufacturing": "manufacturers",
+    "hospital": "hospitals",
+    "school": "schools",
+    "college": "colleges",
+    "canteen_org": "canteens",
+    "catering": "caterers",
+    "gifting": "corporate gifting businesses",
+    "procurement": "procurement teams",
+}
+
+
+def audience_label(category: str | None) -> str:
+    """
+    Buyer-facing plural for a lead category.
+
+    Falls back to "businesses" rather than echoing an unknown internal key —
+    a generic word is better than leaking taxonomy, and silence beats jargon.
+    """
+    key = (category or "").strip().lower().replace(" ", "_")
+    return _AUDIENCE.get(key, "businesses")
