@@ -188,11 +188,35 @@ class CallingAgentService:
         if not vapi_key.strip():
             return False, "vapi_not_configured: set VAPI_API_KEY to enable AI calling"
 
-        # Apply consent defaults for cold scraped leads entering call stage
-        if not lead.consent_status or lead.consent_status == "UNKNOWN":
-            lead.consent_status = "IMPLIED_B2B"
-            lead.consent_source = lead.acquisition_source or "GOOGLE_MAPS"
-            lead.consent_timestamp = datetime.utcnow()
+        # Consent is RECORDED, never defaulted.
+        #
+        # This block used to upgrade any UNKNOWN lead to IMPLIED_B2B, sourced to
+        # "GOOGLE_MAPS" — i.e. the system granted itself permission on the
+        # grounds that it had scraped the business. All 1,831 leads are UNKNOWN
+        # with no consent_source, so every one of them would have been marked
+        # consented by the act of attempting a call.
+        #
+        # It also defeated the gate above it: CALL_ALLOWED_IF is
+        # ["IMPLIED_B2B", "EXPLICIT"], and this wrote IMPLIED_B2B moments before
+        # that list was checked. The check could not fail.
+        #
+        # Worse, it escalated across channels. whatsapp_sender.CONSENT_OK
+        # accepts IMPLIED_B2B, so one call attempt on a cold scraped lead would
+        # have made that number WhatsApp-messageable under Meta's opt-in rules
+        # without the buyer ever doing anything.
+        #
+        # Being listed on Google Maps is not consent to receive automated calls.
+        # UNKNOWN stays UNKNOWN and the call is refused. Real consent comes from
+        # something that actually happened — a reply, a WhatsApp opt-in, or a
+        # founder call where they said yes, which is what log_call's
+        # WHATSAPP_CONSENT outcome records.
+        _consent = (lead.consent_status or "UNKNOWN").upper()
+        if _consent not in CallingAgentService.CALL_ALLOWED_IF:
+            return False, (
+                f"no_consent_on_record: consent_status={_consent}. An automated "
+                f"call needs recorded consent; scraping a listing is not consent. "
+                f"Capture it on a founder call or an inbound reply first."
+            )
 
         # Lock lead and increment attempts
         lead.lead_owner = "AI Agent"
