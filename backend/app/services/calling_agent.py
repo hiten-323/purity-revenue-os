@@ -183,10 +183,19 @@ class CallingAgentService:
         # call_status=CALLING, only to 401 and land on FAILED. Repeatedly hitting
         # the call button with no key would exhaust MAX_CALL_ATTEMPTS on a lead
         # that was never actually dialled. Fail cleanly and mutate nothing.
-        vapi_key = os.getenv("VAPI_API_KEY", "")
-        vapi_phone_id = os.getenv("VAPI_PHONE_NUMBER_ID", "")
-        if not vapi_key.strip():
-            return False, "vapi_not_configured: set VAPI_API_KEY to enable AI calling"
+        # Provider gate FIRST, before touching the lead. An unconfigured
+        # provider used to still lock the lead, burn a call_attempt and set
+        # call_status=CALLING before failing, so repeated attempts exhausted
+        # MAX_CALL_ATTEMPTS on a lead that was never dialled. Fail cleanly and
+        # mutate nothing.
+        #
+        # Bolna over Exotel, not VAPI/Twilio: India-native telephony with DLT
+        # and DND handling, and an agent that speaks Hindi and Punjabi — which
+        # the kirana and distributor queue requires.
+        from app.services import voice_provider
+        _cfg_ok, _cfg_why = voice_provider.config_status()
+        if not _cfg_ok:
+            return False, f"voice_not_configured: {_cfg_why}"
 
         # Consent is RECORDED, never defaulted.
         #
