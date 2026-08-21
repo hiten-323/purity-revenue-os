@@ -304,6 +304,24 @@ def send_batch(emails: list[OutreachEmail]) -> list[OutreachEmail]:
     return [send_email(e) for e in emails]
 
 
+def catalogue_url() -> str:
+    """
+    The catalogue link, for the CATALOGUE_REQUESTED path only.
+
+    Returns "" when unconfigured, so callers omit the line rather than sending
+    a placeholder. A broken or invented link in a B2B email costs more than no
+    link at all.
+
+    PURITY_BEANS_CATALOGUE_URL is the canonical name; CATALOGUE_URL is accepted
+    as an alias so an existing .env keeps working.
+    """
+    for key in ("PURITY_BEANS_CATALOGUE_URL", "CATALOGUE_URL"):
+        v = (os.getenv(key, "") or "").strip()
+        if v.lower().startswith(("http://", "https://")):
+            return v
+    return ""
+
+
 def build_outreach_email(
     to_email: str,
     to_name: str,
@@ -333,13 +351,18 @@ def build_outreach_email(
     if _site:
         _sig.append(_site)
 
-    # Catalogue link ONLY if one is configured. When CATALOGUE_URL is unset the
-    # line is omitted entirely — never "catalogue coming soon" or a placeholder
-    # URL. An invented link in a cold email is the fastest way to lose a buyer
-    # who clicks it, and a broken one is worse than none.
-    _cat = (os.getenv("CATALOGUE_URL", "") or "").strip()
-    if _cat.lower().startswith(("http://", "https://")):
-        _sig.append(f"Catalogue: {_cat}")
+    # The catalogue link is deliberately NOT here.
+    #
+    # This signature is on every outbound email, so putting it here would have
+    # attached the catalogue to cold first touches — breaking the locked rule
+    # that the catalogue follows CATALOGUE_REQUESTED, never precedes it.
+    #
+    # It also guts the conversion mechanic: "Would you like me to send the
+    # catalogue?" is a hollow ask when the catalogue is already linked three
+    # lines below it. The YES is the step the whole lifecycle turns on, and it
+    # has to be worth something.
+    #
+    # Use catalogue_url() from the catalogue-fulfilment path instead.
 
     signature = "\n\n--\n" + "\n".join(_sig)
     body_text = body + signature
