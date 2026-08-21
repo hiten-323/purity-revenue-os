@@ -207,9 +207,12 @@ _AUDIENCE = {
     "school": "schools",
     "college": "colleges",
     "canteen_org": "canteens",
+    "canteen": "canteens",
     "catering": "caterers",
     "gifting": "corporate gifting businesses",
     "procurement": "procurement teams",
+    "private_label": "private-label programmes",
+    "unknown": "businesses",
 }
 
 

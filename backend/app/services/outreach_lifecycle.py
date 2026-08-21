@@ -35,7 +35,8 @@ POSITIVE_INTENTS = {
     "INTERESTED",
     "NEGOTIATION",
 }
-NEGATIVE_INTENTS = {"NOT_INTERESTED", "OPTED_OUT", "DO_NOT_CONTACT", "COMPLAINT"}
+NEGATIVE_INTENTS = {"NOT_INTERESTED", "OPTED_OUT", "DO_NOT_CONTACT", "COMPLAINT", "BOUNCED"}
+MACHINE_INTENTS = {"OUT_OF_OFFICE", "MACHINE_REPLY"}
 
 
 def ensure_schema() -> None:
@@ -54,7 +55,30 @@ def _text(value: Any) -> str:
 
 
 def infer_intent(event: WorkflowEvent) -> str:
+    """Classify inbound text. Machine replies are not INTERESTED.
+
+    reply_intelligence.classify_sender runs first so an out-of-office cannot
+    exit the cadence or lift the account cap.
+    """
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    body = " ".join(str(payload.get(k) or "") for k in ("body", "text", "snippet", "message"))
+    subject = str(payload.get("subject") or "")
+    headers = payload.get("headers") if isinstance(payload.get("headers"), dict) else {}
     text = _text(event.event_type) + " " + _text(event.payload)
+
+    try:
+        from app.services.reply_intelligence import classify_sender
+        sender = classify_sender(subject, body or text, headers)
+        if sender.get("sender") == "MACHINE":
+            kind = sender.get("kind") or "AUTO_RESPONDER"
+            if kind == "BOUNCE":
+                return "BOUNCED"
+            if kind == "OUT_OF_OFFICE":
+                return "OUT_OF_OFFICE"
+            return "MACHINE_REPLY"
+    except Exception:
+        pass
+
     # Opt-out / stop language first — "remove me" is OPTED_OUT, not a soft no.
     if any(
         x in text
@@ -72,6 +96,12 @@ def infer_intent(event: WorkflowEvent) -> str:
         return "OPTED_OUT"
     if any(x in text for x in ("not interested", "no thanks", "no thank you")):
         return "NOT_INTERESTED"
+    if any(x in text for x in ("wrong person", "wrong contact", "not the right person", "don't handle", "do not handle")):
+        return "WRONG_PERSON"
+    if any(x in text for x in ("already buy", "already have a supplier", "existing supplier", "current supplier")):
+        return "EXISTING_SUPPLIER"
+    if any(x in text for x in ("next week", "next month", "call later", "after diwali", "not now")):
+        return "CALL_LATER"
     if any(x in text for x in ("price", "pricing", "rate", "wholesale", "best price", "moq")):
         return "PRICING_REQUESTED"
     if any(x in text for x in ("catalogue", "catalog", "send it", "send details", "share details", "yes send")):
@@ -130,8 +160,12 @@ def sync_inbound_memory(db: Session, since_hours: int = 48) -> dict:
         profile.last_channel = (event.channel or "").lower() or profile.last_channel
         if intent in NEGATIVE_INTENTS:
             profile.warmth = "COOLDOWN"
-            lead.contact_status = "OPTED_OUT" if intent == "OPTED_OUT" else "DO_NOT_CONTACT"
+            lead.contact_status = "OPTED_OUT" if intent == "OPTED_OUT" else (
+                "BOUNCED" if intent == "BOUNCED" else "DO_NOT_CONTACT"
+            )
             lead.contact_status_reason = f"inbound intent: {intent}"
+        elif intent in MACHINE_INTENTS or intent == "CALL_LATER":
+            profile.warmth = "CONTACTED"
         elif intent in ("PRICING_REQUESTED", "NEGOTIATION"):
             profile.warmth = "HOT"
         elif intent in POSITIVE_INTENTS:

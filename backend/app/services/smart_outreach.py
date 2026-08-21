@@ -64,6 +64,10 @@ CATEGORY_RULES = {
     "DISTRIBUTOR": ("DISTRIBUTION", "MARGIN_AND_RANGE"),
     "WHOLESALER": ("WHOLESALE", "VOLUME_AND_MARGIN"),
     "RETAILER": ("RETAIL", "SHELF_AND_MARGIN"),
+    "CAFE": ("CAFE", "BEVERAGE_AND_REPEAT"),
+    "RESTAURANT": ("RESTAURANT", "KITCHEN_AND_SUPPLY"),
+    "CANTEEN": ("CANTEEN", "VOLUME_AND_CONSISTENCY"),
+    "HOSPITAL": ("HOSPITAL", "PANTRY_AND_VISITOR"),
     "HORECA": ("HORECA", "CONSISTENCY_AND_SUPPLY"),
     "CORPORATE": ("CORPORATE", "PANTRY_AND_RECURRING"),
     "HOTEL": ("HOTEL", "SUPPLY_AND_CONSISTENCY"),
@@ -181,9 +185,15 @@ def classify_lead(db: Session, lead: B2BLead) -> OutreachProfile:
         ("WHOLESALER", ("wholesale", "wholesaler", "bulk trader", "cash and carry")),
         ("GIFTING", ("corporate gifting", "gift hamper", "gifting")),
         ("PROCUREMENT", ("procurement", "purchase manager", "buyer", "purchasing", "vendor management")),
-        ("HOTEL", ("hotel", "resort", "hospitality")),
-        ("HORECA", ("cafe", "coffee shop", "restaurant", "horeca", "canteen", "food service")),
-        ("CORPORATE", ("office", "corporate", "it company", "manufacturing", "hospital", "school", "college", "facility")),
+        # Cafe / restaurant / canteen / hospital are NOT "hospitality" or "office".
+        # Search intent must not collapse them into HORECA/CORPORATE.
+        ("CAFE", ("cafe", "coffee shop", "coffeehouse", "espresso", "cafeteria bar")),
+        ("RESTAURANT", ("restaurant", "dhaba", "eatery", "fine dining")),
+        ("CANTEEN", ("canteen", "staff mess", "industrial kitchen", "factory canteen")),
+        ("HOSPITAL", ("hospital", "nursing home", "multispeciality", "multi speciality")),
+        ("HOTEL", ("hotel", "resort")),
+        ("HORECA", ("horeca", "food service", "catering")),
+        ("CORPORATE", ("office", "corporate", "it company", "manufacturing", "school", "college", "facility")),
         ("RETAILER", ("retail", "supermarket", "grocery", "kirana", "mart", "store")),
     ]
     for candidate, tokens in ordered:
@@ -199,6 +209,8 @@ def classify_lead(db: Session, lead: B2BLead) -> OutreachProfile:
             "distributor": "DISTRIBUTOR", "wholesale": "WHOLESALER", "wholesaler": "WHOLESALER",
             "retail": "RETAILER", "gifting": "GIFTING", "horeca": "HORECA", "corporate": "CORPORATE",
             "hotel": "HOTEL", "government": "PROCUREMENT", "private_label": "PRIVATE_LABEL",
+            "cafe": "CAFE", "restaurant": "RESTAURANT", "hospital": "HOSPITAL",
+            "canteen": "CANTEEN", "canteen_org": "CANTEEN",
         }
         category = aliases.get(d, "UNKNOWN")
         if category != "UNKNOWN":
@@ -211,11 +223,20 @@ def classify_lead(db: Session, lead: B2BLead) -> OutreachProfile:
     if prior_intent in ("OPTED_OUT", "NOT_INTERESTED", "DO_NOT_CONTACT", "COMPLAINT"):
         warmth, intent = "COOLDOWN", prior_intent
         evidence.append(f"memory:{prior_intent}")
+    elif prior_intent == "BOUNCED" or _mentions(event_text, "EMAIL_BOUNCED", "HARD_BOUNCE"):
+        warmth, intent = "COOLDOWN", "BOUNCED"
+        evidence.append("history:bounce")
+    elif prior_intent in ("OUT_OF_OFFICE", "MACHINE_REPLY", "CALL_LATER"):
+        warmth, intent = "CONTACTED", prior_intent
+        evidence.append(f"memory:{prior_intent}")
     elif prior_intent in ("PRICING_REQUESTED", "NEGOTIATION") or _mentions(event_text, "PRICING_REQUESTED", "NEGOTIATION"):
         evidence.append("history:pricing_or_negotiation")
         warmth, intent = "HOT", "PRICING_REQUESTED"
-    elif prior_intent == "CATALOGUE_REQUESTED" or _mentions(event_text, "CATALOGUE_REQUESTED", "SAMPLE_REQUESTED"):
-        evidence.append("history:catalogue_or_sample")
+    elif prior_intent == "SAMPLE_REQUESTED" or _mentions(event_text, "SAMPLE_REQUESTED"):
+        evidence.append("history:sample")
+        warmth, intent = "WARM", "SAMPLE_REQUESTED"
+    elif prior_intent == "CATALOGUE_REQUESTED" or _mentions(event_text, "CATALOGUE_REQUESTED"):
+        evidence.append("history:catalogue")
         warmth, intent = "WARM", "CATALOGUE_REQUESTED"
     elif prior_intent in ("INTERESTED", "CALLBACK", "MEETING_REQUESTED") or _mentions(event_text, "REPLIED", "WHATSAPP_REPLY", "EMAIL_REPLIED", "MEETING_BOOKED", "EMAIL_REPLY"):
         evidence.append("history:reply")
@@ -231,7 +252,7 @@ def classify_lead(db: Session, lead: B2BLead) -> OutreachProfile:
             intent = "INTERESTED" if intent == "NONE" else intent
             evidence.append(f"status:{lead.status}")
 
-    _, angle = CATEGORY_RULES[category]
+    _, angle = CATEGORY_RULES.get(category, CATEGORY_RULES["UNKNOWN"])
     confidence = min(95, 45 + min(40, len(evidence) * 10))
     if category == "UNKNOWN":
         confidence = 25
@@ -261,22 +282,24 @@ def _audience(category: str | None) -> str:
     return audience_label(category)
 
 
-def render_email(lead: B2BLead, profile: OutreachProfile, touch_number: int = 1) -> tuple[str, str]:
+def render_email(lead: B2BLead, profile: OutreachProfile, touch_number: int = 1,
+                 touch: str | None = None) -> tuple[str, str]:
+    """Category-specific copy for the cadence touch that is actually due.
+
+    touch_number is kept for callers/tests. Prefer `touch` (intro/nudge/proof/
+    ask/breakup) when the sequence engine named one — otherwise every follow-up
+    was the same "just following up" paragraph.
+    """
     n = _name(lead)
     company = lead.company or "your company"
     city = lead.city or "your market"
-    cat = profile.category
-    if touch_number > 1:
-        subject = f"Following up — Purity Beans for {company}"
-        body = (
-            f"Hi {n},\n\nJust following up on my note about Purity Beans. "
-            f"We are speaking with selected {_audience(cat)} in {city}. "
-            "If coffee sourcing is relevant, I can send the range and commercial details.\n\n"
-            "Would you like me to send them?"
-        )
-        return subject, body
+    cat = profile.category or "UNKNOWN"
+    audience = _audience(cat)
+    which = (touch or "").lower()
+    if not which:
+        which = "intro" if touch_number <= 1 else "nudge"
 
-    drafts = {
+    intro = {
         "DISTRIBUTOR": (
             "Distribution partnership — Purity Beans",
             f"Hi {n},\n\nI’m Hiten from Pure Pantry Provisions. We’re introducing Purity Beans premium instant coffee and are speaking with selected distribution partners in {city}.\n\nWould it be useful if I sent the catalogue and distributor commercial details?",
@@ -288,6 +311,22 @@ def render_email(lead: B2BLead, profile: OutreachProfile, touch_number: int = 1)
         "RETAILER": (
             "Purity Beans — retail coffee partnership",
             f"Hi {n},\n\nWe’re introducing Purity Beans premium instant coffee for selected retail partners in {city}. The proposition is designed around shelf-ready packs and healthy retailer economics.\n\nMay I send the catalogue and trade details?",
+        ),
+        "CAFE": (
+            f"Coffee for {company}",
+            f"Hi {n},\n\nI noticed {company} in {city} and thought Purity Beans could sit well on your café menu — consistent premium instant for rush hours without a full espresso setup.\n\nWould you like me to send the range (and a sample if useful)?",
+        ),
+        "RESTAURANT": (
+            f"Kitchen coffee supply for {company}",
+            f"Hi {n},\n\nI’m Hiten from Pure Pantry Provisions. We supply Purity Beans to restaurants that want a consistent cup for guests without extra barista load.\n\nMay I send the range for {company} to evaluate?",
+        ),
+        "CANTEEN": (
+            f"Canteen coffee supply — {company}",
+            f"Hi {n},\n\nWe supply Purity Beans in bulk for staff canteens and industrial kitchens. Consistent taste, simple prep, B2B refill.\n\nWould a catalogue and pack sizes help {company}?",
+        ),
+        "HOSPITAL": (
+            f"Visitor and staff coffee — {company}",
+            f"Hi {n},\n\nI’m Hiten from Pure Pantry Provisions. Hospitals typically need a reliable pantry/visitor coffee that isn’t espresso-dependent.\n\nIf {company} handles F&B or pantry, may I send the range?",
         ),
         "HORECA": (
             f"Coffee supply for {company}",
@@ -318,7 +357,38 @@ def render_email(lead: B2BLead, profile: OutreachProfile, touch_number: int = 1)
             f"Hi {n},\n\nI’m Hiten from Pure Pantry Provisions. We’re introducing Purity Beans, a premium instant coffee range, and I wanted to check whether coffee sourcing is relevant at {company}.\n\nIf yes, may I send a short catalogue?",
         ),
     }
-    return drafts.get(cat, drafts["UNKNOWN"])
+    if which == "intro":
+        return intro.get(cat, intro["UNKNOWN"])
+    if which == "nudge":
+        return (
+            f"Quick check-in — Purity Beans for {company}",
+            f"Hi {n},\n\nJust a short note in case my earlier mail on Purity Beans was easy to miss. "
+            f"We work with selected {audience} in {city}.\n\nIf coffee sourcing is relevant, I can send the range — no pitch call required.",
+        )
+    if which == "proof":
+        proofs = {
+            "CAFE": "cafés use it for rush-hour cups when the machine queue is long",
+            "RESTAURANT": "kitchens keep a consistent guest cup without extra barista time",
+            "HOTEL": "hotels use it for in-room and banquet service",
+            "CANTEEN": "canteens run it as a daily staff staple",
+            "HOSPITAL": "hospital pantries use it for staff and visitor service",
+            "RETAILER": "retailers stock the jars because the repeat rate is simple",
+            "DISTRIBUTOR": "distributors carry the range for kirana and HORECA accounts",
+        }
+        proof = proofs.get(cat, f"selected {audience} use it as a reliable B2B cup")
+        return (
+            f"How {audience} use Purity Beans",
+            f"Hi {n},\n\nA useful datapoint for {company}: {proof}.\n\nHappy to send the catalogue or a small sample if that would help you judge it.",
+        )
+    if which == "ask":
+        return (
+            f"Sample or a 15-minute call — {company}?",
+            f"Hi {n},\n\nI’ll keep this direct. Would a sample, a catalogue, or a 15-minute call be useful for {company}?\n\nIf coffee isn’t a fit, a one-line “not now” is enough and I’ll close the file.",
+        )
+    return (
+        f"Should I close the file for {company}?",
+        f"Hi {n},\n\nI’ve reached out a few times about Purity Beans and don’t want to add noise.\n\nIf I should close your file, just say so. If there’s a better person or a later window, I’m happy to follow that instead.",
+    )
 
 
 def _wa_text(lead: B2BLead, profile: OutreachProfile) -> str:
@@ -412,6 +482,24 @@ def plan_touch(db: Session, lead: B2BLead, profile: OutreachProfile | None = Non
             "reason": "commercial negotiation requires pricing policy",
             "execute": False,
         }
+
+    if profile.intent in ("SAMPLE_REQUESTED", "MEETING_REQUESTED", "CALLBACK", "WRONG_PERSON"):
+        from app.services.outcome_router import next_shape
+        s = next_shape(profile.intent)
+        return {**s, "channel": "email"}
+
+    if profile.intent in ("OUT_OF_OFFICE", "MACHINE_REPLY", "CALL_LATER"):
+        from app.services.outcome_router import next_shape
+        s = next_shape(profile.intent)
+        return {**s, "channel": None}
+
+    if profile.intent == "EXISTING_SUPPLIER":
+        return {"action": "NURTURE", "channel": None, "execute": False,
+                "reason": "already supplied — no automatic re-send"}
+
+    if profile.intent == "BOUNCED":
+        return {"action": "COOLDOWN", "channel": None, "execute": False,
+                "reason": "hard bounce"}
 
     if profile.intent == "CATALOGUE_REQUESTED":
         # Prefer WA only with recorded consent; else email catalogue.
@@ -558,11 +646,17 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
         from app.services.email_sender import build_outreach_email, send_email
 
         proven_n = len(_proven_email_touches(db, lead.id))
-        subject, body = render_email(lead, profile, 1 if proven_n == 0 else 2)
+        seq = _sequence_state(db, lead)
+        touch_name = (seq.get("next_touch") or ("intro" if proven_n == 0 else "nudge"))
+        subject, body = render_email(
+            lead, profile,
+            1 if proven_n == 0 else 2,
+            touch=touch_name,
+        )
         if decision["action"] == "SEND_CATALOGUE":
             import os
 
-            url = (os.getenv("PURITY_BEANS_CATALOGUE_URL") or "").strip()
+            url = (os.getenv("PURITY_BEANS_CATALOGUE_URL") or os.getenv("CATALOGUE_URL") or "").strip()
             if not url:
                 _record(db, lead, profile, "email", "SEND_CATALOGUE", "NOT_CONFIGURED", "catalogue_email", reason="PURITY_BEANS_CATALOGUE_URL missing")
                 db.commit()
