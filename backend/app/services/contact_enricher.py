@@ -379,6 +379,52 @@ AUTHORITATIVE_PHONE_SOURCES = {
 }
 
 
+# Engines and directories that LIST a number. Listing is not confirmation:
+# nobody at the business told us this is their line.
+SEARCH_PHONE_SOURCES = (
+    "perplexity", "bravesearch", "brave", "googleplaces", "google", "bing",
+    "websearch", "serp", "search", "indiamart", "tradeindia", "justdial",
+    "exportersindia", "globallinker",
+)
+
+FIRST_PARTY = "FIRST_PARTY"
+SEARCH = "SEARCH"
+UNSOURCED = "UNSOURCED"
+
+
+def phone_provenance(lead) -> str:
+    """Two tiers, per the rule this codebase now runs on.
+
+    FIRST_PARTY  the brand, the business, or the founder stated it. Immutable
+                 unless explicit correction evidence arrives (a founder call).
+    SEARCH       an engine or directory listed it. A useful candidate to dial,
+                 never authoritative on its own, and never grounds for setting
+                 phone_verified.
+    UNSOURCED    provenance unrecorded; treated as SEARCH, because a number we
+                 cannot account for has not earned more than one we can.
+    """
+    src = (getattr(lead, "phone_source", "") or "").strip()
+    if not src:
+        return UNSOURCED
+    if src.upper() in AUTHORITATIVE_PHONE_SOURCES:
+        return FIRST_PARTY
+    low = src.lower()
+    if any(k in low for k in SEARCH_PHONE_SOURCES):
+        return SEARCH
+    return UNSOURCED
+
+
+def is_landline(value) -> bool:
+    """An Indian landline reaches a desk, not a person, and WhatsApp cannot
+    reach it at all. Mobiles are 10 digits starting 6-9; anything else that
+    still looks like a number is an STD-coded landline."""
+    d = re.sub(r"\D", "", str(value or ""))
+    if d.startswith("91") and len(d) > 10:
+        d = d[2:]
+    d = d.lstrip("0")
+    return bool(d) and not (len(d) == 10 and d[0] in "6789")
+
+
 def digits_only(value) -> str:
     """Last 10 digits, so +91-98765-43210 and 9876543210 compare equal."""
     d = re.sub(r"\D", "", str(value or ""))

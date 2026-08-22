@@ -3263,7 +3263,7 @@ def _silent_verify_and_enrich(lead_ids: list[int]):
                     # how a Nestle distributor's real line became a searched
                     # guess. Same rule as the PURGED guard on email below.
                     from app.services.contact_enricher import (
-                        digits_only, phone_is_authoritative)
+                        digits_only, is_landline, phone_is_authoritative)
 
                     _protected = phone_is_authoritative(lead)
                     _agrees = digits_only(lead.phone) == digits_only(enriched["confirmed_phone"])
@@ -3275,10 +3275,27 @@ def _silent_verify_and_enrich(lead_ids: list[int]):
                         lead.phone = enriched["confirmed_phone"]
                         if not _protected:
                             lead.phone_source = ", ".join(enriched.get("sources_checked", [])[:4])
-                    if not lead.whatsapp_number:
-                        lead.whatsapp_number = enriched["whatsapp_number"] or enriched["confirmed_phone"]
-                    if _agrees or not _protected:
+
+                    # phone_verified is a PERMISSION, not a note: decision_engine
+                    # and revenue_engine read it as "phone/WhatsApp is an
+                    # available channel". A search engine listing a number is
+                    # not a business confirming it, so listing must never set
+                    # this flag — that is how 1,216 leads came to assert
+                    # verification nobody had performed.
+                    #
+                    # A search result that AGREES with a first-party number is
+                    # corroboration of something already confirmed, so it may.
+                    if _agrees and _protected:
                         lead.phone_verified = True
+
+                    # Never seed WhatsApp from a landline: 0172/0161/022 numbers
+                    # reach a desk and WhatsApp cannot reach them at all, so
+                    # this would queue guaranteed-undeliverable sends.
+                    if not lead.whatsapp_number:
+                        _wa = enriched["whatsapp_number"] or (
+                            "" if is_landline(lead.phone) else lead.phone)
+                        if _wa:
+                            lead.whatsapp_number = _wa
                 # PURGED means the founder (or a data-quality sweep) deliberately
                 # removed an address as unconfirmed. Without this check the loop
                 # read the empty field as "missing" and enriched a new guess in

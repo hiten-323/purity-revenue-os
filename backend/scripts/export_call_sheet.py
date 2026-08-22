@@ -155,8 +155,24 @@ def load(args):
             except Exception:
                 terr = ""
             more = extra.get(_digits(l.phone), 0)
+            # Provenance belongs on the sheet, not just in the schema. A caller
+            # about to dial should know whether a business gave us this number
+            # or an engine listed it — the second kind is a lead to confirm,
+            # not a fact. And a landline reaches a desk, so ask for the person.
+            try:
+                from app.services.contact_enricher import (FIRST_PARTY, SEARCH,
+                                                           is_landline,
+                                                           phone_provenance)
+                prov = phone_provenance(l)
+                prov_note = ("published by the business" if prov == FIRST_PARTY
+                             else "from search — confirm on the call"
+                             if prov == SEARCH else "source unrecorded — confirm")
+                land = "landline (no WhatsApp)" if is_landline(l.phone) else ""
+            except Exception:
+                prov_note = land = ""
             note = "  ·  ".join(x for x in (
                 (f"+{more} branch" + ("es" if more > 1 else "")) if more else "",
+                prov_note, land,
                 _phone_flag(l.phone),
             ) if x)
             return [
