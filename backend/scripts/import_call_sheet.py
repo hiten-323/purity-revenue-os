@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from openpyxl import load_workbook
 
-from call_sheet_schema import COLUMNS, GIVEN
+from call_sheet_schema import BY_KEY, COLUMNS, GIVEN, MATCH_KEY
 
 SHEET = "CALL QUEUE"
 HEADER_ROW = 3
@@ -89,16 +89,25 @@ def _date(v, field, problems):
 
 def read_rows(path):
     wb = load_workbook(path, data_only=True)
-    if SHEET not in wb.sheetnames:
-        raise SystemExit(f"No '{SHEET}' sheet in {os.path.basename(path)}. "
-                         f"Found: {', '.join(wb.sheetnames)}")
-    ws = wb[SHEET]
+    # A workbook that has been through Google Sheets comes back with the tab
+    # named after the file and no banner rows, so neither the sheet name nor
+    # HEADER_ROW survives. Locate both by content instead of position: the
+    # header is whichever row carries the match key.
+    ws = wb[SHEET] if SHEET in wb.sheetnames else wb[wb.sheetnames[0]]
 
-    header = {}
-    for i in range(1, ws.max_column + 1):
-        t = _txt(ws.cell(HEADER_ROW, i).value)
-        if t:
-            header[t] = i
+    header, header_row = {}, None
+    for row in range(1, min(ws.max_row, 20) + 1):
+        titles = {_txt(ws.cell(row, i).value): i
+                  for i in range(1, ws.max_column + 1)
+                  if _txt(ws.cell(row, i).value)}
+        if BY_KEY[MATCH_KEY][1] in titles:
+            header, header_row = titles, row
+            break
+    if header_row is None:
+        raise SystemExit(
+            f"No header row found in {os.path.basename(path)} "
+            f"(sheet {ws.title!r}). Expected a row containing "
+            f"{BY_KEY[MATCH_KEY][1]!r}.")
 
     # Match on title, then map back to key, so a reordered sheet still imports
     # and a renamed column fails loudly instead of writing to the wrong field.
@@ -113,7 +122,7 @@ def read_rows(path):
         print(f"WARNING: columns not found, will not import: {missing}")
 
     out = []
-    for r in range(HEADER_ROW + 1, ws.max_row + 1):
+    for r in range(header_row + 1, ws.max_row + 1):
         row = {k: ws.cell(r, i).value for k, i in col.items()}
         if any(_txt(v) for k, v in row.items()
                if k not in ("row", "company", "segment", "address", "city",
