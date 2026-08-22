@@ -79,6 +79,7 @@ COLUMNS = [
     ("address",    "Address",                 40, GIVEN, None, None),
     ("city",       "City",                    14, GIVEN, None, None),
     ("phone",      "Phone",                   16, GIVEN, None, None),   # match key
+    ("known_name", "Known contact",           20, GIVEN, None, None),
     ("rating",     "Rating",                   8, GIVEN, None, None),
     ("reviews",    "Reviews",                  9, GIVEN, None, None),
     ("email_have", "Email on file",           24, GIVEN, None, None),

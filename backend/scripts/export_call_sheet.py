@@ -114,6 +114,9 @@ def load(args):
             rows = [l for l in rows if _clean(l.city).lower() == want]
         if args.min_rating:
             rows = [l for l in rows if (l.maps_rating or 0) >= args.min_rating]
+        if args.territory:
+            want = {w.strip().upper() for w in args.territory.split(",")}
+            rows = [l for l in rows if territory.territory_of(l) in want]
         if args.segment:
             want = {w.strip().lower() for w in args.segment.split(",")}
             rows = [l for l in rows
@@ -158,7 +161,7 @@ def load(args):
             ) if x)
             return [
                 n, _clean(l.company), seg_of(l), _clean(l.address), _clean(l.city),
-                _clean(l.phone),
+                _clean(l.phone), _clean(getattr(l, "contact_name", "")),
                 float(l.maps_rating) if l.maps_rating else None,
                 int(l.maps_reviews_count) if l.maps_reviews_count else None,
                 _clean(l.email), _clean(l.website), terr, note,
@@ -484,6 +487,7 @@ def main():
     ap.add_argument("--city")
     ap.add_argument("--segment", help="comma-separated, e.g. cafe,horeca,grocery")
     ap.add_argument("--min-rating", type=float, default=0.0)
+    ap.add_argument("--territory", help="e.g. DELHI_NCR, or R1_0_5,R2_5_15")
     ap.add_argument("--queue", type=int, default=150, help="rows in CALL QUEUE")
     ap.add_argument("--out")
     args = ap.parse_args()
@@ -496,6 +500,8 @@ def main():
     scope = args.city or "All cities"
     if args.segment:
         scope += f"  ·  {args.segment}"
+    if args.territory:
+        scope = args.territory.replace("_", " ")
     if args.min_rating:
         scope += f"  ·  rating {args.min_rating}+"
 
@@ -506,9 +512,10 @@ def main():
 
     d = data["derived"]
     _simple_sheet(wb, "ALL LEADS",
-                  ["#", "Business", "Type", "Address", "City", "Phone", "Rating",
-                   "Reviews", "Email on file", "Website", "Territory", "Note"],
-                  [5, 34, 15, 40, 14, 16, 8, 9, 24, 24, 13, 26],
+                  ["#", "Business", "Type", "Address", "City", "Phone",
+                   "Known contact", "Rating", "Reviews", "Email on file",
+                   "Website", "Territory", "Note"],
+                  [5, 34, 15, 40, 14, 16, 20, 8, 9, 24, 24, 13, 26],
                   data["all"], "")
     _simple_sheet(wb, "CALL HISTORY",
                   ["When", "Business", "Phone", "Status", "Duration", "Summary"],
@@ -535,7 +542,7 @@ def main():
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     outdir = os.path.join(root, "exports")
     os.makedirs(outdir, exist_ok=True)
-    tag = (args.city or args.segment or "all").lower().replace(" ", "-").replace(",", "-")
+    tag = (args.territory or args.city or args.segment or "all").lower().replace(" ", "-").replace(",", "-")
     path = args.out or os.path.join(outdir, f"call-sheet-{tag}-{date.today():%Y%m%d}.xlsx")
     wb.save(path)
 
