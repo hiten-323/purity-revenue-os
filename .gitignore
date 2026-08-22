@@ -35,6 +35,14 @@ removed_leads_backup.json
 *_backup.json
 *.csv
 
+# Call sheets and any other spreadsheet export. A call sheet is 1,400+ real
+# businesses with names, addresses and phone numbers — the same third-party
+# contact data as the database, in a format that is far easier to email
+# somewhere by accident. Regenerate with scripts/export_call_sheet.py.
+exports/
+*.xlsx
+*.xls
+
 # Compiled bytecode — 121 .pyc files were tracked, so every run dirtied the
 # working tree and a stale .pyc could ship instead of the source beside it.
 __pycache__/
