@@ -1048,7 +1048,13 @@ def reconcile_sent_emails_via_imap(db: Session) -> dict:
     try:
         # Connect to Zoho IMAP
         imap_host = "imap.zoho.in"
-        mail = imaplib.IMAP4_SSL(imap_host, 993)
+  # Explicit timeout: imaplib inherits the global socket default, which
+        # is None unless something else happened to set it, so a silent
+        # network stall blocks forever. The worker's main loop went 5h40m
+        # without completing a cycle (heartbeat cadence is 600s) while its
+        # auto-warm daemon thread kept logging — so pm2 read 'online' and
+        # nothing reported a problem.
+        mail = imaplib.IMAP4_SSL(imap_host, 993, timeout=30)
         mail.login(sender_email, password)
         
         # Select Sent folder
@@ -1147,7 +1153,13 @@ def reconcile_inbound_replies_via_imap(db) -> dict:
         
     try:
         imap_host = "imap.zoho.in"
-        mail = imaplib.IMAP4_SSL(imap_host, 993)
+  # Explicit timeout: imaplib inherits the global socket default, which
+        # is None unless something else happened to set it, so a silent
+        # network stall blocks forever. The worker's main loop went 5h40m
+        # without completing a cycle (heartbeat cadence is 600s) while its
+        # auto-warm daemon thread kept logging — so pm2 read 'online' and
+        # nothing reported a problem.
+        mail = imaplib.IMAP4_SSL(imap_host, 993, timeout=30)
         mail.login(sender_email, password)
         
         status, folder_data = mail.select("INBOX")

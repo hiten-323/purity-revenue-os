@@ -3528,7 +3528,9 @@ def sync_email_replies(days: int = 7, db: Session = Depends(get_db)):
     matched = []
     try:
         since = (datetime.utcnow() - timedelta(days=days)).strftime("%d-%b-%Y")
-        M = imaplib.IMAP4_SSL("imap.zoho.in")
+        # Timeout for the same reason as email_sender: an untimed IMAP
+        # connect is indistinguishable from a hung worker.
+        M = imaplib.IMAP4_SSL("imap.zoho.in", timeout=30)
         M.login(SENDER_EMAIL, pw)
         M.select("INBOX", readonly=True)
         _, data = M.search(None, f'(SINCE "{since}")')
