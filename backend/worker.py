@@ -1,7 +1,9 @@
 """
 Auto-Warm background worker — runs in its OWN process.
 
-Each cycle syncs replies, updates conversation memory, classifies leads, and
+Each cycle syncs replies, reconciles contact trust from evidence already on
+record (a maintenance sweep, on its own slower cadence), updates conversation
+memory, classifies leads, and
 — only when SMART_OUTREACH_ENABLED is explicitly on — executes due
 consent-safe automatic email/WhatsApp outreach and learns measured
 category/channel reply rates.
@@ -34,6 +36,19 @@ if __name__ == "__main__":
     limit = max(1, min(100, int(os.getenv("SMART_OUTREACH_LIMIT", "20"))))
     logging.info("Adaptive outreach: enabled=%s limit=%s cycle=%ss", enabled, limit, cycle_sec)
 
+    # Trust reconciliation is a MAINTENANCE job, not a decision engine. It reads
+    # evidence already on record, reconciles it into email_trust, and writes a
+    # TRUST_TRANSITION audit event. It never sends, never classifies a lead,
+    # never sets cadence or offers, and never touches learning weights.
+    #
+    # Nightly by default: evaluate() is a fixpoint, so re-running it every
+    # 10-minute outreach cycle re-derives identical states and buys nothing but
+    # MX lookups. Set TRUST_SWEEP_HOURS=0 to disable.
+    sweep_hours = max(0.0, float(os.getenv("TRUST_SWEEP_HOURS", "24")))
+    last_sweep = None          # None => run once on the first cycle after start
+    sweep_note = "not yet run"
+    logging.info("trust sweep: every %sh (0=off)", sweep_hours)
+
     while True:
         db = SessionLocal()
         try:
@@ -45,6 +60,30 @@ if __name__ == "__main__":
             except Exception as e:
                 logging.error("reply sync failed: %s", e)
                 rep = {"error": str(e)}
+
+            # Ordered after reply sync and before outreach on purpose: a reply
+            # synced this cycle is fresh evidence, and a lead promoted here
+            # becomes visible to evaluate_next_action() in the same cycle
+            # instead of waiting for the next one.
+            if sweep_hours:
+                _now = time.monotonic()
+                if last_sweep is None or (_now - last_sweep) >= sweep_hours * 3600:
+                    try:
+                        from app.services.trust_promoter import run as trust_sweep
+
+                        sw = trust_sweep(db)
+                        last_sweep = _now
+                        sweep_note = f"moved={sw.get('moved')} of {sw.get('considered')} {sw.get('into')}"
+                        logging.info(
+                            "trust sweep: considered=%s moved=%s into=%s errors=%s",
+                            sw.get("considered"), sw.get("moved"),
+                            sw.get("into"), len(sw.get("errors") or []),
+                        )
+                    except Exception as e:
+                        # last_sweep deliberately NOT advanced: a failed sweep
+                        # retries next cycle rather than silently skipping a day.
+                        sweep_note = f"failed: {e}"[:120]
+                        logging.error("trust sweep failed: %s", e)
 
             if enabled:
                 try:
@@ -91,6 +130,7 @@ if __name__ == "__main__":
                     {
                         "reply_sync": str(rep)[:120],
                         "smart_outreach": "enabled" if enabled else "disabled",
+                        "trust_sweep": sweep_note,
                     },
                 )
                 beat(
