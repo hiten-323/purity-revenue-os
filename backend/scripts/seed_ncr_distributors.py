@@ -88,6 +88,37 @@ NESTLE = [
 # accepts.
 WEBSITE_SOURCED = [
     {
+        "company": "Fides Tea Impex Private Limited",
+        "contact_name": "K. K. Bansal",
+        "address": "Flat No. 52, DDA MIG Flats, Prasad Nagar",
+        "city": "Delhi",
+        "pincode": "110005",
+        "phone": "8047798430",
+        "whatsapp": "",
+        # No email published on the site. The listed number is an IndiaMART
+        # call-tracking line (8047 prefix) — it reaches the business, but it is
+        # routed, so expect a switchboard rather than K. K. Bansal directly.
+        "email": "",
+        "website": "https://www.fidesteaimpex.com/",
+        "note": "wholesaler/distributor: roasted + arabica coffee beans, tea; "
+                "phone is an IndiaMART routed line",
+    },
+    {
+        "company": "Coffee.Plus",
+        "contact_name": "",
+        "address": "14 Regency, Asola",
+        "city": "Delhi",
+        "pincode": "110074",
+        "phone": "9811122565",
+        "whatsapp": "9654369335",
+        # Self-published on their own contact page. Generic prefix, so it will
+        # read as a role inbox — accurate, not a defect.
+        "email": "info@coffee.plus",
+        "website": "https://coffeeplus.in/",
+        "note": "specialty coffee + espresso equipment; separate WhatsApp line; "
+                "states Delhi NCR & Central India coverage",
+    },
+    {
         "company": "BROOT Coffee Roasters",
         "contact_name": "Tamandeep",
         "address": "New Delhi",

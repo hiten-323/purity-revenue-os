@@ -15,6 +15,17 @@ sys.path.insert(0, _EXPECT_TREE)
 import app.database.database as _dbmod
 if not os.path.abspath(_dbmod.__file__).startswith(os.path.abspath(_EXPECT_TREE)):
     import pytest
+    # Undo the sys.path.insert before skipping. Skipping protects THIS file,
+    # but the insert leaks: jules_session stays at sys.path[0] for the rest of
+    # the session, so every module imported for the first time afterwards binds
+    # to the legacy tree instead of this one. That is how
+    # test_phone_provenance_guard came to import contact_enricher from
+    # jules_session and fail on a symbol that exists only here — a suite that
+    # does not even run was silently repointing the ones that do.
+    try:
+        sys.path.remove(_EXPECT_TREE)
+    except ValueError:
+        pass
     pytest.skip(
         f"app already loaded from {os.path.dirname(_dbmod.__file__)}, not the "
         f"tree this suite targets. Run it in its own process: "

@@ -3257,11 +3257,28 @@ def _silent_verify_and_enrich(lead_ids: list[int]):
                                     website=lead.website or "")
                 if (enriched["confirmed_phone"] and enriched["confidence"] in ("HIGH", "MEDIUM")
                         and not _is_placeholder_phone(enriched["confirmed_phone"])):
-                    lead.phone = enriched["confirmed_phone"]
+                    # A first-party number outranks a search result. Enrichment
+                    # may fill an EMPTY phone and may confirm one that agrees,
+                    # but it may not replace one a publisher gave us — that is
+                    # how a Nestle distributor's real line became a searched
+                    # guess. Same rule as the PURGED guard on email below.
+                    from app.services.contact_enricher import (
+                        digits_only, phone_is_authoritative)
+
+                    _protected = phone_is_authoritative(lead)
+                    _agrees = digits_only(lead.phone) == digits_only(enriched["confirmed_phone"])
+                    if _protected and not _agrees:
+                        logger.info(
+                            "enrich: keeping first-party phone for %s (%s); web suggested %s",
+                            lead.company, lead.phone_source, enriched["confirmed_phone"])
+                    else:
+                        lead.phone = enriched["confirmed_phone"]
+                        if not _protected:
+                            lead.phone_source = ", ".join(enriched.get("sources_checked", [])[:4])
                     if not lead.whatsapp_number:
                         lead.whatsapp_number = enriched["whatsapp_number"] or enriched["confirmed_phone"]
-                    lead.phone_verified = True
-                    lead.phone_source = ", ".join(enriched.get("sources_checked", [])[:4])
+                    if _agrees or not _protected:
+                        lead.phone_verified = True
                 # PURGED means the founder (or a data-quality sweep) deliberately
                 # removed an address as unconfirmed. Without this check the loop
                 # read the empty field as "missing" and enriched a new guess in

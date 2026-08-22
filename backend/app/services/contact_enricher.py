@@ -358,6 +358,39 @@ def _search_brave(company: str, city: str) -> dict:
     return {"phones": phones, "email": email, "source": "BraveSearch"}
 
 
+# Phone provenance that outranks a web search.
+#
+# These are numbers a first party published or spoke: the brand's own
+# distributor locator, the business's own website, the founder hearing it on a
+# call. A directory scrape or an LLM judge reading search results is weaker
+# evidence than that, and must never overwrite it.
+#
+# This is the phone-side twin of the PURGED guard on the email path. That guard
+# exists because an address purged at 05:38 was silently re-enriched minutes
+# later; the phone field had no equivalent, so a Nestle-published distributor
+# number (9312064004) was replaced by a searched one within an hour of ingest.
+AUTHORITATIVE_PHONE_SOURCES = {
+    "NESTLE_DISTRIBUTOR_LOCATOR",
+    "WEBSITE",
+    "FOUNDER_CALL",
+    "BUSINESS_CARD_OCR",
+    "EMAIL_REPLY",
+    "MANUAL",
+}
+
+
+def digits_only(value) -> str:
+    """Last 10 digits, so +91-98765-43210 and 9876543210 compare equal."""
+    d = re.sub(r"\D", "", str(value or ""))
+    return d[-10:] if len(d) >= 10 else d
+
+
+def phone_is_authoritative(lead) -> bool:
+    """True when this lead's phone came from a first party, not a search."""
+    src = (getattr(lead, "phone_source", "") or "").strip().upper()
+    return bool((getattr(lead, "phone", "") or "").strip()) and src in AUTHORITATIVE_PHONE_SOURCES
+
+
 def _llm_judge(company: str, city: str, phone_sources: dict, emails: list) -> tuple | None:
     """
     Free LLM attribution — Cerebras first, local Ollama fallback if Cerebras
