@@ -117,6 +117,39 @@ def load(args):
         if args.territory:
             want = {w.strip().upper() for w in args.territory.split(",")}
             rows = [l for l in rows if territory.territory_of(l) in want]
+        if args.stable:
+            # Only rows whose contact data will still be true when you dial it.
+            #
+            # A SEARCH-provenance phone is perishable: in one observed 15-minute
+            # window the enrichment loop rewrote 8 of them, including a Ludhiana
+            # landline that became an unrelated mobile. Printing 1,400 of those
+            # produces a sheet that disagrees with the database by the time it
+            # reaches a hand. Two kinds of row survive that objection:
+            #
+            #   FIRST_PARTY phone  a business or brand published it, and the
+            #                      provenance guard now forbids overwriting it
+            #   SEND-ready         the decision engine will email this lead, so
+            #                      the relationship does not depend on the phone
+            #
+            # Measured 2026-08-23: 27 and 7, with zero overlap — they are
+            # different populations wanting different openings, which is why
+            # each row says which one it is.
+            from app.services.contact_enricher import FIRST_PARTY, phone_provenance
+            from app.services.decision_engine import evaluate_next_action
+
+            keep = []
+            for l in rows:
+                first_party = phone_provenance(l) == FIRST_PARTY
+                sendable = False
+                if not first_party and _clean(l.email):
+                    try:
+                        sendable = evaluate_next_action(l, db)["action"] == "SEND"
+                    except Exception:
+                        sendable = False
+                if first_party or sendable:
+                    l._stable_kind = "first-party phone" if first_party else "email is sendable"
+                    keep.append(l)
+            rows = keep
         if args.segment:
             want = {w.strip().lower() for w in args.segment.split(",")}
             rows = [l for l in rows
@@ -142,6 +175,12 @@ def load(args):
         # then best-reviewed. Flagged numbers always last.
         leads.sort(key=lambda l: (
             bool(_phone_flag(l.phone)),
+            # On a --stable sheet the first-party rows are the ones you actually
+            # dial: they have no sendable email, so the call is the only channel
+            # and it is what converts them. The email-sendable rows are already
+            # reachable without picking up the phone, so they sort last rather
+            # than interleaving and breaking the caller's rhythm.
+            getattr(l, "_stable_kind", "") == "email is sendable",
             segment_rank(seg_of(l)),
             (l.call_attempts or 0) > 0,
             _clean(l.city).lower(),
@@ -170,7 +209,10 @@ def load(args):
                 land = "landline (no WhatsApp)" if is_landline(l.phone) else ""
             except Exception:
                 prov_note = land = ""
+            kind = getattr(l, "_stable_kind", "")
             note = "  ·  ".join(x for x in (
+                ("EMAIL SENDABLE — call is optional"
+                 if kind == "email is sendable" else ""),
                 (f"+{more} branch" + ("es" if more > 1 else "")) if more else "",
                 prov_note, land,
                 _phone_flag(l.phone),
@@ -504,6 +546,9 @@ def main():
     ap.add_argument("--segment", help="comma-separated, e.g. cafe,horeca,grocery")
     ap.add_argument("--min-rating", type=float, default=0.0)
     ap.add_argument("--territory", help="e.g. DELHI_NCR, or R1_0_5,R2_5_15")
+    ap.add_argument("--stable", action="store_true",
+                    help="only first-party phones + SEND-ready leads "
+                         "(excludes perishable search-derived numbers)")
     ap.add_argument("--queue", type=int, default=150, help="rows in CALL QUEUE")
     ap.add_argument("--out")
     args = ap.parse_args()
@@ -516,6 +561,8 @@ def main():
     scope = args.city or "All cities"
     if args.segment:
         scope += f"  ·  {args.segment}"
+    if args.stable:
+        scope = "Stable contacts only"
     if args.territory:
         scope = args.territory.replace("_", " ")
     if args.min_rating:
@@ -558,7 +605,8 @@ def main():
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     outdir = os.path.join(root, "exports")
     os.makedirs(outdir, exist_ok=True)
-    tag = (args.territory or args.city or args.segment or "all").lower().replace(" ", "-").replace(",", "-")
+    tag = ("stable" if args.stable else
+           (args.territory or args.city or args.segment or "all")).lower().replace(" ", "-").replace(",", "-")
     path = args.out or os.path.join(outdir, f"call-sheet-{tag}-{date.today():%Y%m%d}.xlsx")
     wb.save(path)
 
