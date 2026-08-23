@@ -3273,6 +3273,16 @@ def _silent_verify_and_enrich(lead_ids: list[int]):
                             lead.company, lead.phone_source, enriched["confirmed_phone"])
                     else:
                         lead.phone = enriched["confirmed_phone"]
+                        # Stamp the write. Both columns sat at None on every
+                        # enrichment write, so "did the worker touch this row?"
+                        # could only be answered by fingerprinting the values
+                        # themselves and diffing two snapshots. A timestamp the
+                        # write path maintains answers it directly.
+                        #
+                        # collected_at means "we last wrote a number here". It
+                        # says nothing about whether the number is right, which
+                        # is exactly why it is separate from verified_at below.
+                        lead.phone_collected_at = datetime.utcnow()
                         if not _protected:
                             lead.phone_source = ", ".join(enriched.get("sources_checked", [])[:4])
 
@@ -3287,6 +3297,11 @@ def _silent_verify_and_enrich(lead_ids: list[int]):
                     # corroboration of something already confirmed, so it may.
                     if _agrees and _protected:
                         lead.phone_verified = True
+                        # verified_at moves ONLY in lockstep with the flag it
+                        # dates. If it were stamped on every pass it would read
+                        # as "recently verified" for rows nobody ever verified —
+                        # the same false claim the flag itself carried.
+                        lead.phone_verified_at = datetime.utcnow()
 
                     # Never seed WhatsApp from a landline: 0172/0161/022 numbers
                     # reach a desk and WhatsApp cannot reach them at all, so
