@@ -5,24 +5,20 @@ WHY THE CONSENT GATE IS NOT OPTIONAL
 ------------------------------------
 Meta's WhatsApp Business Messaging Policy requires opt-in before ANY
 business-initiated message. Our leads are scraped from Google Maps / IndiaMART /
-TradeIndia — consent_status is UNKNOWN for 736 of 737. Sending template messages
-to those numbers is a policy violation, and the practical consequence is not a
-fine: recipients block/report -> quality rating drops -> messaging limits ->
-the number gets banned. That is the same number our email + outreach copy tells
-prospects to call, so losing it costs more than the channel.
+TradeIndia — consent_status is UNKNOWN for the cold pool. Sending template
+messages to those numbers without opt-in is not permitted.
 
-So this module refuses to send to a lead without recorded consent. Cold
-first-touch stays on wa.me (the founder's own phone, manual send) via the
-WhatsApp Send Queue. This API path is for people who have opted in — in practice
-someone who REPLIED, which both proves consent and opens Meta's 24-hour
-customer-service window where free-form (non-template) messages are allowed.
+Cold first-touch stays on the founder's manual wa.me Send Queue. This API path
+is for contacts with recorded opt-in. An inbound reply is useful evidence, but
+must be represented as an explicit consent event/state before API messaging.
 
 CONFIG (dormant until set — nothing sends without these):
   AISENSY_API_KEY        API key from the AiSensy dashboard
   AISENSY_CAMPAIGN_NAME  campaign wired to a Meta-approved template
 
 Business-initiated messages must use an approved template; AiSensy's campaign API
-maps a campaign -> template. Inside the 24h window free-form text is allowed.
+maps a campaign -> template. Inside the applicable service window, provider rules
+still apply.
 """
 from __future__ import annotations
 
@@ -35,11 +31,15 @@ import httpx
 
 AISENSY_URL = "https://backend.aisensy.com/campaign/t1/api/v2"
 
-# Consent values we treat as a real opt-in.
-CONSENT_OK = {"EXPLICIT", "IMPLIED_B2B", "OPTED_IN"}
+# Only explicit/opted-in states are sufficient for API-initiated WhatsApp.
+# IMPLIED_B2B is intentionally excluded: a scraped B2B relationship is not
+# proof of WhatsApp opt-in.
+CONSENT_OK = {"EXPLICIT", "OPTED_IN"}
 
-# Statuses that prove the lead messaged/replied to us — that is an opt-in and
-# opens Meta's 24h customer-service window.
+# Statuses that indicate an engaged commercial relationship. They do NOT by
+# themselves satisfy the WhatsApp opt-in requirement; consent must be recorded
+# explicitly or an inbound WhatsApp event must be represented by the consent
+# state before the API is allowed to send.
 ENGAGED = {"REPLIED", "MEETING_BOOKED", "MEETING_COMPLETED", "SAMPLE_SENT",
            "FEEDBACK_PENDING", "FEEDBACK_RECEIVED", "PROPOSAL_SENT",
            "NEGOTIATION", "ORDER_WON", "ONBOARDED"}
@@ -49,9 +49,9 @@ SERVICE_WINDOW_HOURS = 24
 
 @dataclass
 class WaResult:
-    # `sent` means AiSensy accepted the request. It does NOT mean the recipient
+    # `sent` means AiSensy accepted the send. It does NOT mean the recipient
     # received/read it; those facts must come from provider status callbacks.
-    status: str                      # sent | blocked | failed | not_configured
+    status: str
     reason: str = ""
     message_id: str = ""
     response: str = ""
@@ -69,26 +69,26 @@ def consent_check(lead) -> tuple[bool, str]:
     May we send this lead a WhatsApp message via the API?
 
     Returns (allowed, reason). Deliberately strict: an unknown consent state is
-    a NO, never a maybe.
+    a NO, never a maybe. IMPLIED_B2B is not accepted because it does not record
+    WhatsApp opt-in.
     """
     status = (getattr(lead, "consent_status", None) or "UNKNOWN").upper()
     if getattr(lead, "do_not_call", False):
         return False, "lead is on do-not-contact"
     if status in CONSENT_OK:
         return True, f"consent recorded: {status}"
-    if (getattr(lead, "status", "") or "") in ENGAGED:
-        return True, "lead replied to us — opt-in + 24h service window open"
     return False, (
-        f"no opt-in on record (consent_status={status}). Meta requires opt-in before "
-        f"business-initiated WhatsApp. Use the wa.me Send Queue for cold first touch."
+        f"no explicit WhatsApp opt-in on record (consent_status={status}). "
+        "Business-initiated WhatsApp requires opt-in; use the founder's manual "
+        "wa.me path for cold first touch."
     )
 
 
 def in_service_window(lead) -> bool:
     """
     True if the lead messaged us within the last 24h — inside Meta's
-    customer-service window, where free-form (non-template) text is allowed.
-    Outside it, only an approved template may be sent.
+    customer-service window, where free-form (non-template) text may be allowed
+    by provider policy.
     """
     last = getattr(lead, "last_reply_at", None) or getattr(lead, "last_updated", None)
     if not last or (getattr(lead, "status", "") or "") not in ENGAGED:
@@ -99,7 +99,7 @@ def in_service_window(lead) -> bool:
 def _normalise_msisdn(raw: str) -> str:
     """AiSensy wants a country-coded number without + or separators."""
     d = "".join(ch for ch in (raw or "") if ch.isdigit())
-    if len(d) == 10:            # bare Indian mobile
+    if len(d) == 10:
         d = "91" + d
     return d
 
@@ -134,8 +134,8 @@ def send_whatsapp(lead, message: str, campaign_name: Optional[str] = None,
                   template_params: Optional[list[str]] = None,
                   timeout: float = 20.0) -> WaResult:
     """
-    Send via AiSensy. Refuses without consent — that check comes first, on
-    purpose, so no future caller can bypass it by passing the right arguments.
+    Send via AiSensy. Refuses without explicit opt-in — that check comes first,
+    so no future caller can bypass it by passing the right arguments.
 
     A successful HTTP response means PROVIDER_ACCEPTED only. Delivery/read
     status must be established separately from provider callbacks.
@@ -163,7 +163,6 @@ def send_whatsapp(lead, message: str, campaign_name: Optional[str] = None,
         "destination": phone,
         "userName": getattr(lead, "contact_name", None) or getattr(lead, "company", "") or "there",
         "source": "purity-revenue-os",
-        # Template placeholders, in the order defined on the approved template.
         "templateParams": template_params if template_params is not None else [
             (getattr(lead, "contact_name", None) or getattr(lead, "company", "") or "there")
         ],
