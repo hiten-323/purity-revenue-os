@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.database.database import get_db
 from app.models.models import B2BLead
+from app.services.decision_engine import evaluate_next_action
 from app.services.smart_outreach import classify_lead, plan_touch, execute_one, run_cycle
 
 router = APIRouter(prefix="/smart-outreach", tags=["Smart Outreach"])
@@ -31,7 +32,7 @@ def next_action(lead_id: int, db: Session = Depends(get_db)):
     lead = db.query(B2BLead).filter(B2BLead.id == lead_id).first()
     if not lead:
         raise HTTPException(404, "lead not found")
-    return evaluate_next_action(db, lead)
+    return evaluate_next_action(lead, db)
 
 
 @router.post("/run/{lead_id}")
