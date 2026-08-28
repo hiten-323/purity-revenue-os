@@ -2,11 +2,36 @@
 
 A B2B sales operating system for Pure Pantry Provisions (premium instant coffee,
 Abohar, Punjab). It discovers business buyers, resolves them into accounts,
-governs how often each account may be contacted, drafts outreach for founder
-approval, records replies and calls, and decides the next action per account.
+governs how often each account may be contacted, classifies leads from evidence
+and history, renders category-specific outreach, records replies and calls, and
+decides the next action per account.
 
-Nothing in this system sends on its own. Every outbound communication requires
-explicit founder approval.
+## Decision architecture
+
+`decision_engine.evaluate_next_action()` is the sole permission authority.
+Other services supply evidence or shape the already-authorised action; they do
+not create a second send decision.
+
+The intended lifecycle is:
+
+```text
+evidence -> classify -> strategy -> gates -> evaluate_next_action()
+    -> send | wait | catalogue | cooldown | FOUNDER_REVIEW
+    -> proof + intent + memory -> learn -> next
+```
+
+The repository default keeps automated outreach **OFF**. Enabling it is a
+deliberate production rollout after the controlled-send gate. Learning stores
+measured patterns but does not silently change the frozen outreach weights or
+rate limits.
+
+Catalogue is earned: a cold lead may be asked whether they want it, but the
+catalogue link is sent only after a recorded catalogue request. It is never
+attached to the universal cold-email signature.
+
+WhatsApp API sending requires recorded explicit/opted-in consent and an
+approved provider template path. `IMPLIED_B2B` is not treated as WhatsApp
+opt-in. Cold WhatsApp remains a founder-controlled/manual path.
 
 ## Stack
 
@@ -19,13 +44,14 @@ explicit founder approval.
 
 ## Layout
 
-```
+```text
 backend/
   app/api/endpoints.py       HTTP surface
   app/models/models.py       ORM models + before_insert enforcement
-  app/services/              business logic (see below)
-  run_server.py              uvicorn entrypoint (forces SelectorEventLoop)
+  app/services/              business logic
+  run_server.py              uvicorn entrypoint
   worker.py                  isolated enrichment process
+  smart_outreach_worker.py   isolated automated-outreach process
 frontend/                    Next.js dashboard
 ecosystem.config.js          pm2 process definitions; reads secrets from backend/.env
 ```
@@ -34,18 +60,36 @@ ecosystem.config.js          pm2 process definitions; reads secrets from backend
 
 | Module | Responsibility |
 |---|---|
-| `trust_promoter.py` | Contact trust states and the single `may_send()` authority |
-| `account_graph.py` | Account resolution by domain/brand root; company-level frequency cap |
-| `sequence_engine.py` | Multi-touch cadence, exits on reply |
+| `decision_engine.py` | Sole next-action permission authority |
+| `smart_outreach.py` | Classification, message strategy, provider execution |
+| `outreach_lifecycle.py` | Inbound memory, intent and measured lifecycle learning |
+| `trust_promoter.py` | Contact trust states and `may_send()` |
+| `account_graph.py` | Account resolution and company-level frequency governance |
+| `sequence_engine.py` | Five-touch cadence; exits on reply |
 | `reply_intelligence.py` | Sender and intent classification on inbound mail |
-| `phone_intelligence.py` | Call queue, call logging, funnel and bottleneck analysis |
-| `send_queue.py` | Approval as a persisted event, with TTL and revocation |
+| `phone_intelligence.py` | Call queue, call logging and funnel analysis |
+| `send_queue.py` | Founder/manual send approval path where required |
 | `heartbeat.py` | Component liveness and queue health |
 
-Three `before_insert` listeners in `models.py` act as enforcement chokepoints:
-draft admission (no drafts for unreachable contacts), send proof (an
-`EMAIL_SENT` row requires a provider message id), and idempotency (duplicate
-sends are rejected rather than recorded).
+`models.py` contains enforcement chokepoints including draft admission, send
+proof, and idempotency. Proven automated sends are mirrored into the
+`WorkflowEvent` ledger so account frequency governance and cadence see the
+same fact.
+
+## Contact provenance
+
+Phone data has three operational tiers:
+
+- `FIRST_PARTY` — business/brand/founder supplied; authoritative and protected
+  from search overwrite.
+- `SEARCH` — directory/search candidate; may be enriched or replaced, but
+  never earns `phone_verified` from listing alone.
+- `UNSOURCED` — candidate only; confirmation is required.
+
+The call sheet is a derived capture layer, not a second CRM. Generate it close
+to the calling session; import confirmed call outcomes back into Revenue OS.
+A confirmed founder call can establish decision-maker, supplier, consumption,
+consent, next action and first-party phone evidence.
 
 ## Setup
 
@@ -56,20 +100,11 @@ cd backend && pip install -r requirements.txt
 cd ../frontend && npm install && npm run build
 ```
 
-Create `backend/.env` — it is gitignored and must never be committed:
+Create `backend/.env` — it is gitignored and must never be committed. See
+`backend/.env.example` for the complete configuration surface.
 
-```
-ZOHO_APP_PASSWORD=
-CEREBRAS_API_KEY=
-SHOPIFY_TOKEN=
-SHOPIFY_WEBHOOK_SECRET=
-GOOGLE_MAPS_API_KEY=
-AISENSY_API_KEY=
-WHATSAPP_WEBHOOK_SECRET=
-```
-
-`ecosystem.config.js` reads every secret from that file at load time and warns
-loudly on any that are missing. It never contains credentials itself.
+`ecosystem.config.js` reads credentials from `backend/.env`; credentials are
+not committed to the repository.
 
 Then:
 
@@ -82,22 +117,23 @@ Health check: `GET /api/v1/health`.
 ## Data
 
 The lead database is **not** included in this repository. It holds contact
-records for real businesses — names, email addresses and phone numbers
-belonging to third parties — and `*.db` is gitignored. The schema lives in
-`backend/app/models/`, so the tables are created on first run.
+records for real businesses — names, email addresses and phone numbers — and
+`*.db` is gitignored. The schema lives in `backend/app/models/`.
 
-## Status
+## Production safety gates
 
-Working: account resolution and frequency governance, contact trust, draft
-admission, send-proof enforcement, reply classification, approval queue, call
-queue and funnel analysis, dashboard.
+Before enabling automated outreach:
 
-Not yet working: WhatsApp outbound requires an approved Meta template, which
-has not been submitted. Until it exists, business-initiated WhatsApp to
-contacts who have not opted in cannot legitimately be sent, and the AiSensy
-transport stays idle.
+1. Verify credentials without printing secret values.
+2. Confirm the authoritative PM2 cwd is `purity-revenue-os`.
+3. Confirm enrichment cannot promote search data to verified contact data.
+4. Confirm first-party phone provenance remains immutable.
+5. Confirm account frequency governance sees both email and WhatsApp events.
+6. Confirm `evaluate_next_action()` is the only permission authority.
+7. Confirm the sequence engine is the sole cadence authority.
+8. Confirm cold catalogue links are absent and catalogue delivery is request-driven.
+9. Run the full unit/integrity gate.
+10. Perform a controlled send and verify provider proof before unattended automation.
 
-Known gap: the account-level frequency cap in `account_graph.py` counts only
-`EMAIL_SENT` events, so WhatsApp touches do not consume an account's cooldown
-slot. This must be fixed before WhatsApp sending is enabled, or the cap will
-cover only half of outreach.
+The legacy `purity_beans_ai\jules_session` tree is rollback infrastructure only
+and is not a development or production target.
