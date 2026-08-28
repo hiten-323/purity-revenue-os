@@ -18,7 +18,7 @@ function loadEnv(file) {
   return out;
 }
 
-const ROOT = __dirname; // purity-revenue-os repo root
+const ROOT = __dirname;
 const ENV = loadEnv(path.join(ROOT, "backend", ".env"));
 const need = (k) => {
   const v = ENV[k] || process.env[k] || "";
@@ -28,7 +28,6 @@ const need = (k) => {
 
 const PYTHON = "C:\\Users\\hiten\\AppData\\Local\\Programs\\Python\\Python312\\python.exe";
 const CLOUDFLARED = "C:\\Program Files (x86)\\cloudflared\\cloudflared.exe";
-// Code under test lives here — never jules_session after cutover.
 const BACKEND_DIR = path.join(ROOT, "backend");
 const FRONTEND_DIR = path.join(ROOT, "frontend");
 
@@ -70,7 +69,6 @@ module.exports = {
       min_uptime: 5000,
       env: {
         PYTHONUNBUFFERED: "1",
-        // Keep worker warm loop available; smart outreach stays OFF until gate.
         AUTO_WARM_ENABLED: "1",
         SMART_OUTREACH_ENABLED: "0",
         AUTO_OUTREACH_ENABLED: "0",
@@ -93,11 +91,10 @@ module.exports = {
       min_uptime: 5000,
       env: {
         PYTHONUNBUFFERED: "1",
-        // Explicit OFF until controlled send + /health pass.
-        // ENABLED — automated outreach is live. api/worker stay 0; only this
-        // process sends. MAX_PER_HOUR=10 and a 45s gap govern the rate.
-        AUTO_OUTREACH_ENABLED: "1",
-        SMART_OUTREACH_ENABLED: "1",
+        // Safe repository default. Enabling requires an explicit controlled
+        // rollout; a future deploy must never silently turn outreach on.
+        AUTO_OUTREACH_ENABLED: "0",
+        SMART_OUTREACH_ENABLED: "0",
         OUTREACH_INTERVAL_SECONDS: "900",
         OUTREACH_BATCH_SIZE: "20",
         SENDER_EMAIL: ENV.SENDER_EMAIL || "connect@purepantryprovisions.com",
@@ -115,6 +112,7 @@ module.exports = {
       autorestart: true,
       restart_delay: 3000,
       max_restarts: 20,
+      min_uptime: 5000,
       env: { NODE_ENV: "production" },
     },
     {
