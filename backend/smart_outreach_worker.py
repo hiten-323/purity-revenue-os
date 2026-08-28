@@ -1,9 +1,9 @@
 """Dedicated adaptive outreach worker.
 
 Runs independently from FastAPI so enrichment/outreach cannot starve the API
-loop. Enable with AUTO_OUTREACH_ENABLED=1. The worker never bypasses the
-smart_outreach service's suppression, trust, provider and WhatsApp consent
-checks.
+loop. Both outreach switches must be enabled explicitly. The worker never
+bypasses the smart_outreach service's suppression, trust, provider or WhatsApp
+consent checks.
 """
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ BATCH_SIZE = max(1, min(100, int(os.getenv("OUTREACH_BATCH_SIZE", "20"))))
 
 
 def main() -> None:
-    if os.getenv("AUTO_OUTREACH_ENABLED", "0") != "1":
-        print("[smart-outreach] disabled: set AUTO_OUTREACH_ENABLED=1")
+    if os.getenv("AUTO_OUTREACH_ENABLED", "0") != "1" or os.getenv("SMART_OUTREACH_ENABLED", "0") != "1":
+        print("[smart-outreach] disabled: AUTO_OUTREACH_ENABLED and SMART_OUTREACH_ENABLED must both be 1")
         return
 
     print(f"[smart-outreach] enabled; interval={INTERVAL_SECONDS}s batch={BATCH_SIZE}")
