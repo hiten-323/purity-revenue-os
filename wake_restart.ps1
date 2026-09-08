@@ -1,7 +1,16 @@
+# Wake recovery must use the canonical ecosystem, never an arbitrary saved dump.
 $pm2 = "C:\Users\hiten\AppData\Roaming\npm\pm2.cmd"
+$root = "C:\Users\hiten\Desktop\ppp\claude\CODE\purity-revenue-os"
+$log = "$root\wake-restart.log"
+
 Start-Sleep -Seconds 8
-& $pm2 resurrect
-Start-Sleep -Seconds 5
-& $pm2 restart purity-api --update-env
-& $pm2 restart purity-beans
-& $pm2 restart purity-tunnel
+Set-Location $root
+
+"$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') wake recovery -> canonical startOrReload" | Out-File -Append -Encoding utf8 $log
+& $pm2 startOrReload "$root\ecosystem.config.js" --update-env >> $log 2>&1
+if ($LASTEXITCODE -ne 0) {
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') canonical PM2 start failed" | Out-File -Append -Encoding utf8 $log
+    exit $LASTEXITCODE
+}
+& $pm2 save >> $log 2>&1
+exit $LASTEXITCODE
