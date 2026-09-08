@@ -52,6 +52,60 @@ def _db() -> sqlite3.Connection:
     return conn
 
 
+# The lead database, which is where consent actually lives. The connector keeps
+# its own send log, but it must not become a second authority on who may be
+# messaged — that is the failure this codebase keeps rediscovering.
+LEADS_DB_PATH = os.getenv(
+    "PURITY_LEADS_DB_PATH", os.path.join(os.path.dirname(__file__), "purity_beans.db")
+)
+
+
+def _consent_ok(destination: str) -> tuple[bool, str]:
+    """Meta requires opt-in before a template message. So does this connector.
+
+    whatsapp_sender.CONSENT_OK is the single definition of an acceptable
+    consent state; it is imported rather than restated so the two paths cannot
+    drift. If that import fails we refuse to send, because a send path that
+    cannot reach the consent rule has not satisfied it.
+
+    Matching is on the last 10 digits: the lead table stores numbers in several
+    formats (+91-98765-43210, 919876543210, 9876543210) and an exact-string
+    match would silently find nothing and read as "no such lead".
+    """
+    try:
+        from app.services.whatsapp_sender import CONSENT_OK
+    except Exception as exc:  # noqa: BLE001 - fail closed, never open
+        return False, f"consent rule unavailable ({exc.__class__.__name__}); refusing to send"
+
+    digits = "".join(ch for ch in destination if ch.isdigit())[-10:]
+    if len(digits) < 10:
+        return False, "destination is not a full 10-digit Indian number"
+
+    try:
+        conn = sqlite3.connect(f"file:{LEADS_DB_PATH}?mode=ro", uri=True, timeout=10)
+        row = conn.execute(
+            "SELECT consent_status, do_not_call, company FROM b2b_leads "
+            "WHERE replace(replace(replace(coalesce(phone,''),'-',''),' ',''),'+','') LIKE ? "
+            "LIMIT 1",
+            (f"%{digits}",),
+        ).fetchone()
+        conn.close()
+    except Exception as exc:  # noqa: BLE001
+        return False, f"lead lookup failed ({exc.__class__.__name__}); refusing to send"
+
+    if not row:
+        return False, "no lead on record for this number; consent cannot be established"
+    status = (row[0] or "UNKNOWN").upper()
+    if row[1]:
+        return False, f"{row[2] or 'lead'} is marked do-not-call"
+    if status not in CONSENT_OK:
+        return False, (
+            f"no opt-in on record (consent_status={status}). Meta requires opt-in "
+            f"before a template message."
+        )
+    return True, status
+
+
 def _secret_ok(provided: str | None) -> bool:
     expected = os.getenv("KLAVIYO_WHATSAPP_WEBHOOK_SECRET", "")
     if not expected:
@@ -140,6 +194,14 @@ def send_whatsapp(req: WhatsAppSend, x_connector_secret: str | None = Header(def
     api_key = os.getenv("AISENSY_API_KEY", "")
     if not api_key:
         raise HTTPException(status_code=503, detail="AISENSY_API_KEY is not configured")
+
+    # Consent is checked here, not assumed upstream. A caller holding the
+    # connector secret is authenticated, not authorised: the secret proves the
+    # request came from our own integration, and says nothing about whether the
+    # business at the other end agreed to be messaged.
+    allowed, why = _consent_ok(req.destination)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=f"consent gate: {why}")
 
     fingerprint = _request_fingerprint(req)
     with _db_lock:
