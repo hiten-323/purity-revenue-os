@@ -1983,11 +1983,21 @@ def trigger_forecast_snapshot(db: Session = Depends(get_db)):
         }
     }
 
-@router.get("/founder/actions")
-def get_founder_actions(db: Session = Depends(get_db)):
+@router.get("/founder/action-center")
+def get_founder_action_center(db: Session = Depends(get_db)):
     """
     Returns key actionable item list for Founder Action Center.
     Pulls actual database lead records dynamically.
+
+    Renamed off /founder/actions, which it was silently winning. Two different
+    endpoints were registered on that path — this suggestion feed and
+    founder_router's append-only decision log — and because api_router is
+    included first, this one answered and the audit trail was unreachable.
+    Nothing called either path from the frontend, so the collision went
+    unnoticed apart from a startup warning about a duplicate operation id.
+
+    Two things named "founder actions" that mean different things: what the
+    founder SHOULD do next, and what the founder DID. This is the first.
     """
     active_leads = db.query(B2BLead).filter(B2BLead.status.notin_(["COLD", "DORMANT", "ARCHIVED"])).all()
     actions = []
