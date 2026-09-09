@@ -18,7 +18,14 @@ import os
 import sys
 import time
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [auto-warm] %(message)s", stream=sys.stdout)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from app.observability import setup_logging  # noqa: E402
+
+# Replaces the previous basicConfig. Same stdout stream so pm2 still captures
+# it, plus a rotating file under backend/logs — pm2's copy is what survives a
+# crash, the local file is what exists when pm2 is not running, which after a
+# reboot is the normal state.
+setup_logging("worker")
 
 if __name__ == "__main__":
     import app.models.models  # noqa: F401

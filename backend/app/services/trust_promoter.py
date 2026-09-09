@@ -157,6 +157,24 @@ def transition(lead, to: str, reason: str, evidence: list | str, source: str,
                      "technical": getattr(lead, "_tech", None),
                      "address": lead.email},
             occurred_at=_now()))
+
+        # WorkflowEvent is the system's audit trail; this is the business's own
+        # record. Both, deliberately: one answers "what did the engine do
+        # tonight", the other answers "what happened to THIS account".
+        from app.observability import decision
+        from app.services import lead_journal as journal
+        # RANK is the ladder this module already uses to decide direction
+        # (see :303). Reusing it means the journal cannot disagree with the
+        # engine about what counts as a promotion.
+        promoted = RANK.get(to, 0) > RANK.get(frm, 0)
+        decision("email.trust", to, reason, lead=lead, was=frm,
+                 confidence=confidence)
+        journal.record(
+            lead, db, method=journal.TRUST,
+            outcome=journal.PROMOTED if promoted else journal.DEMOTED,
+            remark=f"{frm} -> {to}: {reason}"
+                   + (f" (confidence {confidence})" if confidence is not None else ""),
+            by="trust_promoter")
     return True
 
 

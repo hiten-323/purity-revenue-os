@@ -155,7 +155,29 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
                     # once put "3 email ready" on screen with zero sendable.
                     from app.services.trust_promoter import may_send as _may
                     _ok, _why = _may(_lead)
+                    # Every refusal here was previously invisible: this module
+                    # logs at DEBUG and nothing configured a handler, so the
+                    # reason a send was blocked reached no file, no console and
+                    # no operator. The verdict is now recorded with the reason
+                    # trust_promoter itself returned.
+                    from app.observability import ALLOWED, REFUSED, decision
+                    decision("email.send_gate", ALLOWED if _ok else REFUSED, _why,
+                             lead=_lead, to=email.to_email,
+                             company=getattr(_lead, "company", ""))
                     if not _ok:
+                        # On the lead's own record too. A blocked send is a real
+                        # step in that business's history: someone tried, and
+                        # this is the reason it did not go.
+                        try:
+                            from app.services import lead_journal as _journal
+                            _journal.record(
+                                _lead, _db, method=_journal.EMAIL,
+                                outcome=_journal.BLOCKED,
+                                remark=f"send to {email.to_email} refused: {_why}",
+                                by="email_sender")
+                            _db.commit()
+                        except Exception:
+                            pass          # never let the journal block the gate
                         email.status = "failed"
                         email.error = f"BLOCKED: {email.to_email} — {_why}"
                         return email

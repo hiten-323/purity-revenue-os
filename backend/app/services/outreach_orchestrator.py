@@ -121,6 +121,8 @@ def eligibility(lead, db) -> dict:
     Reasons are the product here. "0 reachable" is not useful; "0 reachable
     because nobody has opted in to WhatsApp" tells you what to go and fix.
     """
+    from app.observability import ALLOWED, REFUSED, decision
+
     out = {}
     for ch in CHANNELS:
         try:
@@ -129,6 +131,11 @@ def eligibility(lead, db) -> dict:
             ok, why = False, (f"gate unavailable ({exc.__class__.__name__}); "
                               f"refusing — a channel whose rule cannot be "
                               f"reached has not satisfied it")
+        # The reason logged is the one the channel's own gate returned. It is
+        # not paraphrased here: a log that reads better than the code produced
+        # is worse than none, because it will be believed.
+        decision(f"{ch}.eligibility", ALLOWED if ok else REFUSED, why,
+                 lead=lead, company=getattr(lead, "company", ""))
         out[ch] = {"eligible": bool(ok), "reason": why}
     return out
 
@@ -196,12 +203,27 @@ def next_touch(lead, db, *, started: datetime = None) -> dict:
     Never returns a touch on an ineligible channel and never returns one after
     a stop. Executing what comes back is somebody else's job.
     """
+    from app.observability import REFUSED, STOP, WAIT, decision
+
     stop = stop_reason(lead, db)
     if stop:
+        decision("orchestrator.next_touch", STOP, stop, lead=lead)
         return {"action": "STOP", "reason": stop, "channel": None}
 
     elig = eligibility(lead, db)
     if not any(v["eligible"] for v in elig.values()):
+        decision("orchestrator.next_touch", REFUSED,
+                 "no channel can reach this business today", lead=lead,
+                 blocked=",".join(sorted(elig)))
+        # On the business's own record, with each channel's own reason. This
+        # is the one an operator reads when asking "why has nothing happened
+        # to this account?". Deduped, so a nightly sweep that reaches the same
+        # conclusion does not write it again.
+        from app.services import lead_journal as journal
+        journal.record(
+            lead, db, method=journal.ORCHESTRATOR, outcome=journal.NO_CHANNEL,
+            remark="; ".join(f"{c}: {elig[c]['reason']}" for c in CHANNELS),
+            by="orchestrator")
         return {"action": "UNREACHABLE", "channel": None,
                 "reason": "no channel can lawfully or technically reach this "
                           "business today",
@@ -211,20 +233,41 @@ def next_touch(lead, db, *, started: datetime = None) -> dict:
     age_days = max(0, (datetime.utcnow() - started).days)
     done = {c for c, _ in _touches_done(lead, db)}
 
+    from app.observability import DONE, SKIPPED
+
     for day, channel, angle in SEQUENCE:
         if channel in done:
+            decision(f"{channel}.sequence", SKIPPED, "already attempted on this lead",
+                     lead=lead, day=day)
             continue                      # that channel has had its turn
         if not elig[channel]["eligible"]:
+            decision(f"{channel}.sequence", SKIPPED, elig[channel]["reason"],
+                     lead=lead, day=day)
             continue                      # skip, do not stall the sequence
         if age_days < day:
+            decision("orchestrator.next_touch", WAIT,
+                     f"next touch is {channel} on day {day}", lead=lead,
+                     due_in_days=day - age_days, age_days=age_days)
             return {"action": "WAIT", "channel": channel, "angle": angle,
                     "due_in_days": day - age_days,
                     "reason": f"next touch is {channel} on day {day}"}
+        decision("orchestrator.next_touch", "PROPOSE",
+                 f"{channel}/{angle} is due (day {day}, lead is {age_days}d old) "
+                 f"— awaiting founder approval", lead=lead)
+        from app.services import lead_journal as journal
+        journal.record(
+            lead, db, method=channel, outcome=journal.QUEUED,
+            remark=(f"day {day} of the sequence, angle '{angle}'. Eligible: "
+                    f"{elig[channel]['reason']}. Awaiting founder approval — "
+                    f"nothing has been sent."),
+            by="orchestrator")
         return {"action": "PROPOSE", "channel": channel, "angle": angle,
                 "day": day,
                 "reason": elig[channel]["reason"],
                 "note": "requires founder approval before it is sent"}
 
+    decision("orchestrator.next_touch", DONE,
+             "every eligible channel in the sequence has been attempted", lead=lead)
     return {"action": "COMPLETE", "channel": None,
             "reason": "every eligible channel in the sequence has been attempted"}
 

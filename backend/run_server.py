@@ -14,6 +14,7 @@ service looks healthy to pm2 while every request times out.
 Forcing the SelectorEventLoop avoids that failure mode entirely.
 """
 import asyncio
+import os
 import sys
 
 if sys.platform == "win32":
@@ -22,6 +23,15 @@ if sys.platform == "win32":
 import uvicorn
 
 if __name__ == "__main__":
+    # This process configured no logging at all, so its root logger had zero
+    # handlers and an effective level of WARNING. Every INFO and DEBUG line in
+    # the API — including email_sender's record of why a send was blocked —
+    # was discarded. uvicorn's own log_level below governs uvicorn; it never
+    # governed ours.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from app.observability import setup_logging
+    setup_logging("api")
+
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",

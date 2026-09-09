@@ -59,6 +59,8 @@ def main() -> int:
     ap.add_argument("--csv", help="also write the queue to this file")
     args = ap.parse_args()
 
+    from app.observability import enable_utf8_stdout
+    enable_utf8_stdout()
     from app.database.database import SessionLocal
     from app.services import founder_call_pipeline as pipeline
 

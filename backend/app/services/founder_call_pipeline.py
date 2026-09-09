@@ -197,6 +197,10 @@ def may_place_ai_call(lead) -> tuple[bool, str]:
     if not ok:
         return False, "opening script fails disclosure: %s" % why
 
+    from app.observability import ALLOWED, decision
+    decision("phone.cold_call_gate", ALLOWED,
+             "eligible for one disclosed AI qualification call", lead=lead,
+             company=getattr(lead, "company", ""), segment=segment)
     return True, "eligible for one disclosed AI qualification call"
 
 
@@ -233,6 +237,10 @@ def advance(lead, db, to_stage: str, *, note: str = "") -> str:
     lead.outreach_stage = to_stage
     lead.outreach_stage_at = datetime.utcnow()
     _event(lead, db, frm, to_stage, note)
+
+    from app.observability import decision
+    decision("pipeline.advance", to_stage, note or f"{frm} -> {to_stage}",
+             lead=lead, company=getattr(lead, "company", ""), was=frm)
     return to_stage
 
 
@@ -300,6 +308,17 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
     db.add(CallHistory(lead_id=lead.id, call_date=datetime.utcnow(),
                        status="AI_%s" % key, summary=summary[:1000] or None,
                        call_status="COMPLETED"))
+
+    # And on the business's own record, in the same table the founder's own
+    # calls write to, so one query gives the whole contact history rather than
+    # AI calls in one place and human calls in another.
+    from app.services import lead_journal as journal
+    journal.record(
+        lead, db, method=journal.PHONE, outcome=key,
+        remark=(summary or f"AI qualification call concluded {key}")
+               + (f" | interest: {interest}" if interest else "")
+               + (f" | callback: {callback_window}" if callback_window else ""),
+        by="ai_voice_agent", force=True)
     return target
 
 

@@ -56,6 +56,8 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
 
+    from app.observability import enable_utf8_stdout
+    enable_utf8_stdout()
     from app.database.database import SessionLocal
     from app.services import outreach_orchestrator as o
 
