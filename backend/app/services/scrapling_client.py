@@ -36,9 +36,6 @@ def _run(coro):
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
-    # The current enrichment pipeline is synchronous. If a future async caller
-    # needs this client, it should call the async API below directly rather than
-    # nesting asyncio.run inside its event loop.
     raise RuntimeError("Scrapling sync client cannot run inside an active event loop")
 
 
@@ -71,7 +68,7 @@ def _result_payload(result: Any) -> dict:
 
 
 async def _call_tool_async(name: str, arguments: dict[str, Any]) -> dict:
-    """Call a Scrapling MCP tool using the official MCP Python SDK."""
+    """Call a Scrapling MCP tool using the official MCP Python SDK v2."""
     from mcp import Client
 
     token = _token()
@@ -82,18 +79,15 @@ async def _call_tool_async(name: str, arguments: dict[str, Any]) -> dict:
                 raise RuntimeError(f"Scrapling MCP tool {name} returned an error")
             return _result_payload(result)
 
-    # Authenticated Streamable HTTP uses a caller-owned HTTP client so the
-    # Authorization header can be attached to every MCP request.
     import httpx2
-    from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
 
     headers = {"Authorization": f"Bearer {token}"}
-    async with httpx2.AsyncClient(headers=headers, follow_redirects=True) as http_client:
-        async with streamable_http_client(endpoint(), http_client=http_client) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.call_tool(name, arguments=arguments)
+    timeout = httpx2.Timeout(30.0, read=300.0)
+    async with httpx2.AsyncClient(headers=headers, timeout=timeout) as http_client:
+        async with streamable_http_client(endpoint(), http_client=http_client) as transport:
+            async with Client(transport) as client:
+                result = await client.call_tool(name, arguments)
                 if getattr(result, "is_error", False):
                     raise RuntimeError(f"Scrapling MCP tool {name} returned an error")
                 return _result_payload(result)
