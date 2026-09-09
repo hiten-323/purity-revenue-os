@@ -84,8 +84,8 @@ class B2BLead(Base):
     company = Column(String, unique=True, index=True)
     contact_name = Column(String)
     contact_title = Column(String)
-    email = Column(String)
-    phone = Column(String)
+    email = Column(String, index=True)          # shared-inbox lookup runs per lead
+    phone = Column(String, index=True)          # import_call_sheet matches on it
     city = Column(String)
     division = Column(String) # distributor, corporate, retail, gifting, horeca
     lead_source = Column(String, default="Google Maps") # Google Maps, IndiaMART, LinkedIn, TradeIndia, Tender, Referral
@@ -204,7 +204,7 @@ class B2BLead(Base):
     # "An AI rang this shop once" must never mean "this number may be
     # WhatsApped". These columns are read by the pipeline and by reporting,
     # and by nothing that sends.
-    outreach_stage = Column(String, nullable=True)          # see pipeline.STAGES
+    outreach_stage = Column(String, nullable=True, index=True)   # see pipeline.STAGES
     outreach_stage_at = Column(DateTime, nullable=True)
     ai_call_count = Column(Integer, default=0, nullable=True)
     ai_interest_level = Column(String, nullable=True)       # HOT | WARM | COOL
@@ -246,7 +246,7 @@ class B2BLead(Base):
     #   REPLIED          they actually replied from it — the strongest proof
     #   UNTRUSTED        present with no provenance; assume out-of-band
     #   PURGED           rejected by integrity rules; never re-guessed
-    email_trust = Column(String, default="UNKNOWN", nullable=True)
+    email_trust = Column(String, default="UNKNOWN", nullable=True, index=True)
     email_source = Column(String, nullable=True)          # GOOGLE_MAPS, WEBSITE, FOUNDER_CALL…
     email_collected_at = Column(DateTime, nullable=True)
     email_verified_at = Column(DateTime, nullable=True)
