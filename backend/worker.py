@@ -36,6 +36,18 @@ if __name__ == "__main__":
     limit = max(1, min(100, int(os.getenv("SMART_OUTREACH_LIMIT", "20"))))
     logging.info("Adaptive outreach: enabled=%s limit=%s cycle=%ss", enabled, limit, cycle_sec)
 
+    # Scrapling is an OPTIONAL web-intelligence dependency. It is deliberately
+    # disabled by default and has no outbound-channel authority.
+    scrapling_enabled = os.getenv("SCRAPLING_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+    scrapling_hours = max(1.0, float(os.getenv("SCRAPLING_CYCLE_HOURS", "24")))
+    scrapling_limit = max(1, min(100, int(os.getenv("SCRAPLING_LIMIT", "20"))))
+    last_scrapling = None
+    scrapling_note = "disabled"
+    logging.info(
+        "Scrapling web enrichment: enabled=%s every=%sh limit=%s",
+        scrapling_enabled, scrapling_hours, scrapling_limit,
+    )
+
     # Trust reconciliation is a MAINTENANCE job, not a decision engine. It reads
     # evidence already on record, reconciles it into email_trust, and writes a
     # TRUST_TRANSITION audit event. It never sends, never classifies a lead,
@@ -85,6 +97,30 @@ if __name__ == "__main__":
                         sweep_note = f"failed: {e}"[:120]
                         logging.error("trust sweep failed: %s", e)
 
+            # Web intelligence is deliberately before outreach so newly found
+            # first-party contact evidence can be evaluated by the existing
+            # trust/outreach gates on a later cycle. Scrapling itself never sends.
+            if scrapling_enabled:
+                _now = time.monotonic()
+                if last_scrapling is None or (_now - last_scrapling) >= scrapling_hours * 3600:
+                    try:
+                        from app.services.scrapling_harvester import harvest as scrapling_harvest
+
+                        web_result = scrapling_harvest(db, limit=scrapling_limit, only_missing=True)
+                        last_scrapling = _now
+                        scrapling_note = (
+                            f"processed={web_result.get('processed')} "
+                            f"found={web_result.get('found')}"
+                        )
+                        logging.info("Scrapling enrichment: %s", scrapling_note)
+                    except Exception as e:
+                        # Do not advance last_scrapling after a failed run: the
+                        # next worker cycle retries rather than silently skipping.
+                        scrapling_note = f"failed: {e}"[:160]
+                        logging.error("Scrapling enrichment failed: %s", e)
+            else:
+                scrapling_note = "disabled"
+
             if enabled:
                 try:
                     from app.services.outreach_lifecycle import run_automatic_cycle
@@ -131,6 +167,7 @@ if __name__ == "__main__":
                         "reply_sync": str(rep)[:120],
                         "smart_outreach": "enabled" if enabled else "disabled",
                         "trust_sweep": sweep_note,
+                        "scrapling": scrapling_note,
                     },
                 )
                 beat(
@@ -140,6 +177,7 @@ if __name__ == "__main__":
                         "note": "classify -> evaluate_next_action -> execute -> learn",
                         "limit": limit,
                         "enabled": enabled,
+                        "scrapling_enabled": scrapling_enabled,
                     },
                 )
             except Exception as e:
