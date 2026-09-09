@@ -11,4 +11,5 @@ requests>=2.31.0
 dnspython>=2.4.0
 openpyxl>=3.1.0
 pytest>=7.0.0
+overturemaps>=1.0.1
 scrapling[ai]>=0.4.15,<0.5
