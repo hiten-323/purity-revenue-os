@@ -26,13 +26,14 @@ from sqlalchemy.orm import sessionmaker
 from app.models.models import B2BLead, Base, CallHistory
 from app.services import founder_call_pipeline as p
 from app.services import preference_registry as pref
+from conftest import memory_engine
 
 
 @pytest.fixture
 def db():
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
-    eng = create_engine(f"sqlite:///{path}")
+    eng = memory_engine()
     Base.metadata.create_all(eng)
     s = sessionmaker(bind=eng)()
     yield s

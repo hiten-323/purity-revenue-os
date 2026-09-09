@@ -57,6 +57,12 @@ DEFAULT_LANG = "hi-IN"
 TIMEOUT = 20
 
 
+def digits(value) -> str:
+    """Last 10 digits, so +91 / 0-prefix / spacing variants key the same."""
+    d = "".join(ch for ch in str(value or "") if ch.isdigit())
+    return d[-10:] if len(d) >= 10 else d
+
+
 def enabled() -> bool:
     """Off unless explicitly switched on. Never defaults to dialling."""
     return (os.getenv("NURAVEDA_ENABLED", "0") or "0").strip().lower() in ("1", "true", "yes", "on")
@@ -148,41 +154,54 @@ def may_call(lead) -> tuple[bool, str]:
     return True, status
 
 
-def place_call(lead, *, context: dict[str, Any] | None = None,
-               lang: str | None = None, dry_run: bool = False) -> CallResult:
-    """Enqueue one outbound call for a lead, or explain why not.
+def place_call(phone: str, *, context: dict[str, Any] | None = None,
+               lang: str | None = None, dry_run: bool = False,
+               idempotency_key: str = "") -> CallResult:
+    """Enqueue one outbound call, or explain why not.
 
-    Returns voice_provider.CallResult so the Bolna adapter and this one report
-    through one shape rather than two.
+    Takes a PHONE, not a lead, and that is the point.
+
+    This adapter used to accept a lead and run may_call() on it before
+    dialling. That looked like defence in depth and was actually a second
+    authority: once founder_call_pipeline owns permission for the cold
+    qualification call, an adapter that re-checks consent_status would refuse
+    every call the pipeline had just authorised — every lead is UNKNOWN — and
+    the two gates would disagree about the same dial.
+
+    With no lead in scope the adapter cannot form an opinion about permission.
+    It places calls; deciding who may be called belongs to the pipeline (cold)
+    or to check_eligibility's consent clause (consented), exactly as
+    voice_provider's docstring already states for the Bolna side. may_call()
+    is still exported below for callers on the consented path.
+
+    Returns voice_provider.CallResult so both adapters report one shape.
     """
-    phone = (getattr(lead, "phone", "") or "").strip()
+    phone = (phone or "").strip()
     if not phone:
         return CallResult(placed=False, error="no phone on record")
-
-    allowed, why = may_call(lead)
-    if not allowed:
-        return CallResult(placed=False, error=f"consent gate: {why}")
 
     ok, detail = config_status()
     if not ok:
         return CallResult(placed=False, error=detail)
 
-    # One call per lead per day. The service enforces uniqueness on
-    # (shop, orderId), so a stable key makes a retry a no-op instead of a
-    # second phone call to the same shopkeeper.
-    idem = f"purity-lead-{getattr(lead, 'id', 'x')}-{date.today():%Y%m%d}"
+    ctx = dict(context or {})
+    # The service enforces uniqueness on (shop, orderId), so a stable key makes
+    # a retry a no-op instead of a second phone call to the same shopkeeper.
+    # The caller supplies it because only the caller knows what "the same call"
+    # means; this default keeps a bare call from deduping across everything.
+    idem = idempotency_key or f"purity-{digits(phone)}-{date.today():%Y%m%d}"
 
     payload = {
         "profile": profile(),
         "phone": phone,
         "lang": (lang or os.getenv("NURAVEDA_LANG", "") or DEFAULT_LANG).strip(),
         "idempotencyKey": idem,
-        "orderName": f"purity:{getattr(lead, 'company', '') or 'lead'}"[:80],
+        "orderName": f"purity:{ctx.get('company') or 'lead'}"[:80],
         "payload": {
-            "customer_name": getattr(lead, "contact_name", "") or "",
-            "company": getattr(lead, "company", "") or "",
-            "city": getattr(lead, "city", "") or "",
-            **(context or {}),
+            "customer_name": ctx.get("contact") or ctx.get("customer_name") or "",
+            "company": ctx.get("company") or "",
+            "city": ctx.get("city") or "",
+            **ctx,
         },
     }
 

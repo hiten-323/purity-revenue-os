@@ -104,8 +104,7 @@ def harvest(db, limit: int = 200, only_missing: bool = True) -> dict:
     and it still may not be sendable.
     """
     from app.models.models import B2BLead, WorkflowEvent
-    from app.services.email_verifier import verify_email
-    from app.services.contact_trust import grant
+    from app.services import trust_promoter as tp
 
     q = db.query(B2BLead).filter(B2BLead.website.isnot(None), B2BLead.website != "")
     leads = [l for l in q.all()
@@ -114,7 +113,19 @@ def harvest(db, limit: int = 200, only_missing: bool = True) -> dict:
     stats = {"sites_checked": 0, "addresses_found": 0,
              "stored_verified": 0, "stored_discovered": 0, "no_address": 0}
     results = []
+    pending = []
 
+    # Pass 1 — write what was found. No trust decision yet.
+    #
+    # This used to call contact_trust.grant(l, "VERIFIED", ...), which assigns
+    # email_trust directly and never consults trust_promoter's shared-inbox
+    # cap, so a head-office address published on ten branch sites became ten
+    # separate send permissions. It also left email_confidence untouched, so a
+    # newly harvested address inherited whatever the previous one had earned —
+    # and sending is gated on trust AND confidence, so half the gate opened for
+    # free. (The inheritance half is now also caught by the guard on
+    # B2BLead.email in models.py; this removes the cause rather than relying
+    # only on the catch.)
     for l in leads:
         stats["sites_checked"] += 1
         hits = harvest_one(l.website)
@@ -126,33 +137,47 @@ def harvest(db, limit: int = 200, only_missing: bool = True) -> dict:
         best = hits[0]
         stats["addresses_found"] += 1
 
-        try:
-            v = verify_email(best["email"], l.company or "", l.website or "")
-        except Exception:
-            v = {"status": "UNVERIFIED", "reason": "verifier unavailable"}
-
         l.email = best["email"]
-        if v.get("status") == "VALID":
-            grant(l, "VERIFIED", "WEBSITE", db,
-                  note=f"published on {best['source_url']}")
+        l.email_source = "WEBSITE"
+        l.email_collected_at = datetime.utcnow()
+        pending.append((l, best))
+
+    # The cap needs the whole batch visible before it can see that one address
+    # belongs to several businesses. Deciding trust inside the loop above races
+    # the rows it depends on.
+    if pending:
+        db.flush()
+
+    # Pass 2 — one authority decides trust, applies the cap, recomputes
+    # confidence and records the transition.
+    for l, best in pending:
+        try:
+            outcome = tp.evaluate(l, db, verify=True)
+            state, reason = outcome.get("state"), outcome.get("reason")
+        except Exception as exc:  # noqa: BLE001 - never invent trust on error
+            state, reason = "UNEVALUATED", f"{exc.__class__.__name__}: {exc}"[:160]
+
+        if state in tp.MAY_SEND:
             stats["stored_verified"] += 1
         else:
-            grant(l, "DISCOVERED", "WEBSITE", db,
-                  note=f"found on {best['source_url']} but {v.get('status')}: {v.get('reason')}")
             stats["stored_discovered"] += 1
-        l.email_collected_at = datetime.utcnow()
+
         db.add(WorkflowEvent(
             lead_id=l.id, event_type="CONTACT_DISCOVERED", actor="SYSTEM",
             channel="website",
             payload={"email": best["email"], "source_url": best["source_url"],
                      "same_domain": best["same_domain"],
-                     "verification": v.get("status")},
+                     "verification": state, "reason": reason,
+                     "decided_by": "trust_promoter.evaluate"},
             occurred_at=datetime.utcnow()))
         results.append({"lead_id": l.id, "company": l.company,
                         "email": best["email"], "source": best["source_url"],
-                        "verification": v.get("status"),
+                        "verification": state,
                         "same_domain": best["same_domain"]})
-        db.commit()
+
+    # One commit for the batch. The old code committed inside the loop, so a
+    # 200-site harvest paid 200 transaction round-trips.
+    db.commit()
 
     # Chain inboxes can only be seen once the whole batch is in — the signal is
     # one address turning up on several businesses, which no single harvest can

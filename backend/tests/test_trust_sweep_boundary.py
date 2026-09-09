@@ -27,6 +27,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models.models import Base, B2BLead, WorkflowEvent
 from app.services import trust_promoter as tp
+from conftest import memory_engine
 
 # Every field the sweep is permitted to write.
 ALLOWED = {"email_trust", "email_verified", "email_source", "email_trust_at",
@@ -46,7 +47,7 @@ FORBIDDEN = ["email_sequence_stage", "email_sequence_last_sent",
 def db():
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
-    eng = create_engine(f"sqlite:///{path}")
+    eng = memory_engine()
     Base.metadata.create_all(eng)
     session = sessionmaker(bind=eng)()
     yield session

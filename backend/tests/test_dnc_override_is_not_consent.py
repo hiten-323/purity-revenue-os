@@ -24,13 +24,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.models.models import Base, B2BLead, WorkflowEvent
+from conftest import memory_engine
 
 
 @pytest.fixture
 def db():
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
-    eng = create_engine(f"sqlite:///{path}")
+    eng = memory_engine()
     Base.metadata.create_all(eng)
     s = sessionmaker(bind=eng)()
     yield s

@@ -4,11 +4,12 @@ sys.path.insert(0, os.path.abspath("."))
 os.environ.setdefault("CEREBRAS_API_KEY", "test-not-a-real-key")
 
 from sqlalchemy import create_engine
+from conftest import memory_engine
 from sqlalchemy.orm import sessionmaker
 from app.models.models import Base, B2BLead, WorkflowEvent, ActionQueue
 
 fd, path = tempfile.mkstemp(suffix=".db"); os.close(fd)
-eng = create_engine(f"sqlite:///{path}")
+eng = memory_engine()
 Base.metadata.create_all(eng)
 db = sessionmaker(bind=eng)()
 

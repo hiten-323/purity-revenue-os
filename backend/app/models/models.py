@@ -1169,3 +1169,46 @@ def _require_send_proof(mapper, connection, target):
         # Never break a write, never swallow silently — a guard that fails
         # quietly becomes the next invisible defect.
         print(f"[models] send-proof check failed: {e.__class__.__name__}: {e}")
+
+
+@event.listens_for(B2BLead.email, "set", active_history=True)
+def _confidence_belongs_to_an_address(target, value, oldvalue, initiator):
+    """Changing the address invalidates the confidence earned by the old one.
+
+    email_confidence is a score about a specific mailbox — did it accept mail,
+    did anyone reply, does the domain resolve. It is not a property of the
+    business. But sixteen different call sites assign lead.email, and none of
+    them reset it, so a harvested address silently inherited whatever the
+    previous address had earned.
+
+    That is not cosmetic. Sending is gated twice — email_trust in MAY_SEND AND
+    email_confidence >= CONFIDENCE_FLOOR — so an inherited score satisfies half
+    the gate for free. Twelve leads currently carry confidence >= 40 with no
+    address at all, and website_harvester(only_missing=True) targets exactly
+    those rows: it would have written a new address, granted VERIFIED, and both
+    gates would have opened on a mailbox that earned neither.
+
+    Guarding the attribute rather than the callers is deliberate. A rule
+    enforced in sixteen places is a rule that will be missed in the
+    seventeenth.
+    """
+    try:
+        def _norm(v):
+            return (v or "").strip().lower() if isinstance(v, str) else ""
+
+        # oldvalue is a sentinel on a brand-new object or an unloaded attribute;
+        # either way there is no earned score to protect.
+        old = _norm(oldvalue) if isinstance(oldvalue, str) else ""
+        new = _norm(value)
+        if old == new:
+            return value
+
+        target.email_confidence = 0
+        target.email_verified = False
+        target.email_verified_at = None
+        # Trust is not touched here. Demoting it is trust_promoter's decision,
+        # and evaluate() will make it on the next sweep with the full evidence.
+        # This only withdraws the half of the gate that was never earned.
+    except Exception as e:
+        print(f"[models] email-confidence guard failed: {e.__class__.__name__}: {e}")
+    return value

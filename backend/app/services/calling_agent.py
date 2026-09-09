@@ -189,15 +189,11 @@ class CallingAgentService:
         first, so a provider outage consumed the single call this lead will
         ever get. Here a refusal costs nothing and the lead stays ELIGIBLE.
         """
-        from app.services import voice_provider
+        from app.services import voice_router
 
-        result = voice_provider.place_call(
-            lead.phone,
+        result = voice_router.place_call(
+            lead,
             context={
-                "company": lead.company or "",
-                "contact": lead.contact_name or "",
-                "city": lead.city or "",
-                "segment": lead.segment or "",
                 # The disclosure and the questions come from the pipeline so
                 # there is one script, and script_discloses() has vetted it.
                 "opening": pipeline.OPENING_DISCLOSURE,
@@ -214,7 +210,7 @@ class CallingAgentService:
                          note="disclosed AI qualification call placed")
         lead.ai_call_count = (lead.ai_call_count or 0) + 1
         lead.call_status = "CALLING"
-        lead.call_provider = "bolna"
+        lead.call_provider = voice_router.active()
         lead.last_call_date = datetime.utcnow()
         db.commit()
         return True, f"qualification_call_placed: {result.provider_call_id}"
@@ -258,8 +254,8 @@ class CallingAgentService:
         # Bolna over Exotel, not VAPI/Twilio: India-native telephony with DLT
         # and DND handling, and an agent that speaks Hindi and Punjabi — which
         # the kirana and distributor queue requires.
-        from app.services import voice_provider
-        _cfg_ok, _cfg_why = voice_provider.config_status()
+        from app.services import voice_router
+        _cfg_ok, _cfg_why = voice_router.config_status()
         if not _cfg_ok:
             return False, f"voice_not_configured: {_cfg_why}"
 

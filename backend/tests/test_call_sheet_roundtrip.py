@@ -27,13 +27,14 @@ from app.services import trust_promoter as tp
 
 import call_sheet_schema as schema
 import import_call_sheet as imp
+from conftest import memory_engine
 
 
 @pytest.fixture
 def db():
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
-    eng = create_engine(f"sqlite:///{path}")
+    eng = memory_engine()
     Base.metadata.create_all(eng)
     s = sessionmaker(bind=eng)()
     yield s
