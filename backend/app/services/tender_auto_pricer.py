@@ -13,10 +13,8 @@ Logic:
   Only applies to TENDER division leads in PROPOSAL_SENT stage.
 """
 from __future__ import annotations
-import os, smtplib, json
+import os, json          # smtplib gone: sending goes through email_sender
 from datetime import datetime, timedelta
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from app.database.database import SessionLocal
 from app.models.models import B2BLead
 
@@ -97,10 +95,32 @@ connect@purepantryprovisions.com
 
 
 def _send_nudge_email(lead: B2BLead, discount_pct: float, tier_label: str, proposal_text: str):
-    sender = os.getenv("SENDER_EMAIL", "connect@purepantryprovisions.com")
-    password = os.getenv("ZOHO_APP_PASSWORD", "")
-    if not password or not lead.email:
-        return False, "No SMTP password or lead email"
+    """Send a discount nudge THROUGH the governed sender, not around it.
+
+    This function used to open its own smtplib.SMTP("smtp.zoho.in", 587) and
+    sendmail() straight to lead.email. That skipped every control the system
+    has:
+
+        Gate A   email_trust in MAY_SEND, and email_confidence >= 40
+        Gate A2  account suppression and the per-company frequency cap
+        Gate B   provider throttling and volume limits
+                 send-proof (an EMAIL_SENT event carrying a real message-id)
+                 the founder approval queue
+
+    and run_tender_auto_pricer(send_emails=True) is the DEFAULT, reachable from
+    an unauthenticated API route. A discount offer could reach a prospect whose
+    address had never been verified, who was suppressed, or who had already
+    been contacted that week -- with no record that would let anyone tell.
+
+    email_sender's own comment names this: "Seven call sites reach SMTP and
+    five write EMAIL_SENT. Fixing them one by one is what left two paths
+    ungated the last time." This was one of the two.
+
+    lead_id is carried so the gate can look the lead up; without it the guard
+    reads None and silently passes.
+    """
+    if not (lead.email or "").strip():
+        return False, "no address on record"
 
     subject_map = {
         "FOLLOW_UP":   f"Revised pricing for {lead.company} — {discount_pct:.0f}% off",
@@ -110,20 +130,19 @@ def _send_nudge_email(lead: B2BLead, discount_pct: float, tier_label: str, propo
     }
     subject = subject_map.get(tier_label, f"Follow-up: Coffee supply proposal — {lead.company}")
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = f"Hiten Jain | Pure Pantry Provisions <{sender}>"
-    msg["To"] = lead.email
-    msg.attach(MIMEText(proposal_text, "plain"))
+    from app.services.email_sender import OutreachEmail, send_email
 
-    try:
-        with smtplib.SMTP("smtp.zoho.in", 587) as server:
-            server.starttls()
-            server.login(sender, password)
-            server.sendmail(sender, lead.email, msg.as_string())
+    result = send_email(OutreachEmail(
+        to_email=lead.email,
+        to_name=lead.contact_name or "",
+        company=lead.company or "",
+        subject=subject,
+        body_text=proposal_text,
+        lead_id=lead.id,
+    ))
+    if result.status == "sent":
         return True, "sent"
-    except Exception as e:
-        return False, str(e)
+    return False, result.error or f"refused by the send gate ({result.status})"
 
 
 def run_tender_auto_pricer(send_emails: bool = True) -> dict:
