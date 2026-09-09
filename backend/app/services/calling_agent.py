@@ -100,7 +100,16 @@ class CallingAgentService:
         return int(calls_count), float(cost_sum)
 
     @staticmethod
-    def check_eligibility(db, lead: B2BLead, ignore_dnc_override: bool = False) -> tuple[bool, str]:
+    def check_eligibility(db, lead: B2BLead, ignore_dnc_override: bool = False,
+                          cold_qualification: bool = False) -> tuple[bool, str]:
+        """Gates common to every call.
+
+        cold_qualification=True skips ONLY the recorded-consent clause, because
+        for that one disclosed introductory call the permission decision belongs
+        to founder_call_pipeline.may_place_ai_call() — which applies a stricter
+        set (once per lead, preference-registry scrubbed, disclosed as AI).
+        Every other gate here still applies. Nothing else is relaxed.
+        """
         if not CallingAgentService.CALLING_ENGINE_ENABLED:
             return False, "calling_engine_disabled"
 
@@ -133,7 +142,7 @@ class CallingAgentService:
 
         # Check Consent Status
         consent = lead.consent_status or "UNKNOWN"
-        if consent not in CallingAgentService.CALL_ALLOWED_IF:
+        if not cold_qualification and consent not in CallingAgentService.CALL_ALLOWED_IF:
             return False, f"insufficient_consent ({consent})"
 
         # Check call attempts
@@ -172,9 +181,66 @@ class CallingAgentService:
         return True, "eligible"
 
     @staticmethod
+    def _place_qualification_call(db, lead: B2BLead, pipeline) -> tuple[bool, str]:
+        """The one disclosed AI call, dialled through the real provider adapter.
+
+        Nothing is written until the provider says it accepted the call. An
+        earlier version of this path locked the lead and burned an attempt
+        first, so a provider outage consumed the single call this lead will
+        ever get. Here a refusal costs nothing and the lead stays ELIGIBLE.
+        """
+        from app.services import voice_provider
+
+        result = voice_provider.place_call(
+            lead.phone,
+            context={
+                "company": lead.company or "",
+                "contact": lead.contact_name or "",
+                "city": lead.city or "",
+                "segment": lead.segment or "",
+                # The disclosure and the questions come from the pipeline so
+                # there is one script, and script_discloses() has vetted it.
+                "opening": pipeline.OPENING_DISCLOSURE,
+                "questions": list(pipeline.QUALIFICATION_QUESTIONS),
+            },
+        )
+        if not result.placed:
+            return False, f"provider_refused: {result.error}"
+
+        # Attempted, not yet answered. The outcome arrives from the provider
+        # webhook and goes through pipeline.record_ai_outcome(), which is the
+        # only thing that may move this lead any further.
+        pipeline.advance(lead, db, pipeline.AI_CALL_ATTEMPTED,
+                         note="disclosed AI qualification call placed")
+        lead.ai_call_count = (lead.ai_call_count or 0) + 1
+        lead.call_status = "CALLING"
+        lead.call_provider = "bolna"
+        lead.last_call_date = datetime.utcnow()
+        db.commit()
+        return True, f"qualification_call_placed: {result.provider_call_id}"
+
+    @staticmethod
     def trigger_vapi_call(db, lead: B2BLead) -> tuple[bool, str]:
-        # Perform eligibility check
-        eligible, reason = CallingAgentService.check_eligibility(db, lead)
+        # Two different actions live behind this one function, and they answer
+        # to different authorities:
+        #
+        #   a CONSENTED call — they replied, opted in, or asked for a callback.
+        #                      check_eligibility's consent clause owns it.
+        #   a COLD call      — nobody has agreed to anything yet. This is the
+        #                      one disclosed AI qualification call, and
+        #                      founder_call_pipeline owns it: once per lead,
+        #                      preference-registry scrubbed, disclosed as AI.
+        #
+        # The path is chosen by what is RECORDED on the lead, not by which
+        # endpoint called in, so a caller cannot pick the laxer route. Every
+        # lead in the database is UNKNOWN today, so in practice every call
+        # through here is currently the cold one.
+        from app.services import founder_call_pipeline as pipeline
+        is_cold = ((lead.consent_status or "UNKNOWN").upper()
+                   not in CallingAgentService.CALL_ALLOWED_IF)
+
+        eligible, reason = CallingAgentService.check_eligibility(
+            db, lead, cold_qualification=is_cold)
         if not eligible:
             return False, reason
 
@@ -196,6 +262,16 @@ class CallingAgentService:
         _cfg_ok, _cfg_why = voice_provider.config_status()
         if not _cfg_ok:
             return False, f"voice_not_configured: {_cfg_why}"
+
+        if is_cold:
+            _may, _why = pipeline.may_place_ai_call(lead)
+            if not _may:
+                return False, f"cold_call_refused: {_why}"
+            if pipeline.daily_budget_remaining(db) <= 0:
+                return False, (f"daily_ai_call_cap_reached: "
+                               f"{pipeline.MAX_AI_CALLS_PER_DAY} placed in the "
+                               f"last 24h")
+            return CallingAgentService._place_qualification_call(db, lead, pipeline)
 
         # Consent is RECORDED, never defaulted.
         #
@@ -236,6 +312,26 @@ class CallingAgentService:
         db.commit()
 
         openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+
+        # These two were referenced below but never defined anywhere in this
+        # module, so this path raised NameError at the `if vapi_phone_id:`
+        # line — which sits OUTSIDE the try, so it escaped uncaught to the
+        # three endpoints that call this. Reading them from the environment
+        # turns a crash into a refusal.
+        #
+        # Note the deeper incoherence, left visible rather than papered over:
+        # the config gate above validates BOLNA credentials, and this block
+        # then dials VAPI. Whichever provider is real, one of the two is
+        # wrong. The cold-call path now goes through voice_provider instead;
+        # this consented branch is unreachable today (consent is recorded on
+        # zero leads) and should be migrated deliberately, not incidentally.
+        vapi_key = os.getenv("VAPI_API_KEY", "").strip()
+        vapi_phone_id = os.getenv("VAPI_PHONE_NUMBER_ID", "").strip()
+        if not vapi_key:
+            return False, ("voice_not_configured: VAPI_API_KEY is not set, and "
+                           "the gate above validated Bolna credentials — this "
+                           "consented-call path needs migrating to "
+                           "voice_provider.place_call()")
 
         # Format prompt
         system_prompt = (

@@ -196,6 +196,19 @@ class B2BLead(Base):
     consent_status = Column(String, default="UNKNOWN", nullable=True)
     consent_source = Column(String, nullable=True)
     consent_timestamp = Column(DateTime, nullable=True)
+
+    # AI-qualification -> founder-call pipeline (founder_call_pipeline.py).
+    # Deliberately NOT folded into consent_status: whatsapp_sender.CONSENT_OK,
+    # smart_outreach and CallingAgentService all read that field, so a stage
+    # written there would become a sending permission on another channel.
+    # "An AI rang this shop once" must never mean "this number may be
+    # WhatsApped". These columns are read by the pipeline and by reporting,
+    # and by nothing that sends.
+    outreach_stage = Column(String, nullable=True)          # see pipeline.STAGES
+    outreach_stage_at = Column(DateTime, nullable=True)
+    ai_call_count = Column(Integer, default=0, nullable=True)
+    ai_interest_level = Column(String, nullable=True)       # HOT | WARM | COOL
+    founder_callback_window = Column(String, nullable=True)  # what they asked for
     lead_temperature_score = Column(Float, default=0.0, nullable=True)
     lead_temperature_tier = Column(String, nullable=True)
 
