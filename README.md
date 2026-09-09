@@ -41,11 +41,70 @@ ecosystem.config.js          pm2 process definitions; reads secrets from backend
 | `phone_intelligence.py` | Call queue, call logging, funnel and bottleneck analysis |
 | `send_queue.py` | Approval as a persisted event, with TTL and revocation |
 | `heartbeat.py` | Component liveness and queue health |
+| `scrapling_client.py` | Authenticated Streamable HTTP MCP client for Scrapling |
+| `scrapling_harvester.py` | First-party website contact enrichment with provenance |
 
 Three `before_insert` listeners in `models.py` act as enforcement chokepoints:
 draft admission (no drafts for unreachable contacts), send proof (an
 `EMAIL_SENT` row requires a provider message id), and idempotency (duplicate
 sends are rejected rather than recorded).
+
+## Scrapling Web Intelligence
+
+Purity Revenue OS can optionally connect to a separately running D4Vinci
+Scrapling MCP server. Scrapling is a **read-only web research/enrichment
+provider** here; it has no authority to send email, WhatsApp messages, or calls.
+
+The worker uses Scrapling only when `SCRAPLING_ENABLED=1`. It processes a small
+bounded batch of leads with websites and missing contact fields, records the
+source as first-party website evidence, and leaves all existing trust and
+outbound gates in control of sending.
+
+### Install the server
+
+```bash
+pip install "scrapling[ai]"
+scrapling install
+```
+
+Run authenticated Streamable HTTP locally:
+
+```bash
+set SCRAPLING_MCP_AUTH_TOKEN=replace-with-a-long-random-token
+scrapling-mcp --http
+```
+
+PowerShell:
+
+```powershell
+$env:SCRAPLING_MCP_AUTH_TOKEN = "replace-with-a-long-random-token"
+scrapling-mcp --http
+```
+
+Then in `backend/.env`:
+
+```dotenv
+SCRAPLING_ENABLED=1
+SCRAPLING_MCP_URL=http://127.0.0.1:8000/mcp
+SCRAPLING_MCP_AUTH_TOKEN=replace-with-the-same-token
+SCRAPLING_CYCLE_HOURS=24
+SCRAPLING_LIMIT=20
+SCRAPLING_ALLOW_STEALTH=0
+```
+
+The server binds to localhost by default. If it is ever exposed over a
+network, use TLS, authentication, and an allowed-host configuration. The
+application does not expose the Scrapling MCP port through the FastAPI API.
+
+### Routing policy
+
+- Fast HTTP fetch first for normal sites.
+- Dynamic browser fetch when the static response is insufficient.
+- Stealth fetch only when `SCRAPLING_ALLOW_STEALTH=1`.
+- Existing HTTP harvesters remain available as a fallback path.
+
+This keeps Scrapling additive instead of making the revenue system dependent
+on a single scraping provider.
 
 ## Setup
 
