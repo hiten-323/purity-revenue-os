@@ -4,6 +4,9 @@ Purity Revenue OS keeps Scrapling outside the application process. The service
 connects to a separately managed Scrapling MCP server over Streamable HTTP and
 fails closed to the existing HTTP harvesters when Scrapling is unavailable.
 
+Scrapling 0.4.15 declares MCP >=1.27 and its current MCP server remains on the
+MCP v1 SDK line, so this integration intentionally pins mcp<2.
+
 No outbound sales action is exposed here: this module only reads web content.
 """
 from __future__ import annotations
@@ -68,29 +71,25 @@ def _result_payload(result: Any) -> dict:
 
 
 async def _call_tool_async(name: str, arguments: dict[str, Any]) -> dict:
-    """Call a Scrapling MCP tool using the official MCP Python SDK v2."""
-    from mcp import Client
+    """Call a Scrapling MCP tool using the MCP v1 Streamable HTTP client."""
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
 
     token = _token()
-    if not token:
-        async with Client(endpoint()) as client:
-            result = await client.call_tool(name, arguments)
+    kwargs: dict[str, Any] = {
+        "timeout": 30,
+        "sse_read_timeout": 300,
+    }
+    if token:
+        kwargs["headers"] = {"Authorization": f"Bearer {token}"}
+
+    async with streamable_http_client(endpoint(), **kwargs) as (read, write, _session_id):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool(name, arguments=arguments)
             if getattr(result, "is_error", False):
                 raise RuntimeError(f"Scrapling MCP tool {name} returned an error")
             return _result_payload(result)
-
-    import httpx2
-    from mcp.client.streamable_http import streamable_http_client
-
-    headers = {"Authorization": f"Bearer {token}"}
-    timeout = httpx2.Timeout(30.0, read=300.0)
-    async with httpx2.AsyncClient(headers=headers, timeout=timeout) as http_client:
-        async with streamable_http_client(endpoint(), http_client=http_client) as transport:
-            async with Client(transport) as client:
-                result = await client.call_tool(name, arguments)
-                if getattr(result, "is_error", False):
-                    raise RuntimeError(f"Scrapling MCP tool {name} returned an error")
-                return _result_payload(result)
 
 
 def call_tool(name: str, arguments: dict[str, Any]) -> dict:
