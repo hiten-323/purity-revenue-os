@@ -32,13 +32,43 @@ class DiscoveredBusiness:
 
 
 _PHONE_RE = re.compile(r"\s+")
+_NON_DIGIT = re.compile(r"\D")
 
 
 def normalize_phone(value: str | None) -> str | None:
+    """Tidy a number for STORAGE. Keeps it dialable.
+
+    The country code stays. "+91 98765 43210" becomes "+919876543210", not
+    "9876543210" — dropping +91 leaves a number nobody can dial from outside
+    India, and downstream is_landline() and the WhatsApp adapter both expect
+    the full form.
+    """
     if not value:
         return None
-    value = _PHONE_RE.sub("", value).strip()
+    value = _PHONE_RE.sub("", str(value)).strip()
     return value or None
+
+
+def phone_key(value: str | None) -> str | None:
+    """Reduce a number to the digits that IDENTIFY the subscriber. Matching only.
+
+    Storage and matching are different jobs and were previously done by one
+    function. The same shop arrives from Overture as "+91-98765-43210" and from
+    OSM as "098765 43210"; as stored values those are both correct and both
+    different, so using the stored form as an identity key meant phone
+    corroboration never fired — the entire purpose of merging two sources.
+
+    The original tests passed anyway because their fixtures shared
+    byte-identical coordinates, so the geo key matched instead and hid it.
+
+    Last 10 digits, matching contact_enricher.digits_only, whatsapp_connector
+    and import_call_sheet. One definition of "the same number" across the
+    codebase, or this bug reappears somewhere else.
+    """
+    if not value:
+        return None
+    digits = _NON_DIGIT.sub("", str(value))
+    return digits[-10:] if len(digits) >= 10 else (digits or None)
 
 
 def _first(value: Any) -> str | None:
@@ -156,7 +186,7 @@ async def discover_osm(
 def dedupe_key(business: DiscoveredBusiness) -> str:
     if business.source == "overture" and business.source_id:
         return f"gers:{business.source_id}"
-    phone = normalize_phone(business.phone)
+    phone = phone_key(business.phone)
     if phone:
         return f"phone:{phone}"
     website = (business.website or "").lower().rstrip("/")
@@ -168,7 +198,7 @@ def dedupe_key(business: DiscoveredBusiness) -> str:
 def _identity_keys(business: DiscoveredBusiness) -> tuple[str, ...]:
     """Build corroborating identity keys without treating provider IDs as global."""
     keys: list[str] = []
-    phone = normalize_phone(business.phone)
+    phone = phone_key(business.phone)
     if phone:
         keys.append(f"phone:{phone}")
     website = (business.website or "").strip().lower().rstrip("/")
@@ -177,8 +207,50 @@ def _identity_keys(business: DiscoveredBusiness) -> tuple[str, ...]:
         keys.append(f"web:{website}")
     if business.source == "overture" and business.source_id:
         keys.append(f"gers:{business.source_id}")
-    name = " ".join(business.name.casefold().split())
-    keys.append(f"geo:{round(business.latitude,5)}:{round(business.longitude,5)}:{name}")
+    keys.append(_geo_key(business, 0, 0))
+    return tuple(keys)
+
+
+# ~11 m at this latitude. Coarse enough that two providers describing one
+# shopfront land in the same cell or an adjacent one; tight enough that
+# distinct businesses do not collide.
+_GEO_CELL = 1e-4
+
+
+def _norm_name(business: DiscoveredBusiness) -> str:
+    return " ".join(business.name.casefold().split())
+
+
+def _geo_key(business: DiscoveredBusiness, di: int, dj: int) -> str:
+    i = int(business.latitude // _GEO_CELL) + di
+    j = int(business.longitude // _GEO_CELL) + dj
+    return f"geo:{i}:{j}:{_norm_name(business)}"
+
+
+def _lookup_keys(business: DiscoveredBusiness) -> tuple[str, ...]:
+    """Keys to SEARCH by — the record's own cell plus its eight neighbours.
+
+    Rounding coordinates to a grid has a boundary problem that no amount of
+    precision fixes: 30.73330 and 30.73337 are 7.8 metres apart and fall either
+    side of a cell edge, so they never match however fine or coarse the grid
+    is. That made geo+name effectively dead as a corroborator — it fired only
+    when two providers published byte-identical coordinates, which is also
+    exactly why the original tests passed while phone matching was broken.
+
+    Checking the neighbouring cells removes the boundary entirely: any two
+    points within one cell of each other match, wherever the edges happen to
+    fall. Registration still uses only the record's own cell, so this widens
+    what can be found, not what a record claims to be.
+
+    Geo+name stays the last resort, after phone and website. Over-merging is
+    the dangerous direction — two branches of a chain collapsing into one
+    record loses a real prospect and cannot be undone downstream, whereas a
+    missed merge only leaves a duplicate that a later phone or website match
+    will join.
+    """
+    keys = [k for k in _identity_keys(business) if not k.startswith("geo:")]
+    keys += [_geo_key(business, di, dj)
+             for di in (-1, 0, 1) for dj in (-1, 0, 1)]
     return tuple(keys)
 
 
@@ -199,7 +271,9 @@ def merge_sources(records: list[DiscoveredBusiness]) -> list[DiscoveredBusiness]
     merged: list[DiscoveredBusiness] = []
     key_to_index: dict[str, int] = {}
     for record in records:
-        match_index = next((key_to_index[key] for key in _identity_keys(record) if key in key_to_index), None)
+        # Search by lookup keys (own cell + neighbours); register only the
+        # record's own keys, so widening the search never widens a claim.
+        match_index = next((key_to_index[key] for key in _lookup_keys(record) if key in key_to_index), None)
         if match_index is None:
             match_index = len(merged)
             merged.append(record)
