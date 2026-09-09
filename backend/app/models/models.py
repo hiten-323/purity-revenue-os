@@ -1212,3 +1212,38 @@ def _confidence_belongs_to_an_address(target, value, oldvalue, initiator):
     except Exception as e:
         print(f"[models] email-confidence guard failed: {e.__class__.__name__}: {e}")
     return value
+
+
+@event.listens_for(B2BLead.whatsapp_number, "set", active_history=True, retval=True)
+def _whatsapp_must_be_reachable(target, value, oldvalue, initiator):
+    """WhatsApp cannot reach an STD landline. Refuse one at the attribute.
+
+    retval=True is load-bearing, not decoration: without it SQLAlchemy ignores
+    what a "set" listener returns and stores the original value anyway. The
+    first version of this guard looked correct, ran on every write, and changed
+    nothing.
+
+    A 0172 / 0161 / 022 number reaches a desk and is a perfectly good number to
+    CALL. It is not a WhatsApp number, and assigning it queues sends that can
+    never arrive. 212 rows carried exactly that and had to be cleared by hand.
+
+    Eight call sites assign whatsapp_number. Three of them had a guard, five
+    did not, and the ones that did not were the ones nobody thought about --
+    a manual edit endpoint that mirrored `phone` straight across, and two
+    enrichment writes. Guarding here means the count of call sites stops
+    mattering.
+
+    is_landline() is imported rather than reimplemented so there is one
+    definition of what a mobile looks like.
+    """
+    try:
+        if not value:
+            return value
+        from app.services.contact_enricher import is_landline
+        if is_landline(value):
+            return None
+    except Exception as e:
+        # A guard that fails silently becomes the next invisible defect, and
+        # one that raises breaks an unrelated write. Say so and let it through.
+        print(f"[models] whatsapp landline guard failed: {e.__class__.__name__}: {e}")
+    return value

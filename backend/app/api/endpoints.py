@@ -1067,7 +1067,12 @@ def update_lead_details(lead_id: int, req: UpdateLeadRequest, db: Session = Depe
         lead.email = req.email
     if req.phone is not None:
         lead.phone = req.phone
-        lead.whatsapp_number = req.phone
+        # A phone is not automatically a WhatsApp number. 0172/0161/022 lines
+        # reach a desk and WhatsApp cannot reach them at all, so mirroring the
+        # field blindly queues guaranteed-undeliverable sends — 212 rows
+        # carried exactly that and had to be cleared by hand.
+        from app.services.contact_enricher import is_landline
+        lead.whatsapp_number = None if is_landline(req.phone) else req.phone
     db.commit()
     return {"lead_id": lead_id, "status": "success"}
 
@@ -2997,7 +3002,9 @@ def _find_emails_sync(req: FindEmailsRequest, db):
         if found.get("phone") and not lead.phone:
             lead.phone = found["phone"]; changed = True
         if found.get("whatsapp") and not lead.whatsapp_number:
-            lead.whatsapp_number = found["whatsapp"]; changed = True
+            from app.services.contact_enricher import is_landline
+            if not is_landline(found["whatsapp"]):   # WhatsApp cannot reach an STD line
+                lead.whatsapp_number = found["whatsapp"]; changed = True
         if changed:
             db.commit()
 
@@ -3196,8 +3203,10 @@ def _enrich_contacts_sync(lead_ids: list[int], db):
             lead.phone = enriched["confirmed_phone"]
             changed = True
         if enriched["whatsapp_number"] and not lead.whatsapp_number:
-            lead.whatsapp_number = enriched["whatsapp_number"]
-            changed = True
+            from app.services.contact_enricher import is_landline
+            if not is_landline(enriched["whatsapp_number"]):
+                lead.whatsapp_number = enriched["whatsapp_number"]
+                changed = True
         # Same rule as the auto-warm loop below: a purged address stays purged.
         if (enriched["email"] and not lead.email
                 and (lead.email_verification_status or "") != "PURGED"):
