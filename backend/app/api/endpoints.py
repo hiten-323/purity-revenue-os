@@ -3951,7 +3951,13 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
         if lead:
             before = lead.status
             lead.status = "REPLIED"
-            lead.consent_status = "EXPLICIT"        # they messaged us first
+            # They messaged us first, which is opt-in under Meta's rules. Record
+            # the provenance too: consent with no source is indistinguishable
+            # from consent nobody can account for, and this codebase already
+            # has addresses in that state that cannot now be explained.
+            lead.consent_status = "EXPLICIT"
+            lead.consent_source = "WHATSAPP_INBOUND"
+            lead.consent_timestamp = datetime.utcnow()
             lead.last_updated = datetime.utcnow()
             track(db, "WHATSAPP_REPLIED", lead_id=lead.id, actor="LEAD", channel="whatsapp",
                   before_status=before, after_status="REPLIED",
@@ -4432,23 +4438,66 @@ def trigger_lead_call(lead_id: int, db: Session = Depends(get_db)):
 
 @router.post("/b2b/leads/{lead_id}/override-dnc")
 def override_lead_dnc(lead_id: int, req: DNCOverrideRequest, db: Session = Depends(get_db)):
-    """Bypass DNC rules for a lead and log audit reason."""
+    """Clear a do_not_call flag that was set in error, and record who did it.
+
+    This used to also write consent_status="EXPLICIT", which is a different
+    thing entirely and not something an override can establish. Clearing a DNC
+    flag says "we believe this lead was marked do-not-call by mistake". Consent
+    says "the business told us we may contact them". Only the business can
+    supply the second, through a founder call (phone_intelligence's
+    WHATSAPP_CONSENT outcome) or the call sheet import. Manufacturing it here
+    produced a record that looked like permission and never was — the same
+    consent-manufacturing that was removed from calling_agent.
+
+    It also overwrote dnc_reason with the literal string "Override", destroying
+    the only record of WHY someone asked not to be called. That reason is now
+    preserved; the override is additive.
+    """
     lead = db.query(B2BLead).filter(B2BLead.id == lead_id).first()
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
-        
+
+    reason = (req.reason or "").strip()
+    if len(reason) < 10:
+        raise HTTPException(
+            status_code=400,
+            detail="A specific reason is required to override a do-not-call flag "
+                   "(at least 10 characters). It is written to the audit trail.",
+        )
+
+    was_dnc = bool(lead.do_not_call)
+    original_reason = lead.dnc_reason or ""
+
     lead.do_not_call = False
-    lead.dnc_reason = "Override"
+    # Keep the original reason as history rather than replacing it.
+    lead.dnc_reason = (f"[override {datetime.utcnow():%Y-%m-%d}] was: {original_reason}"
+                       if original_reason else f"[override {datetime.utcnow():%Y-%m-%d}]")
     lead.dnc_override_by = req.override_by
-    lead.dnc_override_reason = req.reason
-    
-    # Update consent to allow dialing
-    lead.consent_status = "EXPLICIT"
-    lead.consent_source = "FOUNDER_OVERRIDE"
-    lead.consent_timestamp = datetime.utcnow()
-    
+    lead.dnc_override_reason = reason
+
+    # Deliberately NOT touched: consent_status, consent_source,
+    # consent_timestamp. An override does not create consent.
+    db.add(WorkflowEvent(
+        lead_id=lead.id,
+        event_type="DNC_OVERRIDE",
+        actor=req.override_by or "UNKNOWN",
+        channel="admin",
+        payload={
+            "was_do_not_call": was_dnc,
+            "original_dnc_reason": original_reason,
+            "override_reason": reason,
+            "consent_status_unchanged": (lead.consent_status or "UNKNOWN"),
+        },
+        occurred_at=datetime.utcnow(),
+    ))
     db.commit()
-    return {"status": "success", "message": "DNC override completed successfully"}
+    return {
+        "status": "success",
+        "message": "do_not_call cleared and audited",
+        "consent_status": lead.consent_status or "UNKNOWN",
+        "note": "Consent was not changed. An override cannot create consent; "
+                "it must come from the business via a founder call.",
+    }
 
 @router.get("/b2b/leads/margin-cap-preview")
 def get_margin_cap_campaign_preview(db: Session = Depends(get_db)):
