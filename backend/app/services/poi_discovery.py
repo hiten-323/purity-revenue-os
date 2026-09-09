@@ -165,22 +165,46 @@ def dedupe_key(business: DiscoveredBusiness) -> str:
     return f"geo:{round(business.latitude,5)}:{round(business.longitude,5)}:{business.name.casefold()}"
 
 
+def _identity_keys(business: DiscoveredBusiness) -> tuple[str, ...]:
+    """Build corroborating identity keys without treating provider IDs as global."""
+    keys: list[str] = []
+    phone = normalize_phone(business.phone)
+    if phone:
+        keys.append(f"phone:{phone}")
+    website = (business.website or "").strip().lower().rstrip("/")
+    if website:
+        website = re.sub(r"^https?://", "", website).removeprefix("www.")
+        keys.append(f"web:{website}")
+    if business.source == "overture" and business.source_id:
+        keys.append(f"gers:{business.source_id}")
+    name = " ".join(business.name.casefold().split())
+    keys.append(f"geo:{round(business.latitude,5)}:{round(business.longitude,5)}:{name}")
+    return tuple(keys)
+
+
+def _merge_business(existing: DiscoveredBusiness, record: DiscoveredBusiness) -> DiscoveredBusiness:
+    scores = [x for x in (existing.confidence, record.confidence) if x is not None]
+    return DiscoveredBusiness(
+        name=existing.name or record.name, latitude=existing.latitude, longitude=existing.longitude,
+        category=existing.category or record.category, address=existing.address or record.address,
+        phone=existing.phone or record.phone, website=existing.website or record.website,
+        email=existing.email or record.email, source=f"{existing.source}+{record.source}",
+        source_id=existing.source_id or record.source_id, confidence=max(scores) if scores else None,
+        source_record={"primary": existing.source_record, "secondary": record.source_record},
+    )
+
+
 def merge_sources(records: list[DiscoveredBusiness]) -> list[DiscoveredBusiness]:
-    """Conservatively merge exact keys; never infer consent or outreach state."""
-    merged: dict[str, DiscoveredBusiness] = {}
+    """Merge corroborating records across providers; never infer consent or outreach state."""
+    merged: list[DiscoveredBusiness] = []
+    key_to_index: dict[str, int] = {}
     for record in records:
-        key = dedupe_key(record)
-        existing = merged.get(key)
-        if existing is None:
-            merged[key] = record
-            continue
-        scores = [x for x in (existing.confidence, record.confidence) if x is not None]
-        merged[key] = DiscoveredBusiness(
-            name=existing.name or record.name, latitude=existing.latitude, longitude=existing.longitude,
-            category=existing.category or record.category, address=existing.address or record.address,
-            phone=existing.phone or record.phone, website=existing.website or record.website,
-            email=existing.email or record.email, source=f"{existing.source}+{record.source}",
-            source_id=existing.source_id or record.source_id, confidence=max(scores) if scores else None,
-            source_record={"primary": existing.source_record, "secondary": record.source_record},
-        )
-    return list(merged.values())
+        match_index = next((key_to_index[key] for key in _identity_keys(record) if key in key_to_index), None)
+        if match_index is None:
+            match_index = len(merged)
+            merged.append(record)
+        else:
+            merged[match_index] = _merge_business(merged[match_index], record)
+        for key in _identity_keys(merged[match_index]):
+            key_to_index[key] = match_index
+    return merged
