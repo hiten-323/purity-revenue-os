@@ -141,8 +141,8 @@ def harvest_one(website: str) -> dict[str, Any]:
 def harvest(db, limit: int = 20, only_missing: bool = True) -> dict[str, Any]:
     """Enrich a bounded batch of leads with first-party website evidence."""
     from app.models.models import B2BLead, WorkflowEvent
-    from app.services.contact_trust import grant
-    from app.services.email_verifier import verify_email
+    from app.services import trust_promoter as tp
+    from app.services.contact_enricher import is_landline
 
     if os.getenv("SCRAPLING_ENABLED", "0").strip().lower() not in {"1", "true", "yes", "on"}:
         return {"enabled": False, "processed": 0, "found": 0, "results": []}
@@ -153,7 +153,20 @@ def harvest(db, limit: int = 20, only_missing: bool = True) -> dict[str, Any]:
         leads = [lead for lead in leads if not (lead.email or "").strip() or not (lead.phone or "").strip()]
     leads = leads[: max(1, min(int(limit), 100))]
 
+    # Two passes, deliberately.
+    #
+    # The shared-inbox cap asks "does another lead already hold this address?".
+    # Writing one lead and evaluating it immediately makes that question race
+    # the batch: the FIRST branch of a chain is evaluated while its siblings are
+    # still blank, so it looks unique and is promoted to VERIFIED. Measured
+    # exactly that way — More Supermarket 0 got VERIFIED while branches 1-3 were
+    # correctly capped.
+    #
+    # So pass one writes every address, then a single flush makes them all
+    # visible, and only then does pass two ask the engine to judge them.
     results = []
+    pending = []
+
     for lead in leads:
         try:
             hit = harvest_one(lead.website)
@@ -162,30 +175,63 @@ def harvest(db, limit: int = 20, only_missing: bool = True) -> dict[str, Any]:
             continue
 
         changed = False
+        email_written = False
         best_email = hit["emails"][0] if hit["emails"] else ""
         if best_email and not (lead.email or "").strip():
             lead.email = best_email
             lead.email_collected_at = datetime.utcnow()
-            try:
-                verification = verify_email(best_email, lead.company or "", lead.website or "")
-            except Exception:
-                verification = {"status": "UNVERIFIED", "reason": "verifier unavailable"}
-            trust = "VERIFIED" if verification.get("status") == "VALID" else "DISCOVERED"
-            grant(lead, trust, "WEBSITE", db, note="published on first-party website via Scrapling")
+            lead.email_source = "WEBSITE"
             changed = True
-        elif best_email and (lead.email or "").strip().lower() == best_email.lower():
-            verification = {"status": "EXISTING", "reason": "email already stored"}
-        else:
-            verification = {"status": "SKIPPED", "reason": "no email discovered"}
+            email_written = True
 
         best_phone = hit["whatsapp"] or (hit["phones"][0] if hit["phones"] else "")
         if best_phone and not (lead.phone or "").strip():
             lead.phone = best_phone
-            lead.whatsapp_number = hit["whatsapp"] or best_phone
             lead.phone_source = "WEBSITE"
+            # WEBSITE is first-party under AUTHORITATIVE_PHONE_SOURCES, so a
+            # number the business publishes on its own site may set this.
             lead.phone_verified = True
             lead.contact_searched_at = datetime.utcnow()
+
+            # WhatsApp cannot reach an STD landline. Assigning one queues sends
+            # that can never arrive; 212 rows carried exactly that and had to be
+            # cleared. A published 0172/0161 number is good to call, useless to
+            # message.
+            candidate = hit["whatsapp"] or best_phone
+            if candidate and not is_landline(candidate):
+                lead.whatsapp_number = candidate
             changed = True
+
+        pending.append((lead, hit, best_email, best_phone, changed, email_written))
+
+    if pending:
+        db.flush()
+
+    for lead, hit, best_email, best_phone, changed, email_written in pending:
+        if email_written:
+            # The trust decision belongs to trust_promoter, not to this
+            # harvester. contact_trust's grant() assigns email_trust directly
+            # and never consults the shared-inbox cap, so a chain inbox
+            # published on its own site would become one send permission per
+            # branch. evaluate() applies the cap, runs the technical check, and
+            # records a TRUST_TRANSITION.
+            try:
+                outcome = tp.evaluate(lead, db, verify=True)
+                verification = {
+                    "status": outcome.get("state"),
+                    "reason": outcome.get("reason"),
+                    "decided_by": "trust_promoter.evaluate",
+                }
+            except Exception as exc:  # noqa: BLE001 - never invent trust on error
+                verification = {
+                    "status": "UNEVALUATED",
+                    "reason": f"{exc.__class__.__name__}: {exc}"[:160],
+                    "decided_by": "none",
+                }
+        elif best_email and (lead.email or "").strip().lower() == best_email.lower():
+            verification = {"status": "EXISTING", "reason": "email already stored"}
+        else:
+            verification = {"status": "SKIPPED", "reason": "no email discovered"}
 
         if changed:
             db.add(WorkflowEvent(
