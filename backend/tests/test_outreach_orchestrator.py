@@ -153,11 +153,20 @@ def test_linkedin_is_refused_with_a_reason_not_a_silence(db, registry):
     assert "user agreement" in v["reason"]
 
 
-def test_whatsapp_needs_both_a_number_and_an_opt_in(db, registry):
+def test_whatsapp_needs_a_number_a_verified_account_and_an_opt_in(db, registry):
+    """Three separate facts. The middle one used to be assumed: a mobile
+    number is not proof of a WhatsApp contact — the network is right and the
+    account may simply not exist."""
     lead = _lead(db, whatsapp_number="9876543210")
     assert o.eligibility(lead, db)[o.WHATSAPP]["eligible"] is False, "no opt-in"
 
     lead.consent_status = "IMPLIED_B2B"
+    db.commit()
+    v = o.eligibility(lead, db)[o.WHATSAPP]
+    assert v["eligible"] is False, "consented, but nobody asked WhatsApp"
+    assert "never verified" in v["reason"]
+
+    lead.whatsapp_verified = True
     db.commit()
     assert o.eligibility(lead, db)[o.WHATSAPP]["eligible"] is True
 

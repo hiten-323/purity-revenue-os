@@ -120,6 +120,68 @@ def normalise_msisdn(raw: str) -> str:
     return digits
 
 
+def check_numbers(phones: list[str], *, timeout: float = 20.0) -> dict[str, bool]:
+    """Ask WhatsApp which of these numbers actually have an account.
+
+    A mobile number is not a WhatsApp contact. Assuming it is means queueing
+    messages that can never arrive — the same mistake as putting a landline in
+    whatsapp_number, one step further along: right network, no account.
+
+    Evolution exposes this as POST /chat/whatsappNumbers/{instance}. It is the
+    only way to know without sending, and sending to find out is exactly what
+    damages a number's quality rating.
+
+    Returns {normalised_number: exists}. A number missing from the response is
+    absent from the result rather than recorded as False — "WhatsApp did not
+    tell us" and "WhatsApp said no" are different, and only the second is a
+    verification.
+
+    An unconfigured or unreachable service returns {} — nothing verified, so
+    nothing becomes eligible.
+    """
+    import json
+
+    ok, _ = config_status()
+    if not ok or not phones:
+        return {}
+
+    numbers = [normalise_msisdn(p) for p in phones]
+    numbers = [n for n in numbers if len(n) >= 11]
+    if not numbers:
+        return {}
+
+    url = f"{base_url()}/chat/whatsappNumbers/{instance()}"
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            r = client.post(url, json={"numbers": numbers}, headers={
+                "apikey": (os.getenv("EVOLUTION_API_KEY") or "").strip(),
+                "Content-Type": "application/json",
+            })
+        if r.status_code // 100 != 2:
+            return {}
+        data = json.loads(r.text or "[]")
+    except (httpx.HTTPError, ValueError, TypeError):
+        return {}
+
+    out: dict[str, bool] = {}
+    rows = data if isinstance(data, list) else data.get("data") if isinstance(data, dict) else None
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        # Evolution returns {number, exists, jid}; some builds use "numberExists".
+        raw = row.get("number") or row.get("jid") or ""
+        num = normalise_msisdn(str(raw).split("@")[0])
+        if not num:
+            continue
+        exists = row.get("exists")
+        if exists is None:
+            exists = row.get("numberExists")
+        if exists is None:
+            continue                      # told us nothing about this number
+        out[num] = bool(exists)
+    return out
+
+
 def extract_message_id(response_text: str) -> str:
     """Pull the provider's message id out of a response body.
 

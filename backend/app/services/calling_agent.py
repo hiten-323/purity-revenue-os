@@ -251,9 +251,10 @@ class CallingAgentService:
         # MAX_CALL_ATTEMPTS on a lead that was never dialled. Fail cleanly and
         # mutate nothing.
         #
-        # Bolna over Exotel, not VAPI/Twilio: India-native telephony with DLT
-        # and DND handling, and an agent that speaks Hindi and Punjabi — which
-        # the kirana and distributor queue requires.
+        # Voice goes through voice_router, which resolves the configured
+        # provider (Nuraveda). Bolna over Exotel used to be the other option
+        # and was removed — a second adapter nobody configures is how a config
+        # gate ends up validating one provider while the code dials another.
         from app.services import voice_router
         _cfg_ok, _cfg_why = voice_router.config_status()
         if not _cfg_ok:
@@ -316,18 +317,19 @@ class CallingAgentService:
         # turns a crash into a refusal.
         #
         # Note the deeper incoherence, left visible rather than papered over:
-        # the config gate above validates BOLNA credentials, and this block
-        # then dials VAPI. Whichever provider is real, one of the two is
-        # wrong. The cold-call path now goes through voice_provider instead;
+        # the config gate above validated BOLNA credentials, and this block
+        # then dialled VAPI. Whichever provider was real, one of the two was
+        # wrong. Bolna has since been removed entirely; the cold-call path goes
+        # through voice_router (Nuraveda) instead;
         # this consented branch is unreachable today (consent is recorded on
         # zero leads) and should be migrated deliberately, not incidentally.
         vapi_key = os.getenv("VAPI_API_KEY", "").strip()
         vapi_phone_id = os.getenv("VAPI_PHONE_NUMBER_ID", "").strip()
         if not vapi_key:
             return False, ("voice_not_configured: VAPI_API_KEY is not set, and "
-                           "the gate above validated Bolna credentials — this "
-                           "consented-call path needs migrating to "
-                           "voice_provider.place_call()")
+                           "the gate above validates the configured voice "
+                           "provider — this consented-call path needs "
+                           "migrating to voice_router.place_call()")
 
         # Format prompt
         system_prompt = (

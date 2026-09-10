@@ -27,9 +27,9 @@ class Lead:
         self.do_not_call = kw.get("do_not_call", False)
 
 
-def test_defaults_to_bolna(monkeypatch):
+def test_defaults_to_nuraveda(monkeypatch):
     monkeypatch.delenv("VOICE_PROVIDER", raising=False)
-    assert vr.active() == vr.BOLNA
+    assert vr.active() == vr.NURAVEDA
 
 
 def test_unknown_provider_is_refused_not_guessed(monkeypatch):
@@ -40,7 +40,12 @@ def test_unknown_provider_is_refused_not_guessed(monkeypatch):
 
 
 def test_config_status_reports_the_active_provider_only(monkeypatch):
-    """A green light for the provider we are NOT using is worse than no light."""
+    """A green light for a provider we are NOT using is worse than no light.
+
+    Bolna was removed, so there is nothing to leak today. The assertion stays
+    because the failure it guards — a config gate validating one provider while
+    the code dials another — is what trigger_vapi_call actually did.
+    """
     monkeypatch.setenv("VOICE_PROVIDER", "nuraveda")
     monkeypatch.delenv("NURAVEDA_ENABLED", raising=False)
     ok, why = vr.config_status()
@@ -49,8 +54,8 @@ def test_config_status_reports_the_active_provider_only(monkeypatch):
     assert "BOLNA" not in why
 
 
-def test_selection_actually_changes_the_adapter(monkeypatch):
-    """Not just the label -- the dial has to land somewhere else."""
+def test_the_dial_reaches_the_adapter(monkeypatch):
+    """Not just the label -- the dial has to actually land in nuraveda."""
     from app.services import nuraveda_provider as nvm
 
     monkeypatch.setenv("VOICE_PROVIDER", "nuraveda")

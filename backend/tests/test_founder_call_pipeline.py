@@ -270,9 +270,8 @@ def test_cold_call_is_routed_through_the_pipeline(db, monkeypatch):
     """
     from app.services.calling_agent import CallingAgentService
 
-    monkeypatch.setenv("AI_CALLING_ENABLED", "1")
-    for k in ("BOLNA_API_KEY", "BOLNA_AGENT_ID", "BOLNA_FROM_NUMBER"):
-        monkeypatch.setenv(k, "test")
+    monkeypatch.setenv("NURAVEDA_ENABLED", "1")
+    monkeypatch.setenv("NURAVEDA_TOOL_SECRET", "test")
     monkeypatch.delenv("DND_SUPPRESSION_FILE", raising=False)
     pref._cache_key = None
 

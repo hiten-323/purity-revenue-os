@@ -170,3 +170,105 @@ def test_msisdn_normalisation_matches_the_sender():
     """Two normalisers that disagree send to two different numbers."""
     for raw in ("9876543210", "09876543210", "+91 98765 43210", "919876543210"):
         assert transport.normalise_msisdn(raw) == "919876543210", raw
+
+
+# --------------------------------- a mobile number is not a WhatsApp contact --
+
+def test_unverified_number_is_not_eligible(tmp_path, monkeypatch):
+    """The assumption this replaces: "it is a mobile, so it is on WhatsApp".
+
+    NULL means nobody asked. That is not a verification and must not be
+    treated as one.
+    """
+    from sqlalchemy.orm import sessionmaker
+
+    from app.models.models import B2BLead, Base
+    from app.services import outreach_orchestrator as o
+    from conftest import memory_engine
+
+    eng = memory_engine()
+    Base.metadata.create_all(eng)
+    db = sessionmaker(bind=eng)()
+    try:
+        lead = B2BLead(company="Cafe", phone="9000000009", segment="horeca")
+        lead.whatsapp_number = "9876543210"
+        lead.consent_status = "IMPLIED_B2B"      # consent is not the blocker here
+        db.add(lead)
+        db.commit()
+
+        v = o.eligibility(lead, db)["whatsapp"]
+        assert v["eligible"] is False
+        assert "never verified" in v["reason"]
+
+        lead.whatsapp_verified = False           # asked, and there is no account
+        db.commit()
+        v = o.eligibility(lead, db)["whatsapp"]
+        assert v["eligible"] is False
+        assert "no WhatsApp account" in v["reason"]
+
+        lead.whatsapp_verified = True            # asked, and there is one
+        db.commit()
+        assert o.eligibility(lead, db)["whatsapp"]["eligible"] is True
+    finally:
+        db.close()
+        eng.dispose()
+
+
+def test_check_numbers_verifies_nothing_when_unconfigured(monkeypatch):
+    monkeypatch.delenv("EVOLUTION_ENABLED", raising=False)
+    assert transport.check_numbers(["9876543210"]) == {}
+
+
+def test_a_number_whatsapp_says_nothing_about_stays_unasked(monkeypatch):
+    """Absent from the response != confirmed absent. Only an explicit answer
+    is a verification."""
+    monkeypatch.setenv("EVOLUTION_ENABLED", "1")
+    monkeypatch.setenv("EVOLUTION_API_KEY", "k")
+    monkeypatch.setenv("EVOLUTION_INSTANCE", "i")
+    monkeypatch.delenv("EVOLUTION_INTEGRATION", raising=False)
+
+    class _R:
+        status_code = 200
+        # asked about two, answered about one, and one row with no verdict
+        text = ('[{"number":"919876543210","exists":true},'
+                ' {"number":"919000000000"}]')
+
+    class _C:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, *a, **k): return _R()
+
+    monkeypatch.setattr(transport.httpx, "Client", _C)
+    out = transport.check_numbers(["9876543210", "9000000000", "9111111111"])
+    assert out == {"919876543210": True}
+
+
+def test_calls_are_not_restricted_to_mobiles(tmp_path, monkeypatch):
+    """AI calls go to every number. A landline is perfectly callable — it is
+    only WhatsApp that cannot reach one."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.models.models import B2BLead, Base
+    from app.services import founder_call_pipeline as pipeline
+    from app.services import preference_registry as pref
+    from conftest import memory_engine
+
+    f = tmp_path / "dnd.txt"
+    f.write_text("", encoding="utf-8")
+    monkeypatch.setenv("DND_SUPPRESSION_FILE", str(f))
+    pref._cache_key = None
+
+    eng = memory_engine()
+    Base.metadata.create_all(eng)
+    db = sessionmaker(bind=eng)()
+    try:
+        for phone in ("9876543210", "0172-5012345", "022-24567890"):
+            lead = B2BLead(company=f"Biz {phone}", phone=phone, segment="horeca")
+            db.add(lead)
+            db.commit()
+            ok, why = pipeline.may_place_ai_call(lead)
+            assert ok is True, f"{phone} was refused: {why}"
+    finally:
+        db.close()
+        eng.dispose()

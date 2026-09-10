@@ -33,6 +33,10 @@ COLUMNS = [
     ("ai_call_count", "INTEGER DEFAULT 0"),
     ("ai_interest_level", "VARCHAR"),
     ("founder_callback_window", "VARCHAR"),
+    # NULL = never asked; 0 = asked and the number has no WhatsApp
+    # account. Only 1 makes the channel eligible.
+    ("whatsapp_verified", "BOOLEAN"),
+    ("whatsapp_verified_at", "DATETIME"),
 ]
 
 

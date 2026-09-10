@@ -204,6 +204,14 @@ class B2BLead(Base):
     # "An AI rang this shop once" must never mean "this number may be
     # WhatsApped". These columns are read by the pipeline and by reporting,
     # and by nothing that sends.
+    # A mobile number is not a WhatsApp contact. Verified by asking WhatsApp
+    # (Evolution /chat/whatsappNumbers), never by sending to find out — sending
+    # to find out is what damages a number's quality rating.
+    # NULL means "never asked", which is not the same as False ("asked, and the
+    # number has no account"). Only True makes the channel eligible.
+    whatsapp_verified = Column(Boolean, nullable=True)
+    whatsapp_verified_at = Column(DateTime, nullable=True)
+
     outreach_stage = Column(String, nullable=True, index=True)   # see pipeline.STAGES
     outreach_stage_at = Column(DateTime, nullable=True)
     ai_call_count = Column(Integer, default=0, nullable=True)

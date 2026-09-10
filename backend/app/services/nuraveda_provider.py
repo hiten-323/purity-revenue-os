@@ -49,7 +49,7 @@ import urllib.request
 from datetime import date
 from typing import Any
 
-from app.services.voice_provider import CallResult
+from app.services.voice_router import CallResult
 
 DEFAULT_URL = "http://127.0.0.1:3104"
 DEFAULT_PROFILE = "ai-voice-agent"
@@ -171,10 +171,10 @@ def place_call(phone: str, *, context: dict[str, Any] | None = None,
     With no lead in scope the adapter cannot form an opinion about permission.
     It places calls; deciding who may be called belongs to the pipeline (cold)
     or to check_eligibility's consent clause (consented), exactly as
-    voice_provider's docstring already states for the Bolna side. may_call()
+    voice_router states for every adapter. may_call()
     is still exported below for callers on the consented path.
 
-    Returns voice_provider.CallResult so both adapters report one shape.
+    Returns voice_router.CallResult, the one shape every adapter reports.
     """
     phone = (phone or "").strip()
     if not phone:

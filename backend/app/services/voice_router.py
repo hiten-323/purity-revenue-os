@@ -1,10 +1,17 @@
 r"""
 Which voice agent places the call. One selection point, not two.
 
-There are two adapters in this codebase:
+There is one voice adapter:
 
-    voice_provider     Bolna agent over Exotel telephony
     nuraveda_provider  Nuraveda / Mesh Pilot, LiveKit + SIP or Twilio trunk
+
+There were two. voice_provider (Bolna over Exotel) was removed once Nuraveda
+became the voice agent; keeping a second adapter that nobody configures is how
+a config gate ends up validating one provider while the code dials another.
+
+This module stays even with one provider, because it owns two things that
+should not move into an adapter: CallResult, and the rule that an unknown
+VOICE_PROVIDER is refused rather than guessed.
 
 Before this module the choice was made by whoever happened to be writing the
 call site, which is how a system ends up dialling through one provider while
@@ -14,8 +21,7 @@ POSTed to VAPI.
 
 So the provider is named once, in config, and every dial goes through here.
 
-    VOICE_PROVIDER=bolna       (default)
-    VOICE_PROVIDER=nuraveda
+    VOICE_PROVIDER=nuraveda    (default, and currently the only one)
 
 What this module does NOT do
 ----------------------------
@@ -32,27 +38,40 @@ question, and the three would eventually disagree. Its whole job is to turn
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from app.services.voice_provider import CallResult
 
-BOLNA = "bolna"
+@dataclass(frozen=True)
+class CallResult:
+    """What a voice adapter reports back. One shape, so callers do not branch.
+
+    This lived in voice_provider (the Bolna adapter). When Bolna was removed
+    the contract had to outlive it — a shared result type owned by one of the
+    implementations is a dependency waiting to break, which is exactly what
+    happened here.
+
+    `placed` means the provider ACCEPTED the call. It never means anyone
+    answered.
+    """
+    placed: bool
+    provider_call_id: str = ""
+    error: str = ""
+    raw: dict | None = None
+
+
 NURAVEDA = "nuraveda"
-PROVIDERS = (BOLNA, NURAVEDA)
+PROVIDERS = (NURAVEDA,)
 
 
 def active() -> str:
     """The configured provider. An unknown name is refused, not guessed."""
-    name = (os.getenv("VOICE_PROVIDER", "") or BOLNA).strip().lower()
-    return name if name in PROVIDERS else name  # validated in config_status()
+    return (os.getenv("VOICE_PROVIDER", "") or NURAVEDA).strip().lower()
 
 
 def _adapter(name: str):
-    if name == NURAVEDA:
-        from app.services import nuraveda_provider as mod
-        return mod
-    from app.services import voice_provider as mod
+    from app.services import nuraveda_provider as mod
     return mod
 
 
@@ -104,7 +123,5 @@ def place_call(lead, *, context: dict[str, Any] | None = None,
     }
 
     mod = _adapter(name)
-    if name == NURAVEDA:
-        return mod.place_call(phone, context=ctx, dry_run=dry_run,
-                              idempotency_key=idempotency_key(lead))
-    return mod.place_call(phone, context=ctx, dry_run=dry_run)
+    return mod.place_call(phone, context=ctx, dry_run=dry_run,
+                          idempotency_key=idempotency_key(lead))

@@ -87,9 +87,30 @@ def _email_ok(lead, db):
 
 
 def _whatsapp_ok(lead, db):
+    """Needs a number, a VERIFIED WhatsApp account on it, and an opt-in.
+
+    Three separate facts, and the middle one used to be assumed. A mobile
+    number is not a WhatsApp contact: the network is right and the account may
+    simply not exist, so messages queue and never arrive — the same failure as
+    a landline in whatsapp_number, one step further along.
+
+    whatsapp_verified is set by asking WhatsApp (scripts/verify_whatsapp.py),
+    never by sending to find out. NULL means nobody has asked, which is not the
+    same as False, and neither is eligible.
+    """
     from app.services.whatsapp_sender import consent_check
+
     if not (getattr(lead, "whatsapp_number", "") or "").strip():
         return False, "no WhatsApp-reachable number on record"
+
+    verified = getattr(lead, "whatsapp_verified", None)
+    if verified is None:
+        return False, ("WhatsApp account never verified for this number — run "
+                       "scripts/verify_whatsapp.py; a mobile number is not "
+                       "proof of a WhatsApp contact")
+    if not verified:
+        return False, "this number has no WhatsApp account (checked)"
+
     return consent_check(lead)
 
 
