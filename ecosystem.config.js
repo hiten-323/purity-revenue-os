@@ -45,6 +45,7 @@ module.exports = {
       min_uptime: 3000,
       env: {
         PYTHONUNBUFFERED: "1",
+        DND_SUPPRESSION_FILE: need("DND_SUPPRESSION_FILE"),
         AUTO_WARM_ENABLED: "0",
         SMART_OUTREACH_ENABLED: "0",
         AUTO_OUTREACH_ENABLED: "0",
@@ -69,6 +70,9 @@ module.exports = {
       min_uptime: 5000,
       env: {
         PYTHONUNBUFFERED: "1",
+        // The do-not-call scrub list. preference_registry fails closed without
+        // it, so no cold call is authorised until this points at a real file.
+        DND_SUPPRESSION_FILE: need("DND_SUPPRESSION_FILE"),
         AUTO_WARM_ENABLED: "1",
         SMART_OUTREACH_ENABLED: "0",
         AUTO_OUTREACH_ENABLED: "0",

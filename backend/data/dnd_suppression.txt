@@ -1,0 +1,25 @@
+# Do-not-call suppression registry — Purity Revenue OS
+#
+# WHAT THIS FILE MEANS
+# Numbers listed here are never dialled by the AI qualification call.
+# preference_registry.check() fails closed when this file is missing, so the
+# existence of this file is itself a decision: "a scrub list exists, and this
+# is it".
+#
+# WHAT IT IS NOT
+# This is NOT a live TRAI/DND preference-registry lookup. No free public API
+# answers that; access runs through the operator / DLT side. This file holds
+# what WE know, from three sources:
+#   1. businesses that told us to stop (written automatically on an AI-call
+#      opt-out by founder_call_pipeline)
+#   2. internal do_not_call flags seeded below
+#   3. any scrub export you paste in — an operator or DLT result can be
+#      appended verbatim; blank lines and # comments are ignored
+#
+# Matching is on the last 10 digits, so +91, 0-prefixes and spacing do not
+# cause a miss. One number per line.
+#
+# Seeded 2026-09-10 from b2b_leads where do_not_call = 1.
+
+# Delhi Heart Institute & Multispeciality — internal do_not_call flag
+8872250800
