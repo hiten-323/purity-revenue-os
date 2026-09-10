@@ -11,6 +11,8 @@ import concurrent.futures
 from typing import Optional
 import logging
 
+from app.services import identity as _identity
+
 _log = logging.getLogger(__name__)
 
 _UA = (
@@ -20,7 +22,7 @@ _UA = (
 )
 _HEADERS = {"User-Agent": _UA, "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8"}
 
-_PHONE_RE = re.compile(r'(\+91[\s\-]?\d{5}[\s\-]?\d{5}|\b[6-9]\d{9}\b)')
+_PHONE_RE = _identity.PHONE_RE
 _EMAIL_RE = re.compile(r'[\w.\-+]+@[\w.\-]+\.[a-zA-Z]{2,6}')
 _BAD_EMAIL_DOMAINS = {
     'justdial','sulekha','indiamart','tradeindia','google','sentry','schema',
@@ -414,21 +416,13 @@ def phone_provenance(lead) -> str:
     return UNSOURCED
 
 
-def is_landline(value) -> bool:
-    """An Indian landline reaches a desk, not a person, and WhatsApp cannot
-    reach it at all. Mobiles are 10 digits starting 6-9; anything else that
-    still looks like a number is an STD-coded landline."""
-    d = re.sub(r"\D", "", str(value or ""))
-    if d.startswith("91") and len(d) > 10:
-        d = d[2:]
-    d = d.lstrip("0")
-    return bool(d) and not (len(d) == 10 and d[0] in "6789")
+is_landline = _identity.is_landline
 
 
-def digits_only(value) -> str:
-    """Last 10 digits, so +91-98765-43210 and 9876543210 compare equal."""
-    d = re.sub(r"\D", "", str(value or ""))
-    return d[-10:] if len(d) >= 10 else d
+# Re-exported from identity, not redefined. Many modules import these
+# two from here, and that stays true; there is simply one implementation
+# behind them now.
+digits_only = _identity.digits_only
 
 
 def phone_is_authoritative(lead) -> bool:

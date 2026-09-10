@@ -59,12 +59,11 @@ def is_configured() -> bool:
     return bool(key and key not in ("", "your_evolution_api_key_here"))
 
 
-def normalise_msisdn(raw: str | None) -> str:
-    """Country-coded digits only. Bare 10-digit Indian mobiles get 91 prefix."""
-    d = "".join(ch for ch in (raw or "") if ch.isdigit())
-    if len(d) == 10:
-        d = "91" + d
-    return d
+# Imported, not reimplemented. This module's own version left the national
+# trunk prefix in place: "09876543210" came out as "09876543210" rather than
+# "919876543210", so the gateway path sent to a destination the other path
+# would never have produced.
+from app.services.identity import msisdn as normalise_msisdn
 
 
 def extract_message_id(response_text: str, headers: Any) -> str:

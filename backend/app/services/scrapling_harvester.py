@@ -13,8 +13,7 @@ from typing import Any
 
 from app.services.scrapling_client import content_from_response, fetch_url
 
-EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-PHONE_RE = re.compile(r"(?:\+91[\s\-]?)?[6-9]\d{4}[\s\-]?\d{5}")
+from app.services.identity import EMAIL_RE, PHONE_RE
 WALINK_RE = re.compile(
     r"(?:wa\.me/|api\.whatsapp\.com/send\?phone=)(?:91)?(\d{10})", re.I
 )
@@ -23,10 +22,7 @@ JUNK_EMAIL_PARTS = (
     "example", "sentry", "wixpress", "wix.com", "godaddy", "squarespace",
     "schema.org", "noreply", "no-reply", "donotreply", "yourdomain", "mysite.com",
 )
-FREE_MAIL = {
-    "gmail.com", "yahoo.com", "yahoo.in", "hotmail.com", "outlook.com",
-    "rediffmail.com", "ymail.com", "protonmail.com", "icloud.com",
-}
+from app.services.identity import FREE_MAIL
 
 
 def _domain(value: str) -> str:

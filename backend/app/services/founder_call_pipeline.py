@@ -99,7 +99,43 @@ OUTCOMES: dict[str, str] = {
 
 MAX_AI_COLD_CALLS_PER_LEAD = 1
 MAX_AI_CALLS_PER_DAY = 25
-CALLABLE_SEGMENTS = ("corporate", "gifting", "distributor", "retail", "horeca")
+# Every business category we are willing to call. Founder decision, 2026-09-10:
+# all of them.
+#
+# Two things made the old list wrong, and both are worth naming because the
+# shape recurs:
+#
+# 1. It held five names — corporate, gifting, distributor, retail, horeca —
+#    against data that actually uses 26. It had `horeca` but not `cafe`,
+#    `retail` but not `grocery`, `corporate` but not `corporate_office`. Those
+#    are near-synonyms that never matched, so 618 phone-bearing businesses were
+#    refused as "not callable" without anyone deciding that. Cafes are the first
+#    entry on the stated priority list.
+#
+# 2. There were TWO such lists. CallingAgentService.CALLABLE_SEGMENTS gated
+#    `lead.division`; this one gated `lead.segment`; the two columns use
+#    different vocabularies. A lead could pass one gate and fail the other for
+#    the same business. calling_agent now imports this set, so there is one.
+#
+# Both vocabularies are included deliberately: whichever column a caller reads,
+# the answer is the same.
+CALLABLE_CATEGORIES = frozenset({
+    # segment vocabulary
+    "corporate", "grocery", "distributor", "horeca", "corporate_office",
+    "cafe", "wholesaler", "facility_management", "hospital",
+    # division vocabulary
+    "restaurant", "retail_kirana", "supermarket", "hotel", "manufacturing",
+    "modern_trade", "school", "college", "office_pantry", "institutional_buyer",
+    # carried from the previous list; not in the data today, may return
+    "gifting", "retail",
+    # a recorded category meaning "we looked and could not tell", which is not
+    # the same as a blank field. Blank still fails below: an uncategorised row
+    # is an incomplete record, not a business type.
+    "unknown",
+})
+
+# Kept as the old name so existing call sites and messages keep working.
+CALLABLE_SEGMENTS = tuple(sorted(CALLABLE_CATEGORIES))
 
 # ------------------------------------------------------------- disclosure --
 

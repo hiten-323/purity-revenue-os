@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+from app.services.identity import EMAIL_RE, FREE_MAIL
 
 # Substrings that mean "not a real contact for this business".
 _JUNK = (
@@ -75,8 +75,13 @@ def harvest_one(website: str, timeout: float = 12.0) -> list[dict]:
                 if len(addr) > 70 or any(j in addr for j in _JUNK):
                     continue
                 dom = _domain(addr)
-                free = dom in ("gmail.com", "yahoo.com", "yahoo.in", "hotmail.com",
-                               "outlook.com", "rediffmail.com", "ymail.com")
+                # A fifth copy of the free-mail list lived here as an inline
+                # tuple rather than a named constant, which is why the
+                # duplicate-definition scan did not see it. It was missing
+                # icloud, protonmail and zoho, so an address on any of those
+                # was treated as the company's own domain and rejected for
+                # being off-domain — the opposite of the intended behaviour.
+                free = dom in FREE_MAIL
                 # Same domain as the site, or a free-mail address the business
                 # itself published. Anything else belongs to somebody else.
                 if dom != host and not free:

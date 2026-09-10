@@ -5,6 +5,11 @@ import json
 from datetime import datetime, timedelta
 from sqlalchemy import func
 from app.models.models import B2BLead, Product, CallHistory
+# Module-level import is safe: founder_call_pipeline only imports this
+# module lazily, inside functions, so there is no cycle at load time.
+from app.services.founder_call_pipeline import (
+    CALLABLE_SEGMENTS as _CALLABLE_SEGMENTS,
+)
 
 class CallingAgentService:
     # RC1 Freeze Flags & Constants
@@ -36,7 +41,12 @@ class CallingAgentService:
 
     LEAD_LOCK_DURATION_MINUTES = 30
     CALL_ALLOWED_IF = ["IMPLIED_B2B", "EXPLICIT"]
-    CALLABLE_SEGMENTS = ["corporate", "gifting", "distributor", "retail", "horeca"]
+    # Imported, not restated. This gated `lead.division` while
+    # founder_call_pipeline's list gated `lead.segment`, and the two columns
+    # use different vocabularies — so the same business could pass one gate and
+    # fail the other. One set answers for both now. See CALLABLE_CATEGORIES for
+    # why it covers every category rather than five.
+    CALLABLE_SEGMENTS = _CALLABLE_SEGMENTS
 
     @staticmethod
     def normalize_company(company_name: str) -> str:

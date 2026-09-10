@@ -468,11 +468,11 @@ def card(lead, db) -> dict:
             "may_send": ok, "permission": why}
 
 
-FREE_MAIL = {"gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
-             "rediffmail.com", "yahoo.co.in"}
-ROLE_PREFIX = {"info", "support", "contact", "admin", "hello", "sales",
-               "care", "enquiry", "enquiries", "feedback", "suggestion",
-               "bookings", "booking", "reservations", "reservation", "events"}
+# Shared with contact_trust and scrapling_harvester. All three held
+# their own copies and all three had drifted: this module knew
+# reservations@/bookings@/events@ and contact_trust did not, so the two
+# reached different trust conclusions about hotels and restaurants.
+from app.services.identity import FREE_MAIL, ROLE_PREFIX
 
 
 def _is_shared_inbox(lead, db) -> bool:

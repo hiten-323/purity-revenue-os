@@ -23,8 +23,7 @@ HEADERS = {
     )
 }
 
-EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
-PHONE_RE = re.compile(r"(?:\+91[-\s]?)?[6-9]\d{9}")
+from app.services.identity import EMAIL_RE, PHONE_RE
 
 SKIP_TLDS = {"gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "rediffmail.com"}
 

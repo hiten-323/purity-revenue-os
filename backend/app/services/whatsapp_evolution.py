@@ -109,15 +109,8 @@ def config_status() -> tuple[bool, str]:
     return True, f"{base_url()} instance={instance()} integration={CLOUD_API}"
 
 
-def normalise_msisdn(raw: str) -> str:
-    """Digits only, with India's country code when a bare 10-digit mobile
-    is given. Evolution expects an E.164-style number without the plus."""
-    digits = re.sub(r"\D", "", str(raw or ""))
-    if len(digits) == 10:
-        return "91" + digits
-    if len(digits) == 11 and digits.startswith("0"):
-        return "91" + digits[1:]
-    return digits
+# One definition of a dialable destination, shared with every other sender.
+from app.services.identity import msisdn as normalise_msisdn
 
 
 def check_numbers(phones: list[str], *, timeout: float = 20.0) -> dict[str, bool]:

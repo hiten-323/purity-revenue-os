@@ -293,24 +293,80 @@ def test_cold_call_is_routed_through_the_pipeline(db, monkeypatch):
     assert lead.outreach_stage is None
 
 
-def test_division_and_segment_vocabularies_disagree(db, registry):
-    """A pre-existing defect, pinned so it is visible rather than mysterious.
+def test_division_and_segment_vocabularies_now_agree(db, registry):
+    """This test used to assert the opposite, and that was the point of it.
 
-    check_eligibility rejects on `division`; CALLABLE_SEGMENTS is written in
-    the vocabulary of `segment`. The two never agreed, so a cafe whose segment
-    is "horeca" is refused as invalid_segment on its division "cafe" -- and
-    cafes, restaurants and hotels are the priority queue.
+    check_eligibility gates `division`; the pipeline gates `segment`; the two
+    columns use different vocabularies. A cafe whose segment is "horeca" was
+    refused as invalid_segment on its division "cafe" — and cafes are the first
+    entry on the priority list.
 
-    This test does not assert the behaviour is right. It asserts it is what
-    happens, so that changing CALLABLE_SEGMENTS is a decision someone makes on
-    purpose rather than a surprise.
+    The original version pinned that as a fact rather than a decision, so that
+    widening the list would be a deliberate act. It was widened deliberately on
+    2026-09-10 (founder: all categories callable), so this now guards the fix:
+    the same business must not pass one gate and fail the other.
     """
     from app.services.calling_agent import CallingAgentService
 
     lead = _lead(db, segment="horeca", division="cafe", estimated_value=60000.0)
-    ok, why = CallingAgentService.check_eligibility(db, lead)
-    assert ok is False
-    assert why == "invalid_segment"
 
-    # The same business is callable by the pipeline's own reading.
+    ok, why = CallingAgentService.check_eligibility(db, lead)
+    assert why != "invalid_segment", (
+        "the division gate still refuses a category the segment gate allows")
+
+    # Callable by both readings now.
+    assert p.may_place_ai_call(lead)[0] is True
+
+
+# ------------------------------------------------- one callable-category set --
+
+def test_the_two_gates_share_one_category_set():
+    """They did not, and it cost 618 businesses.
+
+    CallingAgentService.CALLABLE_SEGMENTS gated `lead.division`; the pipeline's
+    gated `lead.segment`; the two columns use different vocabularies. The same
+    business could pass one gate and fail the other, and nobody had decided
+    that — the lists simply held near-synonyms that never matched.
+    """
+    from app.services.calling_agent import CallingAgentService
+
+    assert set(CallingAgentService.CALLABLE_SEGMENTS) == set(p.CALLABLE_SEGMENTS)
+
+
+def test_both_vocabularies_are_covered():
+    """Whichever column a caller reads, the answer must be the same."""
+    segment_values = {"corporate", "grocery", "distributor", "horeca",
+                      "corporate_office", "cafe", "wholesaler",
+                      "facility_management", "hospital"}
+    division_values = {"restaurant", "retail_kirana", "supermarket", "hotel",
+                       "distributor", "corporate_office", "cafe",
+                       "manufacturing", "modern_trade", "wholesaler",
+                       "facility_management", "hospital", "school", "college",
+                       "office_pantry", "institutional_buyer", "unknown"}
+
+    missing = (segment_values | division_values) - set(p.CALLABLE_CATEGORIES)
+    assert not missing, (
+        f"these categories exist in the data but are not callable: "
+        f"{sorted(missing)}. A category that appears in b2b_leads and not here "
+        f"is silently uncallable — which is exactly how cafes ended up refused.")
+
+
+def test_the_priority_segments_are_callable():
+    """Cafe, hotel and restaurant are the top of the stated priority list and
+    were all refused by the old five-name list."""
+    for named in ("cafe", "hotel", "restaurant", "horeca", "grocery",
+                  "retail_kirana", "supermarket", "corporate_office"):
+        assert named in p.CALLABLE_CATEGORIES, named
+
+
+def test_a_blank_category_is_still_refused(db, registry):
+    """"unknown" is a recorded category — we looked and could not tell. Blank
+    is an incomplete record, which is a different thing."""
+    lead = _lead(db, segment="")
+    ok, why = p.may_place_ai_call(lead)
+    assert ok is False
+    assert "not callable" in why
+
+    lead.segment = "unknown"
+    db.commit()
     assert p.may_place_ai_call(lead)[0] is True

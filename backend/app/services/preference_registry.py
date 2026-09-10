@@ -43,9 +43,10 @@ _cache: set[str] | None = None
 _cache_key: tuple[str, float, int] | None = None
 
 
-def _digits(value) -> str:
-    d = re.sub(r"\D", "", str(value or ""))
-    return d[-10:] if len(d) >= 10 else d
+# Shared, so the scrub list matches numbers exactly as every other module
+# reads them. A registry that normalises differently from the dialler is a
+# registry that fails to suppress.
+from app.services.identity import digits_only as _digits
 
 
 def registry_path() -> str:

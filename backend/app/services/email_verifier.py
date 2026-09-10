@@ -38,7 +38,8 @@ GOV_DOMAINS = {
     "bhel.com", "hpcl.co.in", "bpcl.in",
 }
 
-EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
+# Anchored: this module validates ONE address, it does not scan text.
+from app.services.identity import EMAIL_EXACT_RE as EMAIL_RE
 
 
 def _check_mx(domain: str, timeout: float = 5.0) -> bool:

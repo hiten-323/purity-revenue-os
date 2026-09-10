@@ -57,10 +57,8 @@ DEFAULT_LANG = "hi-IN"
 TIMEOUT = 20
 
 
-def digits(value) -> str:
-    """Last 10 digits, so +91 / 0-prefix / spacing variants key the same."""
-    d = "".join(ch for ch in str(value or "") if ch.isdigit())
-    return d[-10:] if len(d) >= 10 else d
+# One definition of "the digits that identify this subscriber".
+from app.services.identity import digits_only as digits
 
 
 def enabled() -> bool:

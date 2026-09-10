@@ -368,8 +368,10 @@ def promote(db, limit: int = 0, only_ids: list | None = None) -> dict:
     from app.services.email_verifier import verify_email
     from app.services.website_harvester import is_chain_inbox
 
-    FREE_MAIL = {"gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "rediffmail.com"}
-    ROLE_PREFIX = {"info", "support", "contact", "admin", "hello", "sales", "care", "enquiry"}
+    # Imported, not restated. This local pair was missing yahoo.co.in and the
+    # eight hotel/restaurant role prefixes trust_promoter already knew, so the
+    # two modules judged the same address differently.
+    from app.services.identity import FREE_MAIL, ROLE_PREFIX
     TRUSTED_ORIGIN = ("WEBSITE", "FOUNDER_CALL", "EMAIL_REPLY", "DELIVERED")
     q = db.query(B2BLead).filter(B2BLead.email != "", B2BLead.email.isnot(None))
     if only_ids:
