@@ -88,6 +88,17 @@ TRANSITIONS: dict[str, frozenset[str]] = {
 # The AI's outcome vocabulary, mapped to exactly one stage each. A provider
 # that reports something not in here is an unknown outcome, never a guessed one.
 OUTCOMES: dict[str, str] = {
+    # The business asked us to send details on WhatsApp. This is the ONLY
+    # thing in the system that creates WhatsApp permission, and it creates it
+    # the way Meta requires: the business asked, on a recorded call, in its own
+    # words. It lands on AI_INTEREST_DETECTED because someone who wants the
+    # catalogue is interested — the opt-in is a side effect, not the stage.
+    #
+    # Note what is NOT here: whatsapp_verified. Verification proves an account
+    # exists on a number. It is a technical fact and never a permission, and
+    # wiring "verified -> send" would be this codebase's eighth instance of
+    # turning a fact into a licence to contact someone.
+    "WHATSAPP_OPT_IN": AI_INTEREST_DETECTED,
     "INTERESTED": AI_INTEREST_DETECTED,
     "NOT_INTERESTED": AI_NOT_INTERESTED,
     "NO_ANSWER": AI_NO_ANSWER,
@@ -328,6 +339,15 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
         lead.founder_callback_window = callback_window.strip()[:120]
     lead.call_outcome_last = key
     lead.last_call_date = datetime.utcnow()
+
+    if key == "WHATSAPP_OPT_IN":
+        # The one place consent is created rather than assumed. Recorded with
+        # its provenance, because "who said we could" must be answerable years
+        # later — and because an opt-in with no source is indistinguishable
+        # from one somebody invented.
+        lead.consent_status = "EXPLICIT"
+        lead.consent_source = "AI_CALL_WHATSAPP_REQUEST"
+        lead.consent_timestamp = datetime.utcnow()
 
     if target == AI_OPTED_OUT:
         lead.do_not_call = True

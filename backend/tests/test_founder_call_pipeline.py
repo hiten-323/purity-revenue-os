@@ -91,8 +91,17 @@ def test_no_answer_does_not_license_a_retry(db, registry):
 
 # ------------------------------------------------ consent must not be made --
 
-@pytest.mark.parametrize("outcome", sorted(p.OUTCOMES))
-def test_no_outcome_ever_writes_consent(db, registry, outcome):
+@pytest.mark.parametrize(
+    "outcome", sorted(set(p.OUTCOMES) - {"WHATSAPP_OPT_IN"}))
+def test_no_outcome_writes_consent_except_an_explicit_request(db, registry, outcome):
+    """The invariant is unchanged: hearing interest is not being given
+    permission. One outcome is excluded, and only one — WHATSAPP_OPT_IN, where
+    the business itself asked to be messaged. That exception is narrow, it is
+    tested by name below, and it is the ONLY way consent enters this system
+    from a call.
+
+    Widening this exclusion set is how "they sounded keen" becomes a licence.
+    """
     lead = _lead(db)
     before = lead.consent_status
     p.record_ai_outcome(lead, db, outcome, summary="spoke to the owner")
@@ -370,3 +379,60 @@ def test_a_blank_category_is_still_refused(db, registry):
     lead.segment = "unknown"
     db.commit()
     assert p.may_place_ai_call(lead)[0] is True
+
+
+# ------------------------------------- the one outcome that creates consent --
+
+def test_whatsapp_opt_in_is_the_only_thing_that_grants_whatsapp(db, registry):
+    """A business asking us to WhatsApp them IS a Meta-compliant opt-in.
+
+    This is the only place in the system where consent is created rather than
+    read, and it is created the way Meta requires: the business asked, on a
+    recorded call, in its own words.
+    """
+    lead = _lead(db)
+    assert (lead.consent_status or "UNKNOWN").upper() == "UNKNOWN"
+
+    p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN",
+                        summary="asked us to send the catalogue on WhatsApp")
+    db.commit()
+
+    assert lead.consent_status == "EXPLICIT"
+    assert lead.consent_source == "AI_CALL_WHATSAPP_REQUEST"
+    assert lead.consent_timestamp is not None
+    # and they are interested, so the founder queue gets them too
+    assert lead.outreach_stage == p.AI_INTEREST_DETECTED
+
+
+@pytest.mark.parametrize("outcome", ["INTERESTED", "NOT_INTERESTED",
+                                     "NO_ANSWER", "WRONG_NUMBER", "OPT_OUT"])
+def test_no_other_outcome_grants_whatsapp(db, registry, outcome):
+    """Interest is not permission. Only an explicit request is."""
+    lead = _lead(db)
+    p.record_ai_outcome(lead, db, outcome)
+    db.commit()
+    assert (lead.consent_status or "UNKNOWN").upper() in ("UNKNOWN", "")
+
+
+def test_verification_alone_never_grants_whatsapp(db, registry):
+    """The link this deliberately does NOT make.
+
+    whatsapp_verified proves an account exists on a number. It is a technical
+    fact. Treating it as permission would be turning a fact into a licence to
+    contact someone — the defect this codebase keeps producing.
+    """
+    from app.services import outreach_orchestrator as o
+
+    lead = _lead(db)
+    lead.whatsapp_number = "9876543210"
+    lead.whatsapp_verified = True          # WhatsApp says the account exists
+    db.commit()
+
+    v = o.eligibility(lead, db)["whatsapp"]
+    assert v["eligible"] is False, "verification was treated as consent"
+    assert "opt-in" in v["reason"]
+
+    # Now the business actually asks. Only now.
+    p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN", summary="send it on WhatsApp")
+    db.commit()
+    assert o.eligibility(lead, db)["whatsapp"]["eligible"] is True
