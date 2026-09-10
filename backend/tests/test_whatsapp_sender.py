@@ -1,4 +1,9 @@
-"""Regression tests for the AiSensy transport boundary.
+"""Regression tests for the WhatsApp transport boundary.
+
+The transport is Evolution API in Meta Cloud API mode. It was AiSensy,
+and it was three separate AiSensy clients; the assertions here did not
+change when that was consolidated, only the environment variables and
+which module owns the socket.
 
 These tests never make a network request and never require live credentials.
 They pin the distinction between provider acceptance and recipient delivery.
@@ -66,28 +71,40 @@ class WhatsAppSenderTests(unittest.TestCase):
         self.assertTrue(ok)
 
     def test_success_means_provider_accepted_not_delivered(self):
-        old_config = os.environ.get("AISENSY_API_KEY")
-        old_campaign = os.environ.get("AISENSY_CAMPAIGN_NAME")
-        old_client = ws.httpx.Client
+        """The contract is unchanged; only who holds the socket moved.
+
+        whatsapp_sender no longer makes the HTTP call — whatsapp_evolution
+        does — so the fake client is installed there, and configuration comes
+        from EVOLUTION_* rather than AISENSY_*. Every assertion below is the
+        original one: a 2xx means the provider ACCEPTED the request, and
+        nothing about delivery.
+        """
+        from app.services import whatsapp_evolution as transport
+
+        keys = ("EVOLUTION_ENABLED", "EVOLUTION_API_KEY", "EVOLUTION_INSTANCE",
+                "WHATSAPP_TEMPLATE")
+        old_env = {k: os.environ.get(k) for k in keys}
+        old_client = transport.httpx.Client
         try:
-            os.environ["AISENSY_API_KEY"] = "test-key"
-            os.environ["AISENSY_CAMPAIGN_NAME"] = "test-campaign"
-            ws.httpx.Client = _FakeClient
+            os.environ["EVOLUTION_ENABLED"] = "1"
+            os.environ["EVOLUTION_API_KEY"] = "test-key"
+            os.environ["EVOLUTION_INSTANCE"] = "test-instance"
+            os.environ["WHATSAPP_TEMPLATE"] = "test_template"
+            transport.httpx.Client = _FakeClient
+
             result = ws.send_whatsapp(self.lead, "hello")
             self.assertEqual(result.status, "sent")
             self.assertTrue(result.provider_accepted)
             self.assertFalse(result.delivery_confirmed)
-            self.assertEqual(result.message_id, "hdr-123")
+            # Evolution reports the id in the response body, not a header.
+            self.assertEqual(result.message_id, "body-456")
         finally:
-            ws.httpx.Client = old_client
-            if old_config is None:
-                os.environ.pop("AISENSY_API_KEY", None)
-            else:
-                os.environ["AISENSY_API_KEY"] = old_config
-            if old_campaign is None:
-                os.environ.pop("AISENSY_CAMPAIGN_NAME", None)
-            else:
-                os.environ["AISENSY_CAMPAIGN_NAME"] = old_campaign
+            transport.httpx.Client = old_client
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 if __name__ == "__main__":

@@ -27,9 +27,10 @@ import requests
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
-AISENSY_URL = "https://backend.aisensy.com/campaign/t1/api/v2"
+# Endpoint removed: whatsapp_evolution is the only transport.
 DB_PATH = os.getenv("WHATSAPP_DB_PATH", os.path.join(os.path.dirname(__file__), "whatsapp_connector.db"))
-REQUEST_TIMEOUT = float(os.getenv("AISENSY_TIMEOUT_SECONDS", "15"))
+REQUEST_TIMEOUT = float(os.getenv("WHATSAPP_TIMEOUT_SECONDS",
+                                  os.getenv("AISENSY_TIMEOUT_SECONDS", "15")))
 
 app = FastAPI(title="Purity Beans Klaviyo WhatsApp Connector", version="1.0.0")
 _db_lock = threading.Lock()
@@ -175,14 +176,16 @@ def _request_fingerprint(req: WhatsAppSend) -> str:
 
 @app.get("/api/v1/whatsapp/health")
 def health() -> dict[str, Any]:
-    configured = bool(os.getenv("AISENSY_API_KEY"))
+    from app.services import whatsapp_evolution as _t
+    configured = _t.config_status()[0]
     secret_configured = bool(os.getenv("KLAVIYO_WHATSAPP_WEBHOOK_SECRET"))
     return {
-        "service": "klaviyo-aisensy-whatsapp",
+        "service": "klaviyo-evolution-whatsapp",
         "status": "ready" if configured and secret_configured else "configuration_required",
-        "aisensy_key_configured": configured,
+        "evolution_configured": configured,
         "webhook_secret_configured": secret_configured,
-        "provider_endpoint": AISENSY_URL,
+        "provider_endpoint": _t.base_url(),
+        "integration": _t.integration(),
     }
 
 
@@ -219,17 +222,25 @@ def send_whatsapp(req: WhatsAppSend, x_connector_secret: str | None = Header(def
             "provider_status": row[1],
         }
 
-    payload = _provider_payload(req, api_key)
-    try:
-        response = requests.post(AISENSY_URL, json=payload, timeout=REQUEST_TIMEOUT)
-        text = response.text[:4000]
-    except requests.RequestException as exc:
-        status = "provider_error"
-        provider_status = None
-        text = str(exc)
+    # Transport is Evolution API in Meta Cloud API mode, the one place a
+    # WhatsApp message leaves this system. This used to POST to AiSensy itself,
+    # which made it the second of three transports — and it was the one that
+    # shipped with no consent check at all. The idempotency ledger below is
+    # kept; only the socket changed.
+    from app.services import whatsapp_evolution as transport
+
+    result = transport.send_template(
+        req.destination, req.campaign_name,
+        params=list(getattr(req, "template_params", None) or []),
+        timeout=REQUEST_TIMEOUT)
+    text = (result.reason or "")[:4000]
+    if result.status == "sent":
+        status, provider_status = "sent", 200
+        text = (result.response or result.reason)[:4000]
+    elif result.status in ("not_configured", "blocked"):
+        status, provider_status = "provider_rejected", None
     else:
-        provider_status = response.status_code
-        status = "sent" if 200 <= response.status_code < 300 else "provider_rejected"
+        status, provider_status = "provider_error", None
 
     now = datetime.now(timezone.utc).isoformat()
     with _db_lock:

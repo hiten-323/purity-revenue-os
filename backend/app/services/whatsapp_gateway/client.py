@@ -1,5 +1,5 @@
 """
-AiSensy Campaign API client for the WhatsApp Gateway.
+WhatsApp Gateway transport client (Evolution API, Meta Cloud API mode).
 
 Extends patterns from app.services.whatsapp_sender (MSISDN normalisation,
 message-id extraction, provider-accepted vs delivered distinction).
@@ -17,8 +17,10 @@ from typing import Any, Optional
 
 import httpx
 
-# Reuse the same endpoint the existing sender uses.
-AISENSY_URL = "https://backend.aisensy.com/campaign/t1/api/v2"
+# No module-level endpoint any more, deliberately. Three modules each held
+# a copy of AISENSY_URL and each POSTed to it; the endpoint being a
+# convenient constant is what made adding a third transport trivial.
+# whatsapp_evolution owns the destination now.
 
 logger = logging.getLogger("whatsapp_gateway.client")
 
@@ -26,12 +28,12 @@ logger = logging.getLogger("whatsapp_gateway.client")
 @dataclass
 class ProviderResult:
     """
-    Outcome of a single AiSensy Campaign API call.
+    Outcome of a single WhatsApp send via the Evolution transport.
 
     status values:
-      PROVIDER_ACCEPTED  — HTTP 2xx; AiSensy accepted the request
+      PROVIDER_ACCEPTED  — HTTP 2xx; the provider accepted the request
       FAILED             — HTTP non-2xx or transport error
-      NOT_CONFIGURED     — AISENSY_API_KEY missing
+      NOT_CONFIGURED     — EVOLUTION_API_KEY missing
       INVALID_REQUEST    — missing campaign / phone before the call
 
     delivery_confirmed is ALWAYS False here. Delivery/read must come from
@@ -49,12 +51,12 @@ class ProviderResult:
 
 
 def _api_key() -> str:
-    return (os.getenv("AISENSY_API_KEY") or "").strip()
+    return (os.getenv("EVOLUTION_API_KEY") or "").strip()
 
 
 def is_configured() -> bool:
     key = _api_key()
-    return bool(key and key not in ("", "your_aisensy_api_key_here"))
+    return bool(key and key not in ("", "your_evolution_api_key_here"))
 
 
 def normalise_msisdn(raw: str | None) -> str:
@@ -112,9 +114,13 @@ def extract_message_id(response_text: str, headers: Any) -> str:
     return ""
 
 
-class AiSensyClient:
+class WhatsAppGatewayClient:
     """
-    Thin client around the Campaign API.
+    Thin client around the send endpoint.
+
+    Named AiSensyClient until the transport was consolidated. The alias
+    below keeps existing imports working; the provider is no longer part
+    of the name because it should not have been.
 
     All network I/O is mockable by injecting `http_client` (tests do this).
     """
@@ -142,7 +148,7 @@ class AiSensyClient:
         if not is_configured():
             return ProviderResult(
                 status="NOT_CONFIGURED",
-                reason="AISENSY_API_KEY not set",
+                reason="EVOLUTION_API_KEY not set",
             )
 
         campaign = (campaign_name or "").strip()
@@ -159,18 +165,29 @@ class AiSensyClient:
                 reason="destination phone is missing or invalid after normalisation",
             )
 
-        payload = {
-            "apiKey": _api_key(),
-            "campaignName": campaign,
-            "destination": phone,
-            "userName": user_name or "there",
-            "source": source,
-            "templateParams": template_params if template_params is not None else [user_name or "there"],
-        }
+        # Evolution API in Meta Cloud API mode, resolved at call time from
+        # whatsapp_evolution — the one module that owns where a WhatsApp
+        # message goes. `campaign` is the Meta-approved template name.
+        from app.services import whatsapp_evolution as transport
 
-        # Log only safe fields — never the apiKey.
+        url = f"{transport.base_url()}/message/sendTemplate/{transport.instance()}"
+        headers_out = {"apikey": (os.getenv("EVOLUTION_API_KEY") or "").strip(),
+                       "Content-Type": "application/json"}
+        payload: dict[str, Any] = {
+            "number": phone,
+            "name": campaign,
+            "language": "en",
+        }
+        params = template_params if template_params is not None else [user_name or "there"]
+        if params:
+            payload["components"] = [{
+                "type": "body",
+                "parameters": [{"type": "text", "text": str(p)} for p in params],
+            }]
+
+        # Log only safe fields — never the API key.
         logger.info(
-            "aisensy_send_attempt campaign=%s destination_len=%s source=%s",
+            "whatsapp_send_attempt template=%s destination_len=%s source=%s",
             campaign,
             len(phone),
             source,
@@ -179,10 +196,10 @@ class AiSensyClient:
         try:
             if self._http_client is not None:
                 # Injected client (tests / custom transport)
-                r = self._http_client.post(AISENSY_URL, json=payload)
+                r = self._http_client.post(url, json=payload, headers=headers_out)
             else:
                 with httpx.Client(timeout=self.timeout) as c:
-                    r = c.post(AISENSY_URL, json=payload)
+                    r = c.post(url, json=payload, headers=headers_out)
 
             body = (getattr(r, "text", None) or "")[:1000]
             status_code = int(getattr(r, "status_code", 0) or 0)
@@ -192,7 +209,7 @@ class AiSensyClient:
                 mid = extract_message_id(body, headers)
                 return ProviderResult(
                     status="PROVIDER_ACCEPTED",
-                    reason="AiSensy accepted the send request; delivery must be confirmed by status webhook",
+                    reason="Evolution accepted the send request; delivery must be confirmed by status webhook",
                     message_id=mid,
                     http_status=status_code,
                     provider_accepted=True,
@@ -202,7 +219,7 @@ class AiSensyClient:
 
             return ProviderResult(
                 status="FAILED",
-                reason=f"AiSensy HTTP {status_code}",
+                reason=f"Evolution HTTP {status_code}",
                 http_status=status_code,
                 raw_response_snippet=body[:300],
             )
@@ -212,3 +229,8 @@ class AiSensyClient:
                 status="FAILED",
                 reason=f"{type(e).__name__}: transport or timeout error",
             )
+
+
+# Back-compat: this class was AiSensyClient when there were three AiSensy
+# transports. Kept so existing imports do not break.
+AiSensyClient = WhatsAppGatewayClient

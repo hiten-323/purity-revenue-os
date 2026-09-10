@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.database.database import get_db
-from app.services.whatsapp_gateway.client import AiSensyClient, normalise_msisdn
+from app.services.whatsapp_gateway.client import WhatsAppGatewayClient, normalise_msisdn
 from app.services.whatsapp_gateway.consent import check_whatsapp_marketing_consent
 from app.services.whatsapp_gateway.idempotency import IdempotencyLedger
 from app.services.whatsapp_gateway.models import WhatsAppSendLedger, WhatsAppSendRequest
@@ -229,7 +229,7 @@ async def klaviyo_whatsapp_send(request: Request, db: Session = Depends(get_db))
             "error": row.error,
         }
 
-    client = AiSensyClient()
+    client = WhatsAppGatewayClient()
     result = client.send(
         campaign_name=campaign,
         destination=phone_norm,
