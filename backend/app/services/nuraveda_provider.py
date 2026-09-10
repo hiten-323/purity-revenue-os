@@ -82,10 +82,22 @@ def config_status() -> tuple[bool, str]:
     """What is missing, named precisely, so the answer is actionable."""
     if not enabled():
         return False, "NURAVEDA_ENABLED is not set to 1"
-    if not _secret():
+    secret = _secret()
+    if not secret:
         return False, ("NURAVEDA_TOOL_SECRET is not set. It must equal the "
                        "LIVEKIT_TOOL_SECRET the Node service runs with, or "
                        "/calls/dispatch returns 401.")
+    if not secret.isascii():
+        # Caught in real setup: the value was 32 copies of U+2022, the bullet
+        # character — the MASKED display had been copied out of a dashboard
+        # instead of the value behind it. HTTP headers are latin-1, so this
+        # surfaced as "UnicodeEncodeError: 'latin-1' codec can't encode
+        # characters in position 0-31", which tells you nothing about the
+        # actual mistake. Say the actual mistake.
+        return False, ("NURAVEDA_TOOL_SECRET contains non-ASCII characters. "
+                       "The usual cause is copying a masked value (••••) from "
+                       "a dashboard rather than the secret behind it. HTTP "
+                       "headers are latin-1, so this cannot be sent.")
     return True, f"configured for {base_url()} profile={profile()}"
 
 
