@@ -12,14 +12,15 @@ only for analysis/generation used by higher-level services.
 """
 from __future__ import annotations
 
+import logging
 import os
+
 import httpx
 
+logger = logging.getLogger(__name__)
+
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-NVIDIA_MODEL = os.getenv(
-    "NVIDIA_MODEL",
-    "nvidia/nemotron-3.5-lightning-30b-a3b",
-)
+NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
 
 CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions"
 CEREBRAS_MODEL = os.getenv("CEREBRAS_MODEL", "gpt-oss-120b")
@@ -29,14 +30,13 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
 
 
 def _nvidia_key() -> str:
-    # NVIDIA Build currently documents NVIDIA_API_KEY. Accept the LiteLLM-style
-    # alias too so deployments can use either convention without code changes.
     return os.getenv("NVIDIA_API_KEY", "") or os.getenv("NVIDIA_NIM_API_KEY", "")
 
 
 def _nvidia_complete(prompt: str, timeout: float) -> str | None:
     key = _nvidia_key()
     if not key or "your_" in key.lower():
+        logger.warning("NVIDIA provider skipped: NVIDIA_API_KEY is not configured")
         return None
     try:
         with httpx.Client(timeout=timeout) as c:
@@ -50,10 +50,6 @@ def _nvidia_complete(prompt: str, timeout: float) -> str | None:
                     "model": NVIDIA_MODEL,
                     "temperature": 0,
                     "messages": [{"role": "user", "content": prompt}],
-                    # Nemotron 3.5 Lightning enables reasoning by default. For
-                    # the shared synchronous helper, disable thinking so short
-                    # operational prompts do not spend the whole timeout budget
-                    # generating a reasoning trace before returning content.
                     "chat_template_kwargs": {"enable_thinking": False},
                     "max_tokens": 1024,
                     "stream": False,
@@ -61,14 +57,28 @@ def _nvidia_complete(prompt: str, timeout: float) -> str | None:
             )
             resp.raise_for_status()
             data = resp.json()
-        return data["choices"][0]["message"].get("content")
+        content = data["choices"][0]["message"].get("content")
+        if not content:
+            logger.error("NVIDIA returned an empty completion")
+            return None
+        return content
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        detail = exc.response.text[:500]
+        logger.error("NVIDIA request failed: HTTP %s: %s", status, detail)
+        return None
+    except httpx.TimeoutException:
+        logger.error("NVIDIA request timed out after %.1fs", timeout)
+        return None
     except Exception:
+        logger.exception("NVIDIA request failed unexpectedly")
         return None
 
 
 def _cerebras_complete(prompt: str, timeout: float) -> str | None:
     key = os.getenv("CEREBRAS_API_KEY", "")
     if not key or "your_" in key.lower():
+        logger.warning("Cerebras provider skipped: CEREBRAS_API_KEY is not configured")
         return None
     try:
         with httpx.Client(timeout=timeout) as c:
@@ -85,6 +95,7 @@ def _cerebras_complete(prompt: str, timeout: float) -> str | None:
             data = resp.json()
         return data["choices"][0]["message"]["content"]
     except Exception:
+        logger.exception("Cerebras request failed")
         return None
 
 
@@ -104,6 +115,7 @@ def _ollama_complete(prompt: str, timeout: float) -> str | None:
             data = resp.json()
         return data.get("message", {}).get("content")
     except Exception:
+        logger.exception("Ollama request failed")
         return None
 
 
