@@ -42,12 +42,21 @@ def _nvidia_complete(prompt: str, timeout: float) -> str | None:
         with httpx.Client(timeout=timeout) as c:
             resp = c.post(
                 NVIDIA_URL,
-                headers={"Authorization": f"Bearer {key}"},
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
                 json={
                     "model": NVIDIA_MODEL,
                     "temperature": 0,
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 4096,
+                    # Nemotron 3.5 Lightning enables reasoning by default. For
+                    # the shared synchronous helper, disable thinking so short
+                    # operational prompts do not spend the whole timeout budget
+                    # generating a reasoning trace before returning content.
+                    "chat_template_kwargs": {"enable_thinking": False},
+                    "max_tokens": 1024,
+                    "stream": False,
                 },
             )
             resp.raise_for_status()
@@ -100,7 +109,7 @@ def _ollama_complete(prompt: str, timeout: float) -> str | None:
 
 def complete(
     prompt: str,
-    nvidia_timeout: float = 20.0,
+    nvidia_timeout: float = 60.0,
     cerebras_timeout: float = 15.0,
     ollama_timeout: float = 45.0,
 ) -> tuple[str | None, str]:
