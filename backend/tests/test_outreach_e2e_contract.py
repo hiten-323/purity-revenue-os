@@ -49,6 +49,9 @@ def lead(db, **kw):
     )
     defaults.update(kw)
     obj = B2BLead(**defaults)
+    # The production quality gate requires explicit fit evidence. Keep that
+    # requirement intact and make this fixture represent a known-fit prospect.
+    obj.coffee_buying_score = 80
     db.add(obj)
     db.commit()
     return obj
