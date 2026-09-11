@@ -57,7 +57,11 @@ def _nvidia_complete(prompt: str, timeout: float) -> str | None:
             )
             resp.raise_for_status()
             data = resp.json()
-        content = data["choices"][0]["message"].get("content")
+        message = data["choices"][0]["message"]
+        content = message.get("content") or ""
+        if not content and message.get("reasoning_content"):
+            logger.warning("NVIDIA returned reasoning-only content; treating as unsuccessful")
+            return None
         if not content:
             logger.error("NVIDIA returned an empty completion")
             return None
