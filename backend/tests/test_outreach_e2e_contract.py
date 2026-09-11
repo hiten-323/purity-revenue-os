@@ -103,7 +103,6 @@ def test_unverified_contact_never_becomes_send(db):
 def test_sequence_waits_before_followup(db):
     l = lead(db)
     event(db, l, "EMAIL_SENT", {"to": l.email, "message_id": "e2e-1"})
-    # First send is fresh; the next cadence touch must not be due immediately.
     st = state(l, db)
     assert st["active"] is True
     assert st["next_touch"] == "nudge"
@@ -124,10 +123,11 @@ def test_completed_sequence_does_not_restart(db):
     assert d["action"] == "NONE", d
 
 
-def test_smart_outreach_router_has_live_decision_authority():
-    from app.api.smart_outreach_router import evaluate_next_action as imported
+def test_smart_outreach_router_uses_live_decision_authority():
+    from app.api.smart_outreach_router import evaluate_next_action as imported, next_action
     from app.services.decision_engine import evaluate_next_action as authority
     assert imported is authority
+    assert callable(next_action)
 
 
 def test_classification_is_not_a_send_permission(db):
