@@ -6,6 +6,7 @@ not contacted: this is a dry run of the decision path only.
 """
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 from datetime import datetime, timedelta
@@ -103,7 +104,6 @@ def test_unverified_contact_never_becomes_send(db):
 def test_sequence_waits_before_followup(db):
     l = lead(db)
     event(db, l, "EMAIL_SENT", {"to": l.email, "message_id": "e2e-1"})
-    # First send is fresh; the next cadence touch must not be due immediately.
     st = state(l, db)
     assert st["active"] is True
     assert st["next_touch"] == "nudge"
@@ -124,10 +124,11 @@ def test_completed_sequence_does_not_restart(db):
     assert d["action"] == "NONE", d
 
 
-def test_smart_outreach_router_has_live_decision_authority():
-    from app.api.smart_outreach_router import evaluate_next_action as imported
+def test_smart_outreach_router_uses_live_decision_authority():
+    from app.api.smart_outreach_router import evaluate_next_action as imported, next_action
     from app.services.decision_engine import evaluate_next_action as authority
     assert imported is authority
+    assert callable(next_action)
 
 
 def test_classification_is_not_a_send_permission(db):
@@ -136,3 +137,50 @@ def test_classification_is_not_a_send_permission(db):
     assert profile.category == "CAFE"
     d = evaluate_next_action(l, db)
     assert d["action"] != "SEND"
+
+
+def test_calling_agent_has_no_direct_vapi_execution():
+    from app.services.calling_agent import CallingAgentService
+
+    source = inspect.getsource(CallingAgentService.trigger_vapi_call)
+    assert "api.vapi.ai" not in source
+    assert "VAPI_API_KEY" not in source
+    assert "urllib.request" not in source
+    assert "voice_router.place_call" in source
+
+
+def test_calling_agent_routes_consented_call_through_voice_router(db, monkeypatch):
+    from app.services import voice_router
+    from app.services.calling_agent import CallingAgentService
+
+    l = lead(
+        db,
+        phone="9876543210",
+        consent_status="EXPLICIT",
+        estimated_value=50000,
+        proposal_suggested_margin=70,
+        call_attempts=0,
+    )
+
+    class Result:
+        placed = True
+        error = None
+        provider_call_id = "dry-run-provider-call"
+
+    monkeypatch.setattr(voice_router, "config_status", lambda: (True, "configured"))
+    monkeypatch.setattr(voice_router, "active", lambda: "nuraveda")
+    calls = []
+
+    def fake_place_call(lead_obj, context=None):
+        calls.append((lead_obj.id, context))
+        return Result()
+
+    monkeypatch.setattr(voice_router, "place_call", fake_place_call)
+
+    ok, reason = CallingAgentService.trigger_vapi_call(db, l)
+
+    assert ok is True, reason
+    assert reason == "consented_call_placed: dry-run-provider-call"
+    assert calls == [(l.id, {"purpose": "consented_followup"})]
+    assert l.call_provider == "nuraveda"
+    assert l.call_attempts == 1
