@@ -146,7 +146,9 @@ def test_calling_agent_has_no_direct_vapi_execution():
     assert "api.vapi.ai" not in source
     assert "VAPI_API_KEY" not in source
     assert "urllib.request" not in source
-    assert "voice_router.place_call" in source
+    assert "voice_router" in source
+    assert "_place_qualification_call" in source
+    assert "_place_consented_call" in source
 
 
 def test_calling_agent_routes_consented_call_through_voice_router(db, monkeypatch):
