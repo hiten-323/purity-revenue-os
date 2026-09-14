@@ -37,7 +37,7 @@ import httpx
 # goes, and a constant here is what let a second transport appear.
 
 # Consent values we treat as a real opt-in.
-CONSENT_OK = {"EXPLICIT", "IMPLIED_B2B", "OPTED_IN"}
+CONSENT_OK = {"EXPLICIT", "OPTED_IN"}
 
 # Statuses that prove the lead messaged/replied to us — that is an opt-in and
 # opens Meta's 24h customer-service window.

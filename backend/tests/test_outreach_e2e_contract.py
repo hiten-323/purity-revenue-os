@@ -45,6 +45,7 @@ def lead(db, **kw):
         email_verification_status="VALID",
         website="https://example.com",
         maps_rating=4.5,
+        coffee_buying_score=70,
         status="DISCOVERED",
         contact_status="CONTACTABLE",
     )
