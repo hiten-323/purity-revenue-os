@@ -10,8 +10,9 @@ if _env_file.exists():
             _key, _, _val = _line.partition("=")
             os.environ.setdefault(_key.strip(), _val.strip())
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.api.endpoints import router as api_router
@@ -19,9 +20,24 @@ from app.api.founder_router import router as founder_router
 from app.api.whatsapp_gateway import router as whatsapp_gateway_router
 from app.api.marketplace_router import router as marketplace_router
 from app.database.database import engine, Base, get_db
+from app.api.auth import is_protected_webhook_path, require_api_admin
 import redis
 
 app = FastAPI(title="Purity Beans AI Operating System")
+
+
+@app.middleware("http")
+async def protect_mutating_api(request: Request, call_next):
+    if (
+        request.url.path.startswith("/api/v1/")
+        and request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        and not is_protected_webhook_path(request.url.path)
+    ):
+        try:
+            require_api_admin(request)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    return await call_next(request)
 
 def _quarantine_unverifiable_addresses():
     try:
@@ -65,6 +81,18 @@ def _quarantine_unverifiable_addresses():
         print(f"[boot-integrity] skipped: {e}")
 
 
+def _start_auto_warm():
+    if os.getenv("AUTOWARM_IN_PROCESS", "0") == "1":
+        try:
+            from app.api.endpoints import start_auto_warm_worker
+            start_auto_warm_worker()
+            print("Auto-Warm Engine: started IN-PROCESS (not recommended)")
+        except Exception as e:
+            print(f"Auto-Warm Engine failed to start: {e}")
+    else:
+        print("Auto-Warm Engine: delegated to the separate purity-worker process")
+
+
 @app.on_event("startup")
 async def startup():
     try:
@@ -101,6 +129,13 @@ async def startup():
         print(f"[marketplace-intel] seed skipped: {_se}")
 
     from app.database.database import SessionLocal
+    if engine.dialect.name != "sqlite":
+        print(
+            "Legacy SQLite-only migrations skipped for "
+            f"{engine.dialect.name}; SQLAlchemy metadata is authoritative."
+        )
+        _start_auto_warm()
+        return
     db = SessionLocal()
     try:
         conn = db.connection().connection
@@ -326,21 +361,14 @@ async def startup():
     finally:
         db.close()
 
-    if os.getenv("AUTOWARM_IN_PROCESS", "0") == "1":
-        try:
-            from app.api.endpoints import start_auto_warm_worker
-            start_auto_warm_worker()
-            print("Auto-Warm Engine: started IN-PROCESS (not recommended)")
-        except Exception as e:
-            print(f"Auto-Warm Engine failed to start: {e}")
-    else:
-        print("Auto-Warm Engine: delegated to the separate purity-worker process")
+    _start_auto_warm()
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000", "http://127.0.0.1:3000", "http://192.168.1.7:3000",
-        "http://localhost:3001", "http://127.0.0.1:3001"
+        "http://localhost:3000", "http://127.0.0.1:3000",
+        "http://localhost:3001", "http://127.0.0.1:3001",
+        *[origin.strip() for origin in os.getenv("CORS_ORIGINS", "").split(",") if origin.strip()],
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -378,4 +406,8 @@ def health_check(db: Session = Depends(get_db)):
     except Exception:
         pass
 
-    return health_status
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=200 if health_status["status"] == "healthy" else 503,
+        content=health_status,
+    )

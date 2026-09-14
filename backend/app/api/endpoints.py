@@ -229,11 +229,23 @@ from datetime import datetime
 _shopify_events: list[dict] = []  # in-memory store; swap for DB later
 
 def _verify_shopify_hmac(body: bytes, signature: str) -> bool:
-    secret = os.getenv("SHOPIFY_WEBHOOK_SECRET", "")
+    secret = (os.getenv("SHOPIFY_WEBHOOK_SECRET", "") or "").strip()
     if not secret:
-        return True  # skip verification in dev
+        return False
     digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(digest, signature or "")
+
+
+def _verify_vapi_secret(request: Request) -> tuple[bool, int]:
+    secret = (os.getenv("VAPI_WEBHOOK_SECRET") or "").strip()
+    if not secret:
+        return False, 503
+    provided = (
+        request.headers.get("x-vapi-secret")
+        or request.headers.get("x-webhook-secret")
+        or ""
+    ).strip()
+    return hmac.compare_digest(provided, secret), 401
 
 @router.post("/webhooks/shopify/{topic}")
 async def shopify_webhook(topic: str, request: Request, background_tasks: BackgroundTasks):
@@ -4582,6 +4594,12 @@ def trigger_margin_cap_campaign(db: Session = Depends(get_db)):
 @router.post("/b2b/vapi-webhook")
 async def vapi_webhook(request: Request, db: Session = Depends(get_db)):
     """Receives webhook notifications from Vapi after a call completes."""
+    verified, status_code = _verify_vapi_secret(request)
+    if not verified:
+        raise HTTPException(
+            status_code=status_code,
+            detail="VAPI_WEBHOOK_SECRET is required" if status_code == 503 else "Invalid webhook secret",
+        )
     try:
         payload = await request.json()
     except Exception:

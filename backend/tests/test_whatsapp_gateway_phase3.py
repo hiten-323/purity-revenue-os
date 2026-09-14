@@ -59,7 +59,7 @@ class SecurityTests(unittest.TestCase):
         self.assertFalse(r.allowed)
         self.assertIn("required", r.reason.lower())
 
-    def test_dev_bypass_when_secret_unset(self):
+    def test_missing_secret_rejected_outside_production(self):
         os.environ.pop("ENVIRONMENT", None)
         r = verify_webhook(
             provider="klaviyo",
@@ -67,8 +67,8 @@ class SecurityTests(unittest.TestCase):
             body=b"{}",
             secret_env_var="KLAVIYO_WEBHOOK_SECRET",
         )
-        self.assertTrue(r.allowed)
-        self.assertEqual(r.mode, "bypass_dev")
+        self.assertFalse(r.allowed)
+        self.assertEqual(r.mode, "none")
 
     def test_shared_secret_header_accepted(self):
         os.environ["ENVIRONMENT"] = "production"

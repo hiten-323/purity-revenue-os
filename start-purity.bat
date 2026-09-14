@@ -4,9 +4,10 @@ REM Purity Beans Revenue OS — canonical production boot.
 REM IMPORTANT: this script owns only the purity-revenue-os tree.
 REM It never taskkills ports or attempts to adopt a legacy PM2 tree.
 
-set "NODE_DIR=C:\Program Files\nodejs"
-set "PM2=C:\Users\hiten\AppData\Roaming\npm\pm2.cmd"
-set "PROJ=C:\Users\hiten\Desktop\ppp\claude\CODE\purity-revenue-os"
+set "NODE_DIR=%ProgramFiles%\nodejs"
+set "PM2=pm2.cmd"
+set "PROJ=%~dp0"
+if "%PROJ:~-1%"=="\" set "PROJ=%PROJ:~0,-1%"
 set "LOG=%PROJ%\autostart.log"
 
 set "PATH=%NODE_DIR%;%PATH%"
