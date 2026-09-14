@@ -119,7 +119,7 @@ def test_defined_in_exactly_one_place(name, owner):
 def test_the_two_msisdn_normalisers_are_the_same_object():
     """Not merely equal on the cases someone thought to test."""
     from app.services.identity import msisdn
-    from app.services.whatsapp_evolution import normalise_msisdn as evo
+    from app.services.whatsapp_aisensy import normalise_msisdn as evo
     from app.services.whatsapp_gateway.client import normalise_msisdn as gw
 
     assert evo is msisdn

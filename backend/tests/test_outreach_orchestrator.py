@@ -44,6 +44,21 @@ def registry(tmp_path, monkeypatch):
     return f
 
 
+@pytest.fixture
+def voice_ready(monkeypatch):
+    """A configured voice provider.
+
+    The sequencing tests below are about ORDER -- propose the first eligible
+    channel, wait for the schedule, skip an ineligible one. They always
+    assumed phone was usable; that assumption was implicit until the gate
+    started checking provider capability as well as permission. Making it
+    explicit is not a relaxation: the no-provider case has its own test.
+    """
+    from app.services import voice_router
+    monkeypatch.setattr(voice_router, "config_status",
+                        lambda: (True, "nuraveda ready (test fixture)"))
+
+
 def _lead(db, **kw):
     kw.setdefault("company", "Test Cafe")
     kw.setdefault("segment", "horeca")
@@ -153,22 +168,39 @@ def test_linkedin_is_refused_with_a_reason_not_a_silence(db, registry):
     assert "user agreement" in v["reason"]
 
 
-def test_whatsapp_needs_a_number_a_verified_account_and_an_opt_in(db, registry):
-    """Three separate facts. The middle one used to be assumed: a mobile
-    number is not proof of a WhatsApp contact — the network is right and the
-    account may simply not exist."""
+def test_whatsapp_needs_a_number_and_an_opt_in(db, registry):
+    """Two facts now, not three.
+
+    Verification used to be the middle one, on the true principle that a
+    mobile number is not proof of a WhatsApp contact. It is no longer asked
+    because it can no longer be answered: whatsapp_verified came from
+    Evolution's /chat/whatsappNumbers, a WhatsApp-Web capability, and Meta's
+    official platform exposes no equivalent by design.
+
+    So NULL is permissive and False is not — the distinction this codebase
+    stated from the start and now depends on.
+    """
     lead = _lead(db, whatsapp_number="9876543210")
-    assert o.eligibility(lead, db)[o.WHATSAPP]["eligible"] is False, "no opt-in"
+    v = o.eligibility(lead, db)[o.WHATSAPP]
+    assert v["eligible"] is False, "no opt-in"
+    assert "opt-in" in v["reason"]
 
     lead.consent_status = "EXPLICIT"
     db.commit()
+    assert lead.whatsapp_verified is None
+    assert o.eligibility(lead, db)[o.WHATSAPP]["eligible"] is True, (
+        "NULL means unasked and unaskable, not refused")
+
+    lead.whatsapp_verified = False           # asked once, and WhatsApp said no
+    db.commit()
     v = o.eligibility(lead, db)[o.WHATSAPP]
-    assert v["eligible"] is False, "consented, but nobody asked WhatsApp"
-    assert "never verified" in v["reason"]
+    assert v["eligible"] is False
+    assert "no WhatsApp account" in v["reason"]
 
     lead.whatsapp_verified = True
     db.commit()
     assert o.eligibility(lead, db)[o.WHATSAPP]["eligible"] is True
+
 
 
 def test_phone_requires_the_dnd_scrub(db, monkeypatch):
@@ -194,7 +226,7 @@ def test_unreachable_lead_reports_every_blocker(db, monkeypatch):
 
 # ---------------------------------------------------------- planning --
 
-def test_it_proposes_the_first_eligible_channel(db, registry):
+def test_it_proposes_the_first_eligible_channel(db, registry, voice_ready):
     lead = _lead(db, phone="9876543210",
                  stage_entered_date=datetime.utcnow() - timedelta(days=30))
     result = o.next_touch(lead, db)
@@ -203,14 +235,14 @@ def test_it_proposes_the_first_eligible_channel(db, registry):
     assert "approval" in result["note"]
 
 
-def test_it_waits_rather_than_jumping_the_schedule(db, registry):
+def test_it_waits_rather_than_jumping_the_schedule(db, registry, voice_ready):
     lead = _lead(db, phone="9876543210", stage_entered_date=datetime.utcnow())
     result = o.next_touch(lead, db)
     assert result["action"] == "WAIT"
     assert result["due_in_days"] > 0
 
 
-def test_an_ineligible_channel_is_skipped_not_stalled(db, registry):
+def test_an_ineligible_channel_is_skipped_not_stalled(db, registry, voice_ready):
     """The sequence puts email on day 0. With no address, the programme must
     move to the next eligible channel rather than sit on email forever."""
     lead = _lead(db, phone="9876543210",
@@ -218,7 +250,7 @@ def test_an_ineligible_channel_is_skipped_not_stalled(db, registry):
     assert o.next_touch(lead, db)["channel"] == o.PHONE
 
 
-def test_a_used_channel_is_not_repeated(db, registry):
+def test_a_used_channel_is_not_repeated(db, registry, voice_ready):
     lead = _lead(db, phone="9876543210",
                  stage_entered_date=datetime.utcnow() - timedelta(days=30))
     lead.ai_call_count = 1
@@ -241,3 +273,44 @@ def test_report_counts_rows_not_estimates(db, registry):
     assert r["leads"] == 2
     assert isinstance(r["by_channel"], dict)
     assert r["reachable_on_at_least_one_channel"] <= r["leads"]
+
+
+def test_phone_needs_a_provider_not_just_permission(db, registry, monkeypatch):
+    """Permission and capability are different questions.
+
+    A dry run over 150 candidates proposed phone for 145 of them: email and
+    WhatsApp were ineligible, so the sequence fell through to phone, and
+    may_place_ai_call happily allowed every one. None could be placed -- no
+    voice provider is configured. The founder queue would have filled with
+    work nobody could do, and the system would have reported readiness it did
+    not have.
+    """
+    from app.services import voice_router
+
+    lead = _lead(db, phone="9876543210")
+
+    monkeypatch.setattr(voice_router, "config_status",
+                        lambda: (False, "nuraveda: NURAVEDA_ENABLED is not set to 1"))
+    v = o.eligibility(lead, db)[o.PHONE]
+    assert v["eligible"] is False
+    assert "no voice provider can place it" in v["reason"]
+    assert "NURAVEDA_ENABLED" in v["reason"], "the reason must name what to fix"
+
+    monkeypatch.setattr(voice_router, "config_status",
+                        lambda: (True, "nuraveda ready"))
+    assert o.eligibility(lead, db)[o.PHONE]["eligible"] is True
+
+
+def test_an_unavailable_voice_router_is_a_refusal(db, registry, monkeypatch):
+    """A channel whose provider readiness cannot even be established has not
+    been established. Fail closed, exactly as the email and WhatsApp gates do."""
+    from app.services import voice_router
+
+    def _boom():
+        raise RuntimeError("voice_router is broken")
+
+    monkeypatch.setattr(voice_router, "config_status", _boom)
+    v = o.eligibility(_lead(db, phone="9876543210"), db)[o.PHONE]
+    assert v["eligible"] is False
+    assert "unavailable" in v["reason"]
+    assert "RuntimeError" in v["reason"], "name what broke, so it is actionable"

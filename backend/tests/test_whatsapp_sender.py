@@ -79,31 +79,30 @@ class WhatsAppSenderTests(unittest.TestCase):
     def test_success_means_provider_accepted_not_delivered(self):
         """The contract is unchanged; only who holds the socket moved.
 
-        whatsapp_sender no longer makes the HTTP call — whatsapp_evolution
-        does — so the fake client is installed there, and configuration comes
-        from EVOLUTION_* rather than AISENSY_*. Every assertion below is the
-        original one: a 2xx means the provider ACCEPTED the request, and
+        whatsapp_sender no longer makes the HTTP call — whatsapp_aisensy
+        does — so the fake client is installed there. Every assertion below is
+        the original one: a 2xx means the provider ACCEPTED the request, and
         nothing about delivery.
         """
-        from app.services import whatsapp_evolution as transport
+        from app.services import whatsapp_aisensy as transport
 
-        keys = ("EVOLUTION_ENABLED", "EVOLUTION_API_KEY", "EVOLUTION_INSTANCE",
-                "WHATSAPP_TEMPLATE")
+        keys = ("AISENSY_ENABLED", "AISENSY_API_KEY", "WHATSAPP_TEMPLATE")
         old_env = {k: os.environ.get(k) for k in keys}
         old_client = transport.httpx.Client
         try:
-            os.environ["EVOLUTION_ENABLED"] = "1"
-            os.environ["EVOLUTION_API_KEY"] = "test-key"
-            os.environ["EVOLUTION_INSTANCE"] = "test-instance"
-            os.environ["WHATSAPP_TEMPLATE"] = "test_template"
+            os.environ["AISENSY_ENABLED"] = "1"
+            os.environ["AISENSY_API_KEY"] = "test-key"
+            os.environ["WHATSAPP_TEMPLATE"] = "test_campaign"
             transport.httpx.Client = _FakeClient
 
             result = ws.send_whatsapp(self.lead, "hello")
             self.assertEqual(result.status, "sent")
             self.assertTrue(result.provider_accepted)
             self.assertFalse(result.delivery_confirmed)
-            # Evolution reports the id in the response body, not a header.
-            self.assertEqual(result.message_id, "body-456")
+            # Header first, then body. AiSensy's documented success contract
+            # promises no id at all, so the extractor takes the most
+            # authoritative one available rather than a fixed location.
+            self.assertEqual(result.message_id, "hdr-123")
         finally:
             transport.httpx.Client = old_client
             for k, v in old_env.items():

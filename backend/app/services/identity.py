@@ -7,7 +7,7 @@ A sweep for duplicated definitions found the same concepts implemented
 repeatedly, and — the part that matters — the copies had drifted:
 
     normalise_msisdn   2 implementations, and they DISAGREED:
-                         "09876543210" -> 919876543210  (whatsapp_evolution)
+                         "09876543210" -> 919876543210  (whatsapp_aisensy)
                                        -> 09876543210   (whatsapp_gateway)
                        The second is not a dialable destination. A test in this
                        repo already said "two normalisers that disagree send to

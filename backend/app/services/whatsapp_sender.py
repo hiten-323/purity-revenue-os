@@ -33,8 +33,8 @@ from typing import Optional
 
 import httpx
 
-# The endpoint constant is gone: whatsapp_evolution owns where a message
-# goes, and a constant here is what let a second transport appear.
+# The endpoint constant is gone: whatsapp_aisensy owns where a message goes,
+# and a constant here is what let a second transport appear.
 
 # Consent values we treat as a real opt-in.
 CONSENT_OK = {"EXPLICIT", "OPTED_IN"}
@@ -63,7 +63,7 @@ class WaResult:
 def is_configured() -> bool:
     # Asks the one transport rather than looking for a provider key of its
     # own — two answers to "can we send" is how three transports happened.
-    from app.services import whatsapp_evolution as transport
+    from app.services import whatsapp_aisensy as transport
     return transport.config_status()[0]
 
 
@@ -143,12 +143,17 @@ def send_whatsapp(lead, message: str, campaign_name: Optional[str] = None,
     can bypass it by passing the right arguments — and so the transport cannot
     grow a second opinion about who may be messaged.
 
-    The transport is now Evolution API driving Meta's WhatsApp Cloud API.
-    Previously this POSTed to AiSensy directly, as did whatsapp_connector and
-    whatsapp_gateway/client: three modules each defining AISENSY_URL, each
-    transmitting, and one of them (the connector) with no consent check at all
-    until it was fixed mid-audit. One transport removes the shape of that bug,
-    not just this instance of it.
+    The transport is AiSensy's API campaign endpoint. It was three modules
+    each defining AISENSY_URL and each transmitting -- one of them, the
+    connector, with no consent check at all until it was fixed mid-audit.
+    Then it was Evolution driving Meta's Cloud API. It is AiSensy again now,
+    for a reason that is not preference: the business number already lives in
+    a WhatsApp Business Account under AiSensy, a number belongs to exactly one
+    WABA, and moving it would have broken seven Live campaigns carrying real
+    orders.
+
+    What has not changed through any of that is the shape: ONE transport,
+    reached from here, with consent decided before it is called.
 
     A successful response means PROVIDER_ACCEPTED only. Delivery and read must
     be established from webhooks, never inferred from the send call.
@@ -157,12 +162,12 @@ def send_whatsapp(lead, message: str, campaign_name: Optional[str] = None,
     if not allowed:
         return WaResult(status="blocked", reason=reason)
 
-    from app.services import whatsapp_evolution as transport
+    from app.services import whatsapp_aisensy as transport
 
     phone = getattr(lead, "whatsapp_number", None) or getattr(lead, "phone", "") or ""
-    # AISENSY_CAMPAIGN_NAME named an AiSensy campaign that mapped to a
-    # Meta-approved template. WHATSAPP_TEMPLATE names that template directly;
-    # the old variable is still read so an existing install keeps working.
+    # WHATSAPP_TEMPLATE names a LIVE AiSensy API campaign, which is itself a
+    # binding to one Meta-approved template. AISENSY_CAMPAIGN_NAME is the
+    # older name for the same thing and is still read by the transport.
     template = (campaign_name
                 or os.getenv("WHATSAPP_TEMPLATE")
                 or os.getenv("AISENSY_CAMPAIGN_NAME") or "").strip()
