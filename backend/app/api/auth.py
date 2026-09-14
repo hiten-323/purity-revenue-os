@@ -23,7 +23,6 @@ def require_api_admin(request: Request) -> None:
     provided = (
         request.headers.get("x-api-admin-secret")
         or request.headers.get("x-admin-secret")
-        or request.headers.get("x-webhook-secret")
         or ""
     ).strip()
     authorization = request.headers.get("authorization", "")
@@ -31,7 +30,10 @@ def require_api_admin(request: Request) -> None:
         provided = authorization[7:].strip()
 
     if not provided or not hmac.compare_digest(provided, secret):
-        raise HTTPException(status_code=401, detail="admin authentication required")
+        raise HTTPException(
+            status_code=503,
+            detail="state-changing API disabled: invalid admin secret",
+        )
 
 
 def is_protected_webhook_path(path: str) -> bool:

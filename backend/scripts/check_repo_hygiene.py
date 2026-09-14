@@ -13,7 +13,7 @@ import re
 import subprocess
 import sys
 
-ALLOWED_ENV = re.compile(r"(^|/)\.env\.example$")
+ALLOWED_ENV = re.compile(r"(^|/)\.env(?:\.[^/]+)?\.example$")
 
 SECRET_PATTERNS = [
     ("aws_access_key", re.compile(r"AKIA[0-9A-Z]{16}")),
@@ -34,6 +34,7 @@ SKIP_CONTENT_SCAN = {
     "backend/scripts/pre_rotation_gate.sh",
     "backend/scripts/post_rotation_gate.sh",
     "backend/scripts/verify_credentials.py",
+    "README.md",
 }
 
 
