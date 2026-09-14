@@ -26,8 +26,8 @@ const need = (k) => {
   return v;
 };
 
-const PYTHON = "C:\\Users\\hiten\\AppData\\Local\\Programs\\Python\\Python312\\python.exe";
-const CLOUDFLARED = "C:\\Program Files (x86)\\cloudflared\\cloudflared.exe";
+const PYTHON = process.env.PYTHON_BIN || "python";
+const CLOUDFLARED = process.env.CLOUDFLARED_BIN || "cloudflared";
 const BACKEND_DIR = path.join(ROOT, "backend");
 const FRONTEND_DIR = path.join(ROOT, "frontend");
 
@@ -117,7 +117,7 @@ module.exports = {
     {
       name: "purity-tunnel",
       script: CLOUDFLARED,
-      args: "tunnel --config C:\\Users\\hiten\\.cloudflared\\config.yml run purity-beans",
+      args: `tunnel --config ${process.env.CLOUDFLARED_CONFIG || path.join(process.env.USERPROFILE || process.env.HOME || "", ".cloudflared", "config.yml")} run purity-beans`,
       interpreter: "none",
       autorestart: true,
       restart_delay: 5000,

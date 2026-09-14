@@ -122,6 +122,8 @@ ZOHO_APP_PASSWORD=
 CEREBRAS_API_KEY=
 SHOPIFY_TOKEN=
 SHOPIFY_WEBHOOK_SECRET=
+API_ADMIN_SECRET=
+VAPI_WEBHOOK_SECRET=
 GOOGLE_MAPS_API_KEY=
 AISENSY_API_KEY=
 WHATSAPP_WEBHOOK_SECRET=
@@ -136,7 +138,13 @@ Then:
 pm2 start ecosystem.config.js
 ```
 
-Health check: `GET /api/v1/health`.
+All state-changing `/api/v1` routes require `X-API-Admin-Secret: <API_ADMIN_SECRET>`
+or `Authorization: Bearer <API_ADMIN_SECRET>`. The service returns `503` until
+the secret is configured; reads remain public. Provider webhooks use their
+dedicated secrets and also fail closed when unset.
+
+Health check: `GET /api/v1/health` (returns `503` when the database or worker
+health checks fail).
 
 ## Data
 

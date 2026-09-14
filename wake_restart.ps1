@@ -1,6 +1,6 @@
 # Wake recovery must use the canonical ecosystem, never an arbitrary saved dump.
-$pm2 = "C:\Users\hiten\AppData\Roaming\npm\pm2.cmd"
-$root = "C:\Users\hiten\Desktop\ppp\claude\CODE\purity-revenue-os"
+$pm2 = (Get-Command pm2 -ErrorAction Stop).Source
+$root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $log = "$root\wake-restart.log"
 
 Start-Sleep -Seconds 8

@@ -139,26 +139,15 @@ def verify_webhook(
     prod = is_production()
 
     if not secret:
-        if prod:
-            logger.error(
-                "webhook_auth_fail provider=%s reason=missing_secret_in_production env=%s",
-                provider,
-                secret_env_var,
-            )
-            return AuthResult(
-                allowed=False,
-                reason=f"{secret_env_var} is required when ENVIRONMENT=production",
-                mode="none",
-            )
-        # Dev-only bypass — never in production
-        logger.warning(
-            "webhook_auth_bypass provider=%s reason=secret_unset_non_production",
+        logger.error(
+            "webhook_auth_fail provider=%s reason=missing_secret env=%s",
             provider,
+            secret_env_var,
         )
         return AuthResult(
-            allowed=True,
-            reason="dev bypass: secret unset and not production",
-            mode="bypass_dev",
+            allowed=False,
+            reason=f"{secret_env_var} is required",
+            mode="none",
         )
 
     # Timestamp check when provider sends one
@@ -196,16 +185,10 @@ def require_admin_secret(headers: Mapping[str, str]) -> AuthResult:
     prod = is_production()
 
     if not secret:
-        if prod:
-            return AuthResult(
-                allowed=False,
-                reason="GATEWAY_ADMIN_SECRET required in production",
-                mode="none",
-            )
         return AuthResult(
-            allowed=True,
-            reason="dev bypass: admin secret unset",
-            mode="bypass_dev",
+            allowed=False,
+            reason="GATEWAY_ADMIN_SECRET is required",
+            mode="none",
         )
 
     provided = _extract_shared_secret_header(hdrs)

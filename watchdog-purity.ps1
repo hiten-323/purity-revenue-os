@@ -3,11 +3,11 @@
 # resurrects an arbitrary PM2 dump, or references the legacy jules_session tree.
 $ErrorActionPreference = 'SilentlyContinue'
 
-$Root     = "C:\Users\hiten\Desktop\ppp\claude\CODE\purity-revenue-os"
+$Root     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Frontend = "$Root\frontend"
-$Node     = "C:\Program Files\nodejs\node.exe"
-$Pm2      = "C:\Users\hiten\AppData\Roaming\npm\node_modules\pm2\bin\pm2"
-$Npm      = "C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js"
+$Node     = (Get-Command node -ErrorAction SilentlyContinue).Source
+$Pm2      = (Get-Command pm2 -ErrorAction SilentlyContinue).Source
+$Npm      = (Get-Command npm -ErrorAction SilentlyContinue).Source
 $Log      = "$Root\watchdog.log"
 
 function Log($m) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $m" | Out-File -Append -Encoding utf8 $Log }
