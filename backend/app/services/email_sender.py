@@ -37,6 +37,17 @@ SENDER_PASSWORD = os.getenv("ZOHO_APP_PASSWORD", "")   # Zoho App Password (NOT 
 SENDER_NAME     = os.getenv("SENDER_NAME", "Hiten Jain | Pure Pantry Provisions")
 
 
+def _gate_failure(email: "OutreachEmail", reason: str, exc: Exception | None = None) -> "OutreachEmail":
+    if exc is None:
+        _log.warning("email safety gate refused send: %s", reason)
+    else:
+        _log.warning("email safety gate unavailable (%s): %s",
+                     type(exc).__name__, reason)
+    email.status = "failed"
+    email.error = f"HELD: {reason}"
+    return email
+
+
 @dataclass
 class OutreachEmail:
     to_email: str
@@ -107,10 +118,10 @@ def domain_is_deliverable(email_addr: str, timeout: float = 5.0) -> bool:
         return False
     except dns.resolver.NXDOMAIN:
         return False
-    except Exception:
-        # Both resolvers failed for network reasons — inconclusive. Let SMTP be
-        # the final arbiter rather than dropping a possibly-good send.
-        return True
+    except Exception as _exc:
+        _log.warning("email domain safety check unavailable (%s)",
+                     type(_exc).__name__)
+        return False
 
 
 def send_email(email: OutreachEmail) -> OutreachEmail:
@@ -220,12 +231,20 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
                                     f"undeliverable at send time "
                                     f"({_v.get('reason')})")
                                 return email
-                        except Exception:
-                            pass      # inconclusive never blocks a good send
+                        except Exception as _exc:
+                            return _gate_failure(
+                                email,
+                                "trust verification unavailable; email not sent",
+                                _exc,
+                            )
             finally:
                 _db.close()
-        except Exception:
-            pass          # never let the guard itself break a legitimate send
+        except Exception as _exc:
+            return _gate_failure(
+                email,
+                "trust/lead safety lookup unavailable; email not sent",
+                _exc,
+            )
 
     # Gate A2: account-level governance. Suppression and the company frequency
     # cap are decided per ACCOUNT, not per contact, so no individual sender can
@@ -238,13 +257,18 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
     # silence us exactly when a buyer is talking. Cadence stays in the queue,
     # which knows the difference.
     if not _is_self and getattr(email, "lead_id", None):
-        from app.database.database import SessionLocal
-        from app.models.models import B2BLead, WorkflowEvent
-        from app.services.account_graph import account_for
-        _db = SessionLocal()
         try:
-            _lead = _db.query(B2BLead).filter(B2BLead.id == email.lead_id).first()
-            if _lead is not None:
+            from app.database.database import SessionLocal
+            from app.models.models import B2BLead, WorkflowEvent
+            from app.services.account_graph import account_for
+            _db = SessionLocal()
+            try:
+                _lead = _db.query(B2BLead).filter(B2BLead.id == email.lead_id).first()
+                if _lead is None:
+                    return _gate_failure(
+                        email,
+                        "account governance lead lookup unavailable; email not sent",
+                    )
                 _acct = account_for(_lead, _db)
                 _ids = [x.id for x in _acct["leads"]]
                 _stop = _db.query(WorkflowEvent).filter(
@@ -255,10 +279,16 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
                     email.status = "failed"
                     email.error = (f"BLOCKED: {_acct['name']} asked not to be "
                                    f"contacted ({_stop.event_type}) — suppression "
-                                   f"is account-wide and absolute")
+                                   "is account-wide and absolute")
                     return email
-        finally:
-            _db.close()
+            finally:
+                _db.close()
+        except Exception as _exc:
+            return _gate_failure(
+                email,
+                "account governance lookup unavailable; email not sent",
+                _exc,
+            )
 
     # Gate B: provider-level throttling / account blocks and our own volume,
     # pace and failure limits. Previously only bg_send_emails consulted this,
@@ -271,16 +301,15 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
             try:
                 _v = check_send_allowed(_db)
                 if not _v.allowed:
-                    email.status = "failed"
-                    email.error = f"HELD: {_v.reason}"
-                    return email
+                    return _gate_failure(email, f"HELD: {_v.reason}")
             finally:
                 _db.close()
         except Exception as _exc:
-            # Swallowed on purpose — this path must not break the
-            # caller — but never silently: a failure with no name is
-            # how the category engine fell back for hours unnoticed.
-            _log.debug('suppressed: %s: %s', type(_exc).__name__, _exc)
+            return _gate_failure(
+                email,
+                "deliverability/account safety validation unavailable; email not sent",
+                _exc,
+            )
 
     # Preserve a caller-supplied Message-ID (so the DB record and the actually
     # sent header match for IMAP reconciliation); only generate one if absent.

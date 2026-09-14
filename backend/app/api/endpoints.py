@@ -1727,7 +1727,7 @@ def tender_approve_and_send(lead_id: int, db: Session = Depends(get_db)):
     """
     Founder approves a tender bid — system emails it immediately via Zoho SMTP.
     """
-    from app.services.email_sender import send_email
+    from app.services.email_sender import OutreachEmail, send_email
     lead = db.query(B2BLead).filter(B2BLead.id == lead_id).first()
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
@@ -1745,13 +1745,22 @@ def tender_approve_and_send(lead_id: int, db: Session = Depends(get_db)):
         db.commit()
         return {"status": "simulated", "message": f"[SIMULATE] Proposal would be sent to {lead.email}", "lead_id": lead_id}
 
-    ok = send_email(lead.email, subject, lead.proposal_text)
-    if ok:
+    result = send_email(OutreachEmail(
+        to_email=lead.email,
+        to_name=lead.contact_name or lead.company or "",
+        company=lead.company or "",
+        subject=subject,
+        body_text=lead.proposal_text,
+        lead_id=lead.id,
+    ))
+    if result.status == "sent":
         lead.status = "PROPOSAL_SENT"
         db.commit()
         return {"status": "sent", "message": f"Proposal emailed to {lead.email}", "lead_id": lead_id}
-    else:
-        raise HTTPException(status_code=500, detail="Email delivery failed. Check Zoho credentials in .env.")
+    raise HTTPException(
+        status_code=500,
+        detail=result.error or "Email delivery failed. Check Zoho credentials in .env.",
+    )
 
 
 @router.post("/tender/auto-price")
