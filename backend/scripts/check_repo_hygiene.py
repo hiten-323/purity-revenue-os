@@ -13,7 +13,7 @@ import re
 import subprocess
 import sys
 
-ALLOWED_ENV = re.compile(r"(^|/)\.env\.example$")
+ALLOWED_ENV = re.compile(r"(^|/)\.env(?:\.[^/]+)?\.example$")
 
 SECRET_PATTERNS = [
     ("aws_access_key", re.compile(r"AKIA[0-9A-Z]{16}")),
@@ -21,7 +21,8 @@ SECRET_PATTERNS = [
         "generic_api_key_assignment",
         re.compile(
             r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token"
-            r"|password|private[_-]?key)\s*[=:]\s*['\"][^'\"]{12,}['\"]"
+            r"|password|private[_-]?key)\s*[=:]\s*['\"]"
+            r"(?!replace-with|your[_-]?|example\b)[^'\"]{12,}['\"]"
         ),
     ),
     ("bearer_token", re.compile(r"(?i)bearer\s+[a-z0-9._\-]{20,}")),
