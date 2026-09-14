@@ -192,7 +192,7 @@ def test_unverified_number_is_not_eligible(tmp_path, monkeypatch):
     try:
         lead = B2BLead(company="Cafe", phone="9000000009", segment="horeca")
         lead.whatsapp_number = "9876543210"
-        lead.consent_status = "IMPLIED_B2B"      # consent is not the blocker here
+        lead.consent_status = "EXPLICIT"          # consent is not the blocker here
         db.add(lead)
         db.commit()
 

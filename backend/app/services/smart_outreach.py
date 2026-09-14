@@ -504,7 +504,7 @@ def plan_touch(db: Session, lead: B2BLead, profile: OutreachProfile | None = Non
     if profile.intent == "CATALOGUE_REQUESTED":
         # Prefer WA only with recorded consent; else email catalogue.
         consent = (getattr(lead, "consent_status", None) or "UNKNOWN").upper()
-        channel = "whatsapp" if consent in ("EXPLICIT", "OPTED_IN", "IMPLIED_B2B") else "email"
+        channel = "whatsapp" if consent in ("EXPLICIT", "OPTED_IN") else "email"
         return {
             "action": "SEND_CATALOGUE",
             "channel": channel,
@@ -536,6 +536,13 @@ def plan_touch(db: Session, lead: B2BLead, profile: OutreachProfile | None = Non
     # which touch is next in order to choose the message — never to decide
     # whether one is owed.
     seq = _sequence_state(db, lead)
+    if seq.get("unavailable"):
+        return {
+            "action": "FOUNDER_REVIEW",
+            "channel": None,
+            "reason": "sequence/history state unavailable — refusing automated outreach",
+            "execute": False,
+        }
     touch = (seq.get("next_touch") or "").lower()
     variant = {
         "intro": "WARM_FIRST_TOUCH",
@@ -558,9 +565,14 @@ def _sequence_state(db: Session, lead: B2BLead) -> dict:
     """Which touch the cadence authority says is next. Read-only."""
     try:
         from app.services import sequence_engine as se
-        return se.state(lead, db) or {}
-    except Exception:
-        return {}
+        state = se.state(lead, db)
+        if not isinstance(state, dict):
+            raise RuntimeError("sequence engine returned an invalid state")
+        return state
+    except Exception as exc:
+        print(f"[smart_outreach] sequence state unavailable for lead {lead.id}: "
+              f"{exc.__class__.__name__} — refusing to send")
+        return {"unavailable": True}
 
 
 
@@ -589,7 +601,13 @@ def _mirror_to_workflow_event(db: Session, lead: B2BLead, channel: str,
     from app.models.models import WorkflowEvent
 
     mid = payload.get("message_id") or payload.get("provider_message_id")
-    to = payload.get("to") or getattr(lead, "email", None)
+    to = payload.get("to")
+    if not to:
+        to = (
+            getattr(lead, "email", None)
+            if channel == "email"
+            else (getattr(lead, "whatsapp_number", None) or getattr(lead, "phone", None))
+        )
     if not mid or not to:
         return
     db.add(WorkflowEvent(
@@ -641,6 +659,18 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
     # Hard duplicate guard: never two proven first touches.
     if decision["action"] == "WARM_FIRST_TOUCH" and _proven_email_touches(db, lead.id):
         return {**decision, "status": "SKIPPED", "reason": "duplicate first touch blocked"}
+    if decision["action"] == "SEND_CATALOGUE":
+        prior = (
+            db.query(OutreachTouch)
+            .filter(
+                OutreachTouch.lead_id == lead.id,
+                OutreachTouch.touch_type == "SEND_CATALOGUE",
+                OutreachTouch.status.in_(PROVEN_SEND),
+            )
+            .first()
+        )
+        if prior:
+            return {**decision, "status": "SKIPPED", "reason": "catalogue already sent"}
 
     if decision["channel"] == "email":
         from app.services.email_sender import build_outreach_email, send_email

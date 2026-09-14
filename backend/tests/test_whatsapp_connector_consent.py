@@ -57,8 +57,9 @@ def test_phone_format_does_not_decide_consent(leads_db):
     for form in ("9876543210", "+919876543210", "91 98765 43210", "098765-43210"):
         ok, _ = wc._consent_ok(form)
         assert ok is True, f"{form} failed to match the opted-in lead"
-    ok, _ = wc._consent_ok("919876500003")
-    assert ok is True, "IMPLIED_B2B lead stored with 91 prefix was not matched"
+    ok, why = wc._consent_ok("919876500003")
+    assert ok is False
+    assert "opt-in" in why.lower()
 
 
 def test_unknown_consent_is_refused(leads_db):

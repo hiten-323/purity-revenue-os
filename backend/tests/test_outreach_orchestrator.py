@@ -160,7 +160,7 @@ def test_whatsapp_needs_a_number_a_verified_account_and_an_opt_in(db, registry):
     lead = _lead(db, whatsapp_number="9876543210")
     assert o.eligibility(lead, db)[o.WHATSAPP]["eligible"] is False, "no opt-in"
 
-    lead.consent_status = "IMPLIED_B2B"
+    lead.consent_status = "EXPLICIT"
     db.commit()
     v = o.eligibility(lead, db)[o.WHATSAPP]
     assert v["eligible"] is False, "consented, but nobody asked WhatsApp"

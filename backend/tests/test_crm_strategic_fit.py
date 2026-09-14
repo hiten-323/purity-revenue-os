@@ -17,6 +17,17 @@ def test_strategic_fit_uses_industry_evidence_for_grocery_segment():
         proposal_suggested_margin = 0.0
         proposal_suggested_price = 0.0
         proposal_monthly_kg = 0.0
+        credit_period_days = 30
+        lead_source = ""
+        freight_cost_estimate = 0.0
+        discount_given = 0.0
+        sampling_cost_total = 0.0
+        actual_margin_net = 0.0
+        sample_taste = sample_aroma = None
+        reality_score = 0.0
+        reality_grade = None
+        sample_followup_status = None
+        deal_health = None
         stage_entered_date = None
         last_updated = None
 

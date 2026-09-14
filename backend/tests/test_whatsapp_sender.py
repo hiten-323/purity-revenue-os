@@ -70,6 +70,12 @@ class WhatsAppSenderTests(unittest.TestCase):
         ok, _ = ws.consent_check(self.lead)
         self.assertTrue(ok)
 
+    def test_implied_b2b_consent_is_not_allowed(self):
+        self.lead.consent_status = "IMPLIED_B2B"
+        self.lead.status = "DISCOVERED"
+        ok, _ = ws.consent_check(self.lead)
+        self.assertFalse(ok)
+
     def test_success_means_provider_accepted_not_delivered(self):
         """The contract is unchanged; only who holds the socket moved.
 

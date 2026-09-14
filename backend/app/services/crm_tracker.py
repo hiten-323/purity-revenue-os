@@ -550,7 +550,7 @@ class CRMTrackerService:
 
         # --- V1.1 & V1.2 Calculations ---
         # 1. Margin Leakage details (discounts, freight, sampling, credit cost, CAC)
-        discount_val = ((lead.proposal_discount_percent or 0.0) / 100.0) * val_annual
+        discount_val = ((getattr(lead, "proposal_discount_percent", 0.0) or 0.0) / 100.0) * val_annual
         
         if div_lower == "distributor":
             freight = 5000.0
