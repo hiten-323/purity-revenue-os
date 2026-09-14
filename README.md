@@ -143,8 +143,8 @@ or `Authorization: Bearer <API_ADMIN_SECRET>`. The service returns `503` until
 the secret is configured; reads remain public. Provider webhooks use their
 dedicated secrets and also fail closed when unset.
 
-Health check: `GET /api/v1/health` (returns `503` when the database or worker
-health checks fail).
+Health check: `GET /api/v1/health` (returns `503` when the database or required
+Redis dependency is unavailable).
 
 ## Data
 

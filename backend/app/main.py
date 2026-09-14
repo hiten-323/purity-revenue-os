@@ -20,6 +20,7 @@ from app.api.founder_router import router as founder_router
 from app.api.whatsapp_gateway import router as whatsapp_gateway_router
 from app.api.marketplace_router import router as marketplace_router
 from app.database.database import engine, Base, get_db
+from app.database.schema import assert_schema_compatible
 from app.api.auth import is_protected_webhook_path, require_api_admin
 import redis
 
@@ -115,6 +116,8 @@ async def startup():
     from app.services.call_outcome_failclosed import install as _install_call_outcome
     _install_call_outcome()
     Base.metadata.create_all(bind=engine)
+    if engine.dialect.name == "postgresql":
+        assert_schema_compatible(engine, Base.metadata)
 
     try:
         from app.database.database import SessionLocal as _SeedSession
@@ -130,10 +133,6 @@ async def startup():
 
     from app.database.database import SessionLocal
     if engine.dialect.name != "sqlite":
-        print(
-            "Legacy SQLite-only migrations skipped for "
-            f"{engine.dialect.name}; SQLAlchemy metadata is authoritative."
-        )
         _start_auto_warm()
         return
     db = SessionLocal()
@@ -404,7 +403,7 @@ def health_check(db: Session = Depends(get_db)):
         if r.ping():
             health_status["redis"] = "connected"
     except Exception:
-        pass
+        health_status["status"] = "unhealthy"
 
     from fastapi.responses import JSONResponse
     return JSONResponse(

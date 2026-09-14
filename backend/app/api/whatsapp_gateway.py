@@ -183,7 +183,9 @@ async def klaviyo_whatsapp_send(request: Request, db: Session = Depends(get_db))
             "status": "BLOCKED_PHONE",
         }
 
-    campaign = router_.resolve(req.lifecycle_stage, req.campaign_name)
+    campaign = router_.resolve(req.lifecycle_stage)
+    if req.campaign_name and req.campaign_name.strip() != campaign:
+        campaign = None
     if not campaign:
         return JSONResponse(
             status_code=400,
@@ -396,7 +398,7 @@ async def gateway_ledger_lookup(
     auth = require_admin_secret(_headers_dict(request))
     if not auth.allowed:
         return JSONResponse(
-            status_code=401,
+            status_code=503 if auth.reason.endswith("is required") else 401,
             content={"ok": False, "error": "unauthorized", "detail": auth.reason},
         )
 
