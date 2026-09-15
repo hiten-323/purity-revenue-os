@@ -436,3 +436,46 @@ def test_verification_alone_never_grants_whatsapp(db, registry):
     p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN", summary="send it on WhatsApp")
     db.commit()
     assert o.eligibility(lead, db)["whatsapp"]["eligible"] is True
+
+
+def test_the_call_carries_constraints_not_just_questions():
+    """Asked "what is your price?" with no constraints, the live model replied
+    "Our wholesale price ... is Rs 450 per kilogram." Nobody gave it a price.
+
+    The profile's _scope_note says the AI never negotiates price, but that is a
+    note for humans. This asserts the rule actually reaches the model.
+    """
+    from app.services import founder_call_pipeline as p
+
+    assert p.CALL_CONSTRAINTS, "no constraints defined"
+    blob = " ".join(p.CALL_CONSTRAINTS).lower()
+    assert "never state a price" in blob
+    assert "never take an order" in blob
+    assert "do not guess" in blob
+
+    # The forbidden-claims list must match the one the email copy honours.
+    for banned in ("turnover", "iso", "capacity", "government supply", "client"):
+        assert banned in blob, f"{banned} is not forbidden to the caller"
+
+
+def test_constraints_are_dispatched_with_every_qualification_call():
+    """A rule that exists but is never sent is decoration."""
+    import ast
+    import inspect
+    import textwrap
+
+    from app.services.calling_agent import CallingAgentService
+
+    # dedent, not lstrip: lstrip only fixes the first line, leaving the body
+    # indented and ast.parse raising IndentationError.
+    src = textwrap.dedent(inspect.getsource(CallingAgentService._place_qualification_call))
+    tree = ast.parse(src)
+    keys = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            keys |= {k.value for k in node.keys
+                     if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+    assert "constraints" in keys, (
+        "the qualification call ships opening and questions but not the "
+        "constraints — the model will invent prices")
+    assert "opening" in keys and "questions" in keys

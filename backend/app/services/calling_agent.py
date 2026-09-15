@@ -155,6 +155,8 @@ class CallingAgentService:
             context={
                 "opening": pipeline.OPENING_DISCLOSURE,
                 "questions": list(pipeline.QUALIFICATION_QUESTIONS),
+                # Without these the model invents prices. Verified, not feared.
+                "constraints": list(pipeline.CALL_CONSTRAINTS),
             },
         )
         if not result.placed:

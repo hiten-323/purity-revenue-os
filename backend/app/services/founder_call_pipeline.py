@@ -156,6 +156,34 @@ OPENING_DISCLOSURE = (
     "time for one quick question?"
 )
 
+# What the AI may NOT say, sent with every dispatch.
+#
+# Tested against the live model before writing this: asked "what is your
+# price?" -- the single most predictable question on a cold coffee call --
+# sarvam-105b-conversations answered "Our wholesale price for Purity Beans
+# instant coffee is Rs 450 per kilogram." Nobody gave it a price. It invented
+# one, fluently, in the voice of the business.
+#
+# The profile's _scope_note already says "the AI never negotiates price or
+# takes an order", but a note in a JSON file is not an instruction to a model.
+# This is.
+#
+# The allowed list mirrors COMPANY_PROFILE in gov_revenue_engine.py. The
+# forbidden list is the same one the email copy has honoured for months: no
+# turnover, no ISO, no capacity, no past government supply, no client names.
+CALL_CONSTRAINTS = (
+    "Never state a price, a discount, or a delivery date. If asked, say the "
+    "founder will confirm exact pricing and offer to have him call.",
+    "Never take an order or commit to a quantity.",
+    "Only these claims are permitted: 100% coffee, zero chicory, no fillers, "
+    "no artificial flavours, FSSAI licensed, GST and MSME registered, "
+    "PAN-India dispatch, food-grade glass jars.",
+    "Never claim turnover, ISO certification, manufacturing capacity, past "
+    "government supply, or name any client.",
+    "If you do not know something, say you will have the founder confirm it. "
+    "Do not guess.",
+)
+
 QUALIFICATION_QUESTIONS = (
     "Are you the person who handles coffee or procurement here?",
     "Are you buying coffee commercially at the moment?",
