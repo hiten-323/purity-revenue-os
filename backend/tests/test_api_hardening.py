@@ -40,6 +40,43 @@ def test_admin_auth_accepts_configured_secret(monkeypatch):
     assert response.json() == {"ok": True}
 
 
+def test_admin_auth_fails_closed_for_invalid_secret(monkeypatch):
+    monkeypatch.setenv("API_ADMIN_SECRET", "test-admin-secret")
+    app = FastAPI()
+
+    def mutate(request: Request):
+        require_api_admin(request)
+        return {"ok": True}
+
+    app.post("/mutate")(mutate)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/mutate", headers={"X-API-Admin-Secret": "wrong-secret"}
+        )
+
+    assert response.status_code == 503
+
+
+def test_webhook_secret_cannot_authorize_admin_mutation(monkeypatch):
+    monkeypatch.setenv("API_ADMIN_SECRET", "admin-secret")
+    monkeypatch.setenv("SHOPIFY_WEBHOOK_SECRET", "webhook-secret")
+    app = FastAPI()
+
+    def mutate(request: Request):
+        require_api_admin(request)
+        return {"ok": True}
+
+    app.post("/mutate")(mutate)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/mutate", headers={"X-Webhook-Secret": "webhook-secret"}
+        )
+
+    assert response.status_code == 503
+
+
 def test_shopify_webhook_fails_closed_without_secret(monkeypatch):
     from app.api.endpoints import _verify_shopify_hmac
 

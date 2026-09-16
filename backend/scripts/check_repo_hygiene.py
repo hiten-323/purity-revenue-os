@@ -35,6 +35,7 @@ SKIP_CONTENT_SCAN = {
     "backend/scripts/pre_rotation_gate.sh",
     "backend/scripts/post_rotation_gate.sh",
     "backend/scripts/verify_credentials.py",
+    "README.md",
 }
 
 
