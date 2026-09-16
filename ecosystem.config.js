@@ -189,5 +189,26 @@ module.exports = {
         NODE_ENV: "production",
       },
     },
+    {
+      // The actual conversational worker (STT/LLM/TTS loop). server.js only
+      // queues a dispatch job with LiveKit Cloud and originates the SIP leg
+      // — it never joins the room itself. Without this process registered
+      // and running, LiveKit has nothing to hand the dispatch job to: the
+      // phone rings and the SIP call connects (server.js's job succeeded),
+      // but no agent ever joins to speak. Found 2026-09-15 via a real test
+      // call to the founder's own number that rang and stayed silent —
+      // this was never listed here before that call, on any process.
+      name: "nuraveda-voice-agent",
+      script: "src/livekit-agent.js",
+      args: "start",
+      cwd: NURAVEDA_DIR,
+      autorestart: true,
+      restart_delay: 5000,
+      max_restarts: 20,
+      min_uptime: 5000,
+      env: {
+        NODE_ENV: "production",
+      },
+    },
   ],
 };
