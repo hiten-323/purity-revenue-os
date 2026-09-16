@@ -52,8 +52,7 @@ sends are rejected rather than recorded).
 ## Scrapling Web Intelligence
 
 Purity Revenue OS can optionally connect to a separately running D4Vinci
-Scrapling MCP server. Scrapling is a **read-only web research/enrichment
-provider** here; it has no authority to send email, WhatsApp messages, or calls.
+Scrapling MCP server. Scrapling is a **read-only web research/enrichment provider** here; it has no authority to send email, WhatsApp messages, or calls.
 
 The worker uses Scrapling only when `SCRAPLING_ENABLED=1`. It processes a small
 bounded batch of leads with websites and missing contact fields, records the
@@ -77,7 +76,7 @@ scrapling-mcp --http
 PowerShell:
 
 ```powershell
-$env:SCRAPLING_MCP_AUTH_TOKEN = "replace-with-a-long-random-token"
+$env:SCRAPLING_MCP_AUTH_TOKEN = "replace-with-the-same-token"
 scrapling-mcp --http
 ```
 
@@ -129,7 +128,7 @@ AISENSY_API_KEY=
 WHATSAPP_WEBHOOK_SECRET=
 ```
 
-`ecosystem.config.js` reads every secret from that file at load time and warns
+ecosystem.config.js reads every secret from that file at load time and warns
 loudly on any that are missing. It never contains credentials itself.
 
 Then:
@@ -159,12 +158,19 @@ Working: account resolution and frequency governance, contact trust, draft
 admission, send-proof enforcement, reply classification, approval queue, call
 queue and funnel analysis, dashboard.
 
-Not yet working: WhatsApp outbound requires an approved Meta template, which
-has not been submitted. Until it exists, business-initiated WhatsApp to
-contacts who have not opted in cannot legitimately be sent, and the AiSensy
-transport stays idle.
+WhatsApp outbound remains gated on legitimate consent and provider readiness.
+It requires an approved Meta template before business-initiated WhatsApp can
+be used for contacts who have not opted in; until that exists, the AiSensy
+transport stays idle for those cold-contact sends.
 
-Known gap: the account-level frequency cap in `account_graph.py` counts only
-`EMAIL_SENT` events, so WhatsApp touches do not consume an account's cooldown
-slot. This must be fixed before WhatsApp sending is enabled, or the cap will
-cover only half of outreach.
+### Cross-channel account frequency cap
+
+The account-level frequency cap is **channel-aware**. `account_graph.py`
+counts both `EMAIL_SENT` and `WHATSAPP_SENT` as outreach events consuming the
+same account cooldown slot. This prevents a WhatsApp touch from bypassing the
+account-level cooldown and allowing another branch/contact at the same account
+to receive cold outreach through email.
+
+A dedicated account-cap test covers the cross-channel behavior. The cap is
+still subject to the separate consent, trust, approval, and provider gates
+before any outbound communication can occur.
