@@ -22,8 +22,6 @@ PHONE = "phone"
 LINKEDIN = "linkedin"
 CHANNELS = (EMAIL, WHATSAPP, PHONE, LINKEDIN)
 
-# Phone must precede WhatsApp. WhatsApp can only become eligible after the AI
-# call has recorded explicit WhatsApp consent for the verified WhatsApp number.
 SEQUENCE = (
     (0, PHONE, "ai_whatsapp_consent"),
     (2, WHATSAPP, "consent_follow_up"),
@@ -60,7 +58,7 @@ def _whatsapp_ok(lead, db):
         return False, "this number has no WhatsApp account (checked)"
 
     if (getattr(lead, "consent_source", "") or "").upper() != "AI_CALL_WHATSAPP_REQUEST":
-        return False, "WhatsApp consent has not been obtained by the AI consent call"
+        return False, "WhatsApp opt-in has not been obtained by the AI consent call"
 
     if not (getattr(lead, "ai_call_count", 0) or 0) > 0:
         return False, "WhatsApp consent call has not been completed"
