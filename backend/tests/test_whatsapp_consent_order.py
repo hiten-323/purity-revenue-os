@@ -7,7 +7,7 @@ from app.services import outreach_orchestrator as o
 from conftest import memory_engine
 
 
-def test_whatsapp_is_never_scheduled_before_ai_consent_call():
+def test_whatsapp_is_never_scheduled_before_ai_consent_call(monkeypatch):
     """The required Smart Outreach order is phone consent first, then WhatsApp.
 
     A verified WhatsApp number proves technical reachability only; it is not
@@ -30,10 +30,16 @@ def test_whatsapp_is_never_scheduled_before_ai_consent_call():
         db.add(lead)
         db.commit()
 
+        # Isolate sequencing from provider/DND configuration. Both channels
+        # are technically eligible; the ordering itself must enforce consent.
+        monkeypatch.setitem(o.GATES, o.PHONE, lambda lead, db: (True, "AI call eligible"))
+        monkeypatch.setitem(o.GATES, o.WHATSAPP, lambda lead, db: (True, "verified + consent eligible"))
+        monkeypatch.setitem(o.GATES, o.EMAIL, lambda lead, db: (False, "email unavailable"))
+        monkeypatch.setitem(o.GATES, o.LINKEDIN, lambda lead, db: (False, "manual only"))
+
         # Before the AI call has obtained consent, WhatsApp must not be the
         # next proposed channel, regardless of WhatsApp account verification.
         result = o.next_touch(lead, db)
-        assert result["channel"] != o.WHATSAPP
         assert result["channel"] == o.PHONE
     finally:
         db.close()
