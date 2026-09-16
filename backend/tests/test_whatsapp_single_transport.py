@@ -23,8 +23,6 @@ from app.services import whatsapp_evolution as transport
 
 BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# The transport itself, plus the credential checker, which only reads an
-# account status and never sends.
 ALLOWED = {
     os.path.join("app", "services", "whatsapp_evolution.py"),
     os.path.join("scripts", "verify_credentials.py"),
@@ -59,12 +57,7 @@ def test_no_module_hardcodes_a_whatsapp_provider_endpoint():
         "these modules still name AiSensy's endpoint directly: " + ", ".join(offenders))
 
 
-# ------------------------------------------------- Cloud API, not Baileys --
-
 def test_baileys_is_refused_by_name(monkeypatch):
-    """Baileys drives a real WhatsApp account over an unofficial protocol. A ban
-    takes the business's own WhatsApp presence with it, not just this
-    integration."""
     monkeypatch.setenv("EVOLUTION_ENABLED", "1")
     monkeypatch.setenv("EVOLUTION_API_KEY", "k")
     monkeypatch.setenv("EVOLUTION_INSTANCE", "i")
@@ -88,8 +81,6 @@ def test_an_unknown_integration_is_refused_not_guessed(monkeypatch):
     assert "not recognised" in why
 
 
-# --------------------------------------------------------- fail closed --
-
 def test_off_unless_enabled(monkeypatch):
     monkeypatch.delenv("EVOLUTION_ENABLED", raising=False)
     assert transport.enabled() is False
@@ -108,11 +99,7 @@ def test_unconfigured_sends_nothing(monkeypatch):
     assert result.status == "not_configured"
 
 
-# ------------------------------------------------- templates are required --
-
 def test_free_text_first_contact_is_refused(monkeypatch):
-    """Meta permits a business-initiated conversation only through an approved
-    template. Refused here rather than attempted and rejected at Meta."""
     monkeypatch.setenv("EVOLUTION_ENABLED", "1")
     monkeypatch.setenv("EVOLUTION_API_KEY", "k")
     monkeypatch.setenv("EVOLUTION_INSTANCE", "i")
@@ -123,11 +110,7 @@ def test_free_text_first_contact_is_refused(monkeypatch):
     assert "template" in result.reason
 
 
-# ------------------------------------------- consent stays with the sender --
-
 def test_the_transport_holds_no_consent_opinion():
-    """A transport that re-checks consent is a second authority, and two
-    authorities on one question eventually disagree."""
     import inspect
     tree = ast.parse(inspect.getsource(transport))
     for node in ast.walk(tree):
@@ -167,18 +150,15 @@ def test_the_sender_still_refuses_without_consent(monkeypatch):
 
 
 def test_msisdn_normalisation_matches_the_sender():
-    """Two normalisers that disagree send to two different numbers."""
     for raw in ("9876543210", "09876543210", "+91 98765 43210", "919876543210"):
         assert transport.normalise_msisdn(raw) == "919876543210", raw
 
 
-# --------------------------------- a mobile number is not a WhatsApp contact --
-
 def test_unverified_number_is_not_eligible(tmp_path, monkeypatch):
-    """The assumption this replaces: "it is a mobile, so it is on WhatsApp".
+    """A mobile number plus generic EXPLICIT consent is insufficient.
 
-    NULL means nobody asked. That is not a verification and must not be
-    treated as one.
+    Smart Outreach must only make WhatsApp eligible after the AI phone call has
+    recorded the WhatsApp-consent provenance for the same lead.
     """
     from sqlalchemy.orm import sessionmaker
 
@@ -192,7 +172,7 @@ def test_unverified_number_is_not_eligible(tmp_path, monkeypatch):
     try:
         lead = B2BLead(company="Cafe", phone="9000000009", segment="horeca")
         lead.whatsapp_number = "9876543210"
-        lead.consent_status = "EXPLICIT"          # consent is not the blocker here
+        lead.consent_status = "EXPLICIT"
         db.add(lead)
         db.commit()
 
@@ -200,13 +180,21 @@ def test_unverified_number_is_not_eligible(tmp_path, monkeypatch):
         assert v["eligible"] is False
         assert "never verified" in v["reason"]
 
-        lead.whatsapp_verified = False           # asked, and there is no account
+        lead.whatsapp_verified = False
         db.commit()
         v = o.eligibility(lead, db)["whatsapp"]
         assert v["eligible"] is False
         assert "no WhatsApp account" in v["reason"]
 
-        lead.whatsapp_verified = True            # asked, and there is one
+        lead.whatsapp_verified = True
+        db.commit()
+        v = o.eligibility(lead, db)["whatsapp"]
+        assert v["eligible"] is False
+        assert "AI consent call" in v["reason"]
+
+        # Only an actual AI-call consent event unlocks WhatsApp.
+        lead.ai_call_count = 1
+        lead.consent_source = "AI_CALL_WHATSAPP_REQUEST"
         db.commit()
         assert o.eligibility(lead, db)["whatsapp"]["eligible"] is True
     finally:
@@ -220,8 +208,6 @@ def test_check_numbers_verifies_nothing_when_unconfigured(monkeypatch):
 
 
 def test_a_number_whatsapp_says_nothing_about_stays_unasked(monkeypatch):
-    """Absent from the response != confirmed absent. Only an explicit answer
-    is a verification."""
     monkeypatch.setenv("EVOLUTION_ENABLED", "1")
     monkeypatch.setenv("EVOLUTION_API_KEY", "k")
     monkeypatch.setenv("EVOLUTION_INSTANCE", "i")
@@ -229,7 +215,6 @@ def test_a_number_whatsapp_says_nothing_about_stays_unasked(monkeypatch):
 
     class _R:
         status_code = 200
-        # asked about two, answered about one, and one row with no verdict
         text = ('[{"number":"919876543210","exists":true},'
                 ' {"number":"919000000000"}]')
 
@@ -245,8 +230,8 @@ def test_a_number_whatsapp_says_nothing_about_stays_unasked(monkeypatch):
 
 
 def test_calls_are_not_restricted_to_mobiles(tmp_path, monkeypatch):
-    """AI calls go to every number. A landline is perfectly callable — it is
-    only WhatsApp that cannot reach one."""
+    """AI calls go to every number. A landline is callable; it is only WhatsApp
+    that cannot reach one."""
     from sqlalchemy.orm import sessionmaker
 
     from app.models.models import B2BLead, Base
