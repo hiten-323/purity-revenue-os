@@ -24,7 +24,7 @@ CONFIG (dormant until set — nothing sends without these):
 Business-initiated messages must use an approved template; AiSensy's campaign API
 maps a campaign -> template. Inside the 24h window free-form text is allowed.
 """
-from __future__ import annotations
+from __future__
 
 import os
 from dataclasses import dataclass
@@ -34,7 +34,7 @@ from typing import Optional
 import httpx
 
 # The endpoint constant is gone: whatsapp_evolution owns where a message
-a# goes, and a constant here is what let a second transport appear.
+goes, and a constant here is what let a second transport appear.
 
 # Smart Outreach policy: WhatsApp is unlocked only by the disclosed AI
 # qualification call explicitly recording a WhatsApp request. A generic
