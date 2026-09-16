@@ -53,15 +53,41 @@ def _norm(p: str) -> str:
     return p
 
 
+# Root cause of the 2026-09-15/16 incident that put one number on 1,166
+# leads (63% of the table): Bing's search-results template carries
+#   <meta property="fb:app_id" content="3732605936979161" />
+# on EVERY page regardless of query, and "7326059369" is characters 2-11 of
+# that 16-digit id. The company's name sits in <title>/og:title a few
+# hundred characters away in the same <head> block, so a proximity window
+# built to attribute a number to "this company" instead attributed Bing's
+# own static template to every company ever searched. Verified live: fetched
+# the real SERP for a freshly-corrupted lead and found the digits at that
+# exact offset, not near any visible phone.
+#
+# The fix is not a denylist on one Facebook app id -- Bing (and any future
+# source) can carry other digit-runs in <head> that coincidentally look like
+# a phone, and none of them are ever a business's real contact number: a
+# <meta>/<script>/<style> tag is markup, not page content a visitor reads.
+# So <head> is removed before the proximity search runs at all, for every
+# caller of this function, not patched per-source.
+_STRIP_HEAD_RE = re.compile(r"<head[^>]*>.*?</head>", re.IGNORECASE | re.DOTALL)
+
+
 def _phones_near_company(html: str, company: str, window: int = 600) -> list[str]:
     """
     Extract phone numbers ONLY from text near a mention of the company name.
     Search-result and directory pages list dozens of unrelated businesses —
     a number is attributable to this company only if it appears close to the
     company's name. If the name never appears on the page, return nothing.
+
+    <head> is stripped first (see _STRIP_HEAD_RE): meta/title/script tags are
+    page-template chrome that repeats on every load of every query, and a
+    proximity match inside them attributes the SITE's fixed markup to
+    whichever company happened to be searched, not a real contact detail.
     """
     if not html or not company:
         return []
+    html = _STRIP_HEAD_RE.sub(" ", html)
     # Match on the first 2 significant name tokens (handles suffix noise
     # like "Pvt Ltd" / "& Sons" in listings)
     tokens = [t for t in re.split(r"[^A-Za-z0-9]+", company) if len(t) >= 3][:2]

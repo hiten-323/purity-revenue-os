@@ -3112,34 +3112,19 @@ async def enrich_contacts(lead_ids: list[int], db: Session = Depends(get_db)):
 
 _PLACEHOLDER_PHONE_RE = None
 
+# Delegate to app.services.identity — the shared, single-source-of-truth home
+# for phone validation (moved there 2026-09-15 so the calling eligibility
+# gate and this cleanup endpoint can't drift into disagreeing about what
+# counts as a fabricated number). Kept as thin wrappers so existing call
+# sites below don't need to change.
 def _is_placeholder_phone(value: str | None) -> bool:
-    """Detect fabricated numbers like +91-88888-88888 / 99999-99999 / 12345…"""
-    import re as _re
-    if not value:
-        return False
-    digits = _re.sub(r"\D", "", value)
-    core = digits[-10:] if len(digits) >= 10 else digits
-    if len(set(core)) <= 2:                    # 8888888888, 9999999999
-        return True
-    return bool(_re.search(r"(12345|00000|11111)", core))
+    from app.services.identity import is_fabricated_pattern
+    return is_fabricated_pattern(value)
 
 
 def _is_id_derived_phone(value: str | None, lead_id: int) -> bool:
-    """
-    Detect a phone number mechanically generated from the lead's own row id
-    (e.g. +91-98765-00156 on lead 156). Found live in the DB on 2026-07-17:
-    67 leads carried this pattern with no phone_source — a stale seed/fixture
-    value, not a real scraped number. The odds of a genuine phone number
-    ending in the exact zero-padded row id are effectively zero, so this is a
-    safe, specific signal — unlike the generic digit-run checks above, it
-    can't false-positive on a real number.
-    """
-    import re as _re
-    if not value:
-        return False
-    digits = _re.sub(r"\D", "", value)
-    tail = digits[-5:] if len(digits) >= 5 else digits
-    return tail == str(lead_id).zfill(5)
+    from app.services.identity import is_id_derived_phone
+    return is_id_derived_phone(value, lead_id)
 
 
 def _is_pattern_email(email: str | None, company: str | None) -> bool:
@@ -3191,8 +3176,20 @@ def quarantine_fabricated(db: Session = Depends(get_db)):
     cleaned = []
     FALSE_OUTREACH = {"INTRO_EMAIL_SENT", "EMAIL_SENT", "WHATSAPP_SENT", "AI_CALLED"}
     for l in leads:
-        fake_phone = _is_placeholder_phone(l.phone)
-        fake_wa = _is_placeholder_phone(l.whatsapp_number)
+        # fabricated_audit (the read-only report above) already checked both
+        # detectors; this action endpoint only checked the pattern one,
+        # so an id-derived fake number showed up in the AUDIT count but was
+        # never actually cleaned. Matching the audit's own logic here.
+        # 2026-09-15/16 incident: Bing's own <meta fb:app_id> boilerplate was
+        # being extracted as a phone by contact_enricher (fixed separately —
+        # see is_shared_across_many_leads / _phones_near_company). The bug is
+        # fixed; this endpoint is how the ~1,166 leads it already wrote to
+        # are cleaned rather than left carrying a real stranger's number.
+        from app.services.founder_call_pipeline import is_shared_across_many_leads
+        shared_phone = is_shared_across_many_leads(l.phone, db, l.id)
+        shared_wa = is_shared_across_many_leads(l.whatsapp_number, db, l.id)
+        fake_phone = _is_placeholder_phone(l.phone) or _is_id_derived_phone(l.phone, l.id) or shared_phone
+        fake_wa = _is_placeholder_phone(l.whatsapp_number) or _is_id_derived_phone(l.whatsapp_number, l.id) or shared_wa
         fake_email = _is_pattern_email(l.email, l.company)
         if not (fake_phone or fake_wa or fake_email):
             continue
