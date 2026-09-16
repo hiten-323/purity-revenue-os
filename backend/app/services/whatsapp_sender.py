@@ -34,9 +34,14 @@ from typing import Optional
 import httpx
 
 # The endpoint constant is gone: whatsapp_evolution owns where a message
-# goes, and a constant here is what let a second transport appear.
+a# goes, and a constant here is what let a second transport appear.
 
+# Smart Outreach policy: WhatsApp is unlocked only by the disclosed AI
+# qualification call explicitly recording a WhatsApp request. A generic
+# EXPLICIT/OPTED_IN value is intentionally insufficient because another
+# workflow can write those values for non-WhatsApp purposes.
 CONSENT_OK = {"EXPLICIT", "OPTED_IN"}
+AI_WHATSAPP_CONSENT_SOURCE = "AI_CALL_WHATSAPP_REQUEST"
 
 ENGAGED = {"REPLIED", "MEETING_BOOKED", "MEETING_COMPLETED", "SAMPLE_SENT",
            "FEEDBACK_PENDING", "FEEDBACK_RECEIVED", "PROPOSAL_SENT",
@@ -61,18 +66,33 @@ def is_configured() -> bool:
 
 
 def consent_check(lead) -> tuple[bool, str]:
-    """May we send this lead a WhatsApp message via the API?"""
+    """May we send this lead a WhatsApp message via the API?
+
+    This is the final send-boundary gate. It deliberately requires all three
+    facts on the current lead: a verified WhatsApp number, a completed AI call,
+    and explicit WhatsApp consent created by that AI call. A generic
+    consent_status value is not enough because it can represent consent for a
+    different purpose or an older workflow.
+    """
     status = (getattr(lead, "consent_status", None) or "UNKNOWN").upper()
     if getattr(lead, "do_not_call", False):
         return False, "lead is on do-not-contact"
-    if status in CONSENT_OK:
-        return True, f"consent recorded: {status}"
-    if (getattr(lead, "status", "") or "") in ENGAGED:
-        return True, "lead replied to us — opt-in + 24h service window open"
-    return False, (
-        f"no opt-in on record (consent_status={status}). Meta requires opt-in before "
-        f"business-initiated WhatsApp. Use the wa.me Send Queue for cold first touch."
-    )
+
+    phone = (getattr(lead, "whatsapp_number", None) or "").strip()
+    if not phone:
+        return False, "no WhatsApp number on record"
+
+    if getattr(lead, "whatsapp_verified", None) is not True:
+        return False, "WhatsApp number is not verified"
+
+    if (getattr(lead, "ai_call_count", 0) or 0) < 1:
+        return False, "WhatsApp consent requires a completed AI consent call"
+
+    source = (getattr(lead, "consent_source", None) or "").strip().upper()
+    if status not in CONSENT_OK or source != AI_WHATSAPP_CONSENT_SOURCE:
+        return False, "WhatsApp consent has not been obtained by the AI consent call"
+
+    return True, "verified WhatsApp number + AI-call WhatsApp consent"
 
 
 def in_service_window(lead) -> bool:
