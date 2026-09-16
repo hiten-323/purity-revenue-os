@@ -36,11 +36,8 @@ import httpx
 # The endpoint constant is gone: whatsapp_evolution owns where a message
 # goes, and a constant here is what let a second transport appear.
 
-# Consent values we treat as a real opt-in.
 CONSENT_OK = {"EXPLICIT", "OPTED_IN"}
 
-# Statuses that prove the lead messaged/replied to us — that is an opt-in and
-# opens Meta's 24h customer-service window.
 ENGAGED = {"REPLIED", "MEETING_BOOKED", "MEETING_COMPLETED", "SAMPLE_SENT",
            "FEEDBACK_PENDING", "FEEDBACK_RECEIVED", "PROPOSAL_SENT",
            "NEGOTIATION", "ORDER_WON", "ONBOARDED"}
@@ -50,9 +47,7 @@ SERVICE_WINDOW_HOURS = 24
 
 @dataclass
 class WaResult:
-    # `sent` means AiSensy accepted the request. It does NOT mean the recipient
-    # received/read it; those facts must come from provider status callbacks.
-    status: str                      # sent | blocked | failed | not_configured
+    status: str
     reason: str = ""
     message_id: str = ""
     response: str = ""
@@ -61,19 +56,12 @@ class WaResult:
 
 
 def is_configured() -> bool:
-    # Asks the one transport rather than looking for a provider key of its
-    # own — two answers to "can we send" is how three transports happened.
     from app.services import whatsapp_evolution as transport
     return transport.config_status()[0]
 
 
 def consent_check(lead) -> tuple[bool, str]:
-    """
-    May we send this lead a WhatsApp message via the API?
-
-    Returns (allowed, reason). Deliberately strict: an unknown consent state is
-    a NO, never a maybe.
-    """
+    """May we send this lead a WhatsApp message via the API?"""
     status = (getattr(lead, "consent_status", None) or "UNKNOWN").upper()
     if getattr(lead, "do_not_call", False):
         return False, "lead is on do-not-contact"
@@ -88,11 +76,6 @@ def consent_check(lead) -> tuple[bool, str]:
 
 
 def in_service_window(lead) -> bool:
-    """
-    True if the lead messaged us within the last 24h — inside Meta's
-    customer-service window, where free-form (non-template) text is allowed.
-    Outside it, only an approved template may be sent.
-    """
     last = getattr(lead, "last_reply_at", None) or getattr(lead, "last_updated", None)
     if not last or (getattr(lead, "status", "") or "") not in ENGAGED:
         return False
@@ -100,25 +83,21 @@ def in_service_window(lead) -> bool:
 
 
 def _normalise_msisdn(raw: str) -> str:
-    """AiSensy wants a country-coded number without + or separators."""
     d = "".join(ch for ch in (raw or "") if ch.isdigit())
-    if len(d) == 10:            # bare Indian mobile
+    if len(d) == 10:
         d = "91" + d
     return d
 
 
 def _extract_provider_message_id(response_text: str, headers) -> str:
-    """Extract a provider message identifier without assuming one transport shape."""
     header_id = str(headers.get("x-message-id") or headers.get("x-messageid") or "").strip()
     if header_id:
         return header_id
-
     try:
         import json
         body = json.loads(response_text or "{}")
     except Exception:
         return ""
-
     if not isinstance(body, dict):
         return ""
     for key in ("messageId", "message_id", "id", "data"):
@@ -136,23 +115,7 @@ def _extract_provider_message_id(response_text: str, headers) -> str:
 def send_whatsapp(lead, message: str, campaign_name: Optional[str] = None,
                   template_params: Optional[list[str]] = None,
                   timeout: float = 20.0) -> WaResult:
-    """
-    The single WhatsApp send path. Consent first, then the one transport.
-
-    Consent is checked here and nowhere below, on purpose, so no future caller
-    can bypass it by passing the right arguments — and so the transport cannot
-    grow a second opinion about who may be messaged.
-
-    The transport is now Evolution API driving Meta's WhatsApp Cloud API.
-    Previously this POSTed to AiSensy directly, as did whatsapp_connector and
-    whatsapp_gateway/client: three modules each defining AISENSY_URL, each
-    transmitting, and one of them (the connector) with no consent check at all
-    until it was fixed mid-audit. One transport removes the shape of that bug,
-    not just this instance of it.
-
-    A successful response means PROVIDER_ACCEPTED only. Delivery and read must
-    be established from webhooks, never inferred from the send call.
-    """
+    """The single WhatsApp send path. Consent first, then the one transport."""
     allowed, reason = consent_check(lead)
     if not allowed:
         return WaResult(status="blocked", reason=reason)
