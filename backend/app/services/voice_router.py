@@ -98,13 +98,35 @@ def idempotency_key(lead) -> str:
     return f"purity-lead-{getattr(lead, 'id', 'x')}-{date.today():%Y%m%d}"
 
 
+def kill_switch_engaged() -> bool:
+    """Global stop for every outbound AI voice call, cold or consented.
+
+    Not a consent opinion — a consent opinion answers "may THIS lead be
+    called"; this answers "is calling switched on for anyone right now".
+    Checked here, in the one function every dial (cold and consented alike)
+    already passes through, rather than in may_place_ai_call() — that gate
+    only covers the cold path, and a kill switch that missed the consented
+    path would not be one.
+    """
+    return (os.getenv("AI_CALLING_KILL_SWITCH", "") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def place_call(lead, *, context: dict[str, Any] | None = None,
-               dry_run: bool = False) -> CallResult:
+               dry_run: bool = False, scheduled_at=None) -> CallResult:
     """Dial through whichever provider is configured.
 
     The lead is used for context and for the idempotency key. It is NOT used
     to decide permission — see the module docstring.
+
+    scheduled_at is an explicit override of the provider's normal dispatch
+    delay (nuraveda defaults to CALL_DELAY_MS, ~10 minutes, DND-rolled). It
+    exists for an operator-requested immediate test call, not for routine
+    dispatch — leaving it None preserves every existing call site's timing
+    exactly as before this parameter was added.
     """
+    if kill_switch_engaged():
+        return CallResult(placed=False, error="AI_CALLING_KILL_SWITCH is engaged — no outbound AI calls")
+
     name = active()
     ok, detail = config_status()
     if not ok:
@@ -115,6 +137,7 @@ def place_call(lead, *, context: dict[str, Any] | None = None,
         return CallResult(placed=False, error="no phone on record")
 
     ctx = {
+        "lead_id": getattr(lead, "id", "") or "",
         "company": getattr(lead, "company", "") or "",
         "contact": getattr(lead, "contact_name", "") or "",
         "city": getattr(lead, "city", "") or "",
@@ -124,4 +147,5 @@ def place_call(lead, *, context: dict[str, Any] | None = None,
 
     mod = _adapter(name)
     return mod.place_call(phone, context=ctx, dry_run=dry_run,
-                          idempotency_key=idempotency_key(lead))
+                          idempotency_key=idempotency_key(lead),
+                          scheduled_at=scheduled_at)

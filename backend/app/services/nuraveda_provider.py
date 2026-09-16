@@ -49,6 +49,21 @@ import urllib.request
 from datetime import date
 from typing import Any
 
+# Load .env HERE rather than relying on some other module's import order to
+# have done it first — see email_sender.py for the incident this pattern
+# exists to prevent: a bare os.getenv() only sees NURAVEDA_ENABLED / _URL /
+# _TOOL_SECRET in whichever process happened to import a dotenv-loading
+# module before this one. Placing a call is the least reversible thing this
+# system does (see module docstring); config_status() silently reporting
+# "not configured" — or worse, configured with a stale/missing secret — for
+# no reason but import order is not acceptable here.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "..", ".env"))
+except Exception as _e:
+    print(f"[nuraveda_provider] .env load skipped: {_e}")
+
 from app.services.voice_router import CallResult
 
 DEFAULT_URL = "http://127.0.0.1:3104"
@@ -166,7 +181,7 @@ def may_call(lead) -> tuple[bool, str]:
 
 def place_call(phone: str, *, context: dict[str, Any] | None = None,
                lang: str | None = None, dry_run: bool = False,
-               idempotency_key: str = "") -> CallResult:
+               idempotency_key: str = "", scheduled_at=None) -> CallResult:
     """Enqueue one outbound call, or explain why not.
 
     Takes a PHONE, not a lead, and that is the point.
@@ -201,6 +216,16 @@ def place_call(phone: str, *, context: dict[str, Any] | None = None,
     # means; this default keeps a bare call from deduping across everything.
     idem = idempotency_key or f"purity-{digits(phone)}-{date.today():%Y%m%d}"
 
+    # LiveKit SIP participant attributes are strings only — trigger-livekit-call.js
+    # coerces every payload value with String(v). String(["a, b", "c"]) silently
+    # comma-joins the array, which corrupts anything (like CALL_CONSTRAINTS) that
+    # itself contains a comma. JSON-encode list/dict values here so the agent
+    # module on the other side gets back exactly what was sent via JSON.parse.
+    safe_ctx = {
+        k: (json.dumps(v) if isinstance(v, (list, dict)) else v)
+        for k, v in ctx.items()
+    }
+
     payload = {
         "profile": profile(),
         "phone": phone,
@@ -211,9 +236,15 @@ def place_call(phone: str, *, context: dict[str, Any] | None = None,
             "customer_name": ctx.get("contact") or ctx.get("customer_name") or "",
             "company": ctx.get("company") or "",
             "city": ctx.get("city") or "",
-            **ctx,
+            **safe_ctx,
         },
     }
+    if scheduled_at is not None:
+        # Overrides the service's own CALL_DELAY_MS default (~10 min,
+        # DND-rolled). server.js honours this verbatim (new Date(b.scheduledAt))
+        # so an operator-requested immediate test call doesn't sit in queue
+        # for no reason — every other call site leaves this unset.
+        payload["scheduledAt"] = scheduled_at.isoformat()
 
     if dry_run:
         return CallResult(placed=False, error="dry run — not dispatched",

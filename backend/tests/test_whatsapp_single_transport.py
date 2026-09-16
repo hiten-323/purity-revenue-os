@@ -327,7 +327,7 @@ def test_calls_are_not_restricted_to_mobiles(tmp_path, monkeypatch):
     Base.metadata.create_all(eng)
     db = sessionmaker(bind=eng)()
     try:
-        for phone in ("9876543210", "0172-5012345", "022-24567890"):
+        for phone in ("9876543210", "0172-5019876", "022-24567890"):
             lead = B2BLead(company=f"Biz {phone}", phone=phone, segment="horeca")
             db.add(lead)
             db.commit()

@@ -116,12 +116,23 @@ def _whatsapp_ok(lead, db):
     rating this number's order flows depend on.
     """
     from app.services.whatsapp_sender import consent_check
+    from app.services.identity import SHARED_PHONE_THRESHOLD
+    from app.services.founder_call_pipeline import is_shared_across_many_leads
 
-    if not (getattr(lead, "whatsapp_number", "") or "").strip():
+    number = (getattr(lead, "whatsapp_number", "") or "").strip()
+    if not number:
         return False, "no WhatsApp-reachable number on record"
 
     if getattr(lead, "whatsapp_verified", None) is False:
         return False, "this number has no WhatsApp account (checked)"
+
+    # See founder_call_pipeline.is_shared_across_many_leads — containment
+    # for the 2026-09-15 phone-overwrite incident, not a fix for its
+    # still-unknown cause. Checked here too because that incident's report
+    # data showed the same placeholder value landing in whatsapp_number,
+    # not just phone.
+    if is_shared_across_many_leads(number, db, getattr(lead, "id", None)):
+        return False, f"number is on record for {SHARED_PHONE_THRESHOLD}+ other leads — refusing to message it"
 
     return consent_check(lead)
 
@@ -419,7 +430,8 @@ def manual_whatsapp_ok(lead, db) -> tuple:
     if stop:
         return False, stop
 
-    from app.services.identity import msisdn
+    from app.services.identity import msisdn, SHARED_PHONE_THRESHOLD
+    from app.services.founder_call_pipeline import is_shared_across_many_leads
 
     number = msisdn(getattr(lead, "whatsapp_number", "") or "")
     if not number:
@@ -429,6 +441,13 @@ def manual_whatsapp_ok(lead, db) -> tuple:
         # fragment, and a wa.me link built from a fragment opens a chat with
         # whoever does own those digits.
         return False, f"number is not dialable internationally ({number})"
+    # See founder_call_pipeline.is_shared_across_many_leads — containment
+    # for the 2026-09-15 phone-overwrite incident. This is the channel a
+    # human founder actually acts on personally, so it gets the same guard
+    # as the automated ones: opening a chat with a number 150+ unrelated
+    # leads share is not messaging this business.
+    if is_shared_across_many_leads(number, db, getattr(lead, "id", None)):
+        return False, f"number is on record for {SHARED_PHONE_THRESHOLD}+ other leads — refusing to message it"
 
     return True, f"founder may message {number} personally"
 

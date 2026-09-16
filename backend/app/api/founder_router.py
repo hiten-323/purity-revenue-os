@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.api.auth import require_api_admin
 from app.database.database import get_db
 from app.models.models import B2BLead
 from app.services import founder_actions as fa
@@ -115,3 +116,75 @@ def post_approve_bulk(body: BulkApproveBody, db: Session = Depends(get_db)):
         "results": results,
         "note": "worker drain will send these on the next cycle",
     }
+
+
+class AICallOutcomeBody(BaseModel):
+    lead_id: int
+    outcome: str
+    summary: str = ""
+    interest: str = ""
+    callback_window: str = ""
+    transcript: str = ""
+
+
+@router.post("/ai-call-outcome", dependencies=[Depends(require_api_admin)])
+def post_ai_call_outcome(body: AICallOutcomeBody, db: Session = Depends(get_db)):
+    """Called by the Nuraveda voice agent (profiles/purity-coffee-b2b/agent.js)
+    when a disclosed AI qualification call ends. Routes through
+    founder_call_pipeline.record_ai_outcome — the sole authority for this
+    state machine — rather than writing to the lead directly, for the same
+    reason every other channel imports its gate instead of restating it.
+    """
+    from app.services import founder_call_pipeline as pipeline
+
+    lead = db.query(B2BLead).filter(B2BLead.id == body.lead_id).first()
+    if not lead:
+        raise HTTPException(404, f"lead {body.lead_id} not found")
+
+    key = (body.outcome or "").strip().upper()
+
+    # Idempotency: a webhook/tool retry re-sending the SAME outcome for a
+    # lead that has already recorded it must not be treated as an error.
+    # record_ai_outcome()/advance() are deliberately strict FSM primitives —
+    # a stage cannot legally transition to itself — so a bare retry raises
+    # ValueError there. That strictness is correct for the state machine and
+    # wrong for an HTTP boundary a network layer is allowed to retry; fixing
+    # it here keeps advance() honest while making the webhook do what every
+    # webhook must (Phase 8/15: "a webhook retry must not create duplicate
+    # outcomes"). A DIFFERENT outcome for an already-attempted lead is not a
+    # retry — MAX_AI_COLD_CALLS_PER_LEAD is 1, so there is no legitimate way
+    # for a second real call to have happened, and that case still surfaces
+    # as an error rather than being silently accepted.
+    if lead.call_outcome_last == key and pipeline.stage_of(lead) != pipeline.ELIGIBLE:
+        return {
+            "status": "already_recorded",
+            "lead_id": lead.id,
+            "stage": pipeline.stage_of(lead),
+            "note": "idempotent retry — this outcome was already recorded for this lead",
+        }
+
+    try:
+        target_stage = pipeline.record_ai_outcome(
+            lead, db, body.outcome,
+            summary=body.summary,
+            interest=body.interest,
+            callback_window=body.callback_window,
+            transcript=body.transcript,
+        )
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(400, str(e))
+
+    # record_ai_outcome()/advance() never commit themselves — every other
+    # caller in this codebase (calling_agent.py's _place_qualification_call,
+    # _place_consented_call, etc.) commits explicitly after calling into the
+    # pipeline, and this endpoint is the one place that didn't. Without this,
+    # get_db()'s `finally: db.close()` silently discards every mutation
+    # record_ai_outcome made — the response still reports the correct
+    # computed stage (it's read from the in-memory object before the
+    # session closes), so the bug is invisible unless something re-queries
+    # with a fresh session. Found exactly that way, via a live controlled
+    # call whose outcome never appeared in the database afterward.
+    db.commit()
+
+    return {"status": "recorded", "lead_id": lead.id, "stage": target_stage}

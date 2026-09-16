@@ -146,7 +146,7 @@ class CallingAgentService:
         return True, "eligible"
 
     @staticmethod
-    def _place_qualification_call(db, lead: B2BLead, pipeline) -> tuple[bool, str]:
+    def _place_qualification_call(db, lead: B2BLead, pipeline, scheduled_at=None) -> tuple[bool, str]:
         """Place the disclosed cold qualification call through the sole voice authority."""
         from app.services import voice_router
 
@@ -158,6 +158,7 @@ class CallingAgentService:
                 # Without these the model invents prices. Verified, not feared.
                 "constraints": list(pipeline.CALL_CONSTRAINTS),
             },
+            scheduled_at=scheduled_at,
         )
         if not result.placed:
             return False, f"provider_refused: {result.error}"
@@ -199,11 +200,16 @@ class CallingAgentService:
         return True, f"consented_call_placed: {result.provider_call_id}"
 
     @staticmethod
-    def trigger_vapi_call(db, lead: B2BLead) -> tuple[bool, str]:
+    def trigger_vapi_call(db, lead: B2BLead, scheduled_at=None) -> tuple[bool, str]:
         """Backward-compatible entry point; all voice execution is routed centrally.
 
         The historical name is retained for callers that have not migrated yet.
         It has no VAPI implementation and cannot select a provider itself.
+
+        scheduled_at: see voice_router.place_call — an explicit override of
+        the provider's normal dispatch delay, for an operator-requested
+        immediate test call. None (the default) changes nothing for every
+        existing caller, including Smart Outreach.
         """
         from app.services import founder_call_pipeline as pipeline
 
@@ -229,7 +235,7 @@ class CallingAgentService:
                 return False, (
                     f"daily_ai_call_cap_reached: {pipeline.MAX_AI_CALLS_PER_DAY} placed in the last 24h"
                 )
-            return CallingAgentService._place_qualification_call(db, lead, pipeline)
+            return CallingAgentService._place_qualification_call(db, lead, pipeline, scheduled_at=scheduled_at)
 
         return CallingAgentService._place_consented_call(db, lead)
 
