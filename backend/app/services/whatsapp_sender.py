@@ -160,9 +160,6 @@ def send_whatsapp(lead, message: str, campaign_name: Optional[str] = None,
     from app.services import whatsapp_evolution as transport
 
     phone = getattr(lead, "whatsapp_number", None) or getattr(lead, "phone", "") or ""
-    # AISENSY_CAMPAIGN_NAME named an AiSensy campaign that mapped to a
-    # Meta-approved template. WHATSAPP_TEMPLATE names that template directly;
-    # the old variable is still read so an existing install keeps working.
     template = (campaign_name
                 or os.getenv("WHATSAPP_TEMPLATE")
                 or os.getenv("AISENSY_CAMPAIGN_NAME") or "").strip()
