@@ -23,14 +23,11 @@ function Test-Health($url, $timeout = 8) {
     return $false
 }
 
-# Guard against accidental execution from a copied/legacy tree.
 if (-not (Test-Path "$Root\ecosystem.config.js")) {
     Log "canonical ecosystem missing -> refusing to act"
     exit 1
 }
 
-# Frontend: a missing production build is a deployment fault. Build before the
-# next restart; never kill an arbitrary process on :3001.
 if (-not (Test-Path "$Frontend\.next\BUILD_ID")) {
     Log "frontend .next build missing -> building canonical frontend"
     Push-Location $Frontend
@@ -44,14 +41,13 @@ if (-not (Test-Path "$Frontend\.next\BUILD_ID")) {
     & $Node $Pm2 restart purity-beans *> $null
 }
 
-# API — canonical port is 8003.
-if (-not (Test-Health "http://127.0.0.1:8003/api/v1/health")) {
+# API health is exposed at /health, not /api/v1/health.
+if (-not (Test-Health "http://127.0.0.1:8003/health")) {
     Log "API unhealthy -> restart purity-api"
     & $Node $Pm2 restart purity-api --update-env *> $null
     Start-Sleep -Seconds 12
 }
 
-# Frontend origin.
 $localFront = Test-Health "http://127.0.0.1:3001/dashboard"
 if (-not $localFront) {
     Log "frontend unhealthy -> restart purity-beans"
@@ -60,7 +56,6 @@ if (-not $localFront) {
     $localFront = Test-Health "http://127.0.0.1:3001/dashboard"
 }
 
-# Tunnel — restart only after origin is healthy, and never more than once per 5m.
 if ($localFront) {
     $public = Test-Health "https://dashboard.p3online.in/dashboard" 15
     if (-not $public) {
