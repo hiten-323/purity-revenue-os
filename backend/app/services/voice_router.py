@@ -26,13 +26,13 @@ So the provider is named once, in config, and every dial goes through here.
 What this module does NOT do
 ----------------------------
 It does not decide who may be called. Neither do the adapters. Permission is
-decided upstream, once:
+decided upstream, once, for every AI call:
 
-    cold qualification call  -> founder_call_pipeline.may_place_ai_call()
-    consented call           -> check_eligibility's consent clause
+    founder_call_pipeline.may_place_ai_call()
 
-A router that also re-checked consent would be the third opinion on one
-question, and the three would eventually disagree. Its whole job is to turn
+There is no separate consented-call path: email/WhatsApp consent is not
+consent to be called. A router that also re-checked consent would be a second
+opinion on one question, and the two would eventually disagree. Its whole job is to turn
 "place this call" into the right adapter's idea of that sentence.
 """
 from __future__ import annotations

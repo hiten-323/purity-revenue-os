@@ -26,14 +26,14 @@ Two things the upstream docs get wrong, corrected here:
 * The service binds 127.0.0.1 only, so it is reachable from this host and
   nowhere else. That is a feature — treat it as a localhost sidecar.
 
-Consent is decided HERE, before dispatch
+Permission is decided upstream, not here
 ----------------------------------------
 The service has its own DND window and its own idempotency, and both are good.
-Neither knows anything about whether a Purity Beans lead agreed to be called.
-CallingAgentService.CALL_ALLOWED_IF is the only list that decides that, and it
-is imported rather than restated so a second opinion cannot form. A voice
-integration that skipped it would be the fifth write path in this codebase to
-route around a gate that already exists.
+Neither knows anything about whether a Purity Beans lead may be called. That is
+founder_call_pipeline.may_place_ai_call()'s job, applied to every AI call by
+calling_agent.trigger_vapi_call. A voice integration that skipped it would be
+the fifth write path in this codebase to route around a gate that already
+exists.
 
 Placing a call is also the least reversible thing this system can do. A wrong
 email is a wrong email; a wrong call is a real phone ringing in a real shop.
@@ -159,26 +159,6 @@ def health() -> dict[str, Any]:
     }
 
 
-def may_call(lead) -> tuple[bool, str]:
-    """Consent, decided by the authority that already owns it.
-
-    CALL_ALLOWED_IF is imported, not restated. If the import fails we refuse:
-    a dial path that cannot reach the consent rule has not satisfied it.
-    """
-    try:
-        from app.services.calling_agent import CallingAgentService
-    except Exception as exc:  # noqa: BLE001
-        return False, f"consent rule unavailable ({exc.__class__.__name__}); refusing to dial"
-
-    if getattr(lead, "do_not_call", False):
-        return False, "do_not_call is set on this lead"
-    status = (getattr(lead, "consent_status", None) or "UNKNOWN").upper()
-    if status not in CallingAgentService.CALL_ALLOWED_IF:
-        return False, (f"no consent on record (consent_status={status}); "
-                       f"allowed: {', '.join(CallingAgentService.CALL_ALLOWED_IF)}")
-    return True, status
-
-
 def place_call(phone: str, *, context: dict[str, Any] | None = None,
                lang: str | None = None, dry_run: bool = False,
                idempotency_key: str = "", scheduled_at=None) -> CallResult:
@@ -186,18 +166,17 @@ def place_call(phone: str, *, context: dict[str, Any] | None = None,
 
     Takes a PHONE, not a lead, and that is the point.
 
-    This adapter used to accept a lead and run may_call() on it before
+    This adapter used to accept a lead and run a consent check on it before
     dialling. That looked like defence in depth and was actually a second
-    authority: once founder_call_pipeline owns permission for the cold
-    qualification call, an adapter that re-checks consent_status would refuse
-    every call the pipeline had just authorised — every lead is UNKNOWN — and
-    the two gates would disagree about the same dial.
+    authority: once founder_call_pipeline owns permission for the qualification
+    call, an adapter that re-checks consent_status would refuse every call the
+    pipeline had just authorised — every lead is UNKNOWN — and the two gates
+    would disagree about the same dial.
 
     With no lead in scope the adapter cannot form an opinion about permission.
-    It places calls; deciding who may be called belongs to the pipeline (cold)
-    or to check_eligibility's consent clause (consented), exactly as
-    voice_router states for every adapter. may_call()
-    is still exported below for callers on the consented path.
+    It places calls; deciding who may be called belongs to
+    founder_call_pipeline.may_place_ai_call(), exactly as voice_router states
+    for every adapter.
 
     Returns voice_router.CallResult, the one shape every adapter reports.
     """

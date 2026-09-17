@@ -152,41 +152,103 @@ def test_calling_agent_has_no_direct_vapi_execution():
     assert "urllib.request" not in source
     assert "voice_router" in source
     assert "_place_qualification_call" in source
-    assert "_place_consented_call" in source
+    assert "_place_consented_call" not in source
 
 
-def test_calling_agent_routes_consented_call_through_voice_router(db, monkeypatch):
+# ---- email/WhatsApp consent is not consent to be called --------------------
+#
+# consent_status EXPLICIT is only ever recorded for email or WhatsApp. It used
+# to unlock a "consented call" path that skipped the DND registry scrub and the
+# one-call rule, so a prospect who asked for details on WhatsApp could be
+# called up to three times without either. These pin that every AI call now
+# runs under founder_call_pipeline.may_place_ai_call, whatever the consent.
+
+def _dry_voice(monkeypatch):
     from app.services import voice_router
-    from app.services.calling_agent import CallingAgentService
-
-    l = lead(
-        db,
-        phone="9876543210",
-        consent_status="EXPLICIT",
-        estimated_value=50000,
-        proposal_suggested_margin=70,
-        call_attempts=0,
-    )
 
     class Result:
         placed = True
         error = None
         provider_call_id = "dry-run-provider-call"
 
-    monkeypatch.setattr(voice_router, "config_status", lambda: (True, "configured"))
-    monkeypatch.setattr(voice_router, "active", lambda: "nuraveda")
     calls = []
 
-    def fake_place_call(lead_obj, context=None):
+    def fake_place_call(lead_obj, context=None, scheduled_at=None):
         calls.append((lead_obj.id, context))
         return Result()
 
+    monkeypatch.setattr(voice_router, "config_status", lambda: (True, "configured"))
+    monkeypatch.setattr(voice_router, "active", lambda: "nuraveda")
     monkeypatch.setattr(voice_router, "place_call", fake_place_call)
+    return calls
+
+
+def _dnd_registry(tmp_path, monkeypatch, *numbers):
+    from app.services import preference_registry as pref
+
+    f = tmp_path / "dnd.txt"
+    f.write_text("\n".join(numbers) + "\n", encoding="utf-8")
+    monkeypatch.setenv("DND_SUPPRESSION_FILE", str(f))
+    pref._cache_key = None
+
+
+def _whatsapp_consented_lead(db, **kw):
+    kw.setdefault("phone", "9876543210")
+    kw.setdefault("segment", "cafe")
+    kw.setdefault("estimated_value", 50000)
+    kw.setdefault("proposal_suggested_margin", 70)
+    kw.setdefault("call_attempts", 0)
+    kw.setdefault("consent_status", "EXPLICIT")
+    kw.setdefault("consent_source", "AI_CALL_WHATSAPP_REQUEST")
+    return lead(db, **kw)
+
+
+def test_whatsapp_consent_does_not_license_a_second_ai_call(db, tmp_path, monkeypatch):
+    """The exact state a real WHATSAPP_OPT_IN leaves behind: already called
+    once, consent recorded. No last_call_date, so the cooldown can't be what
+    refuses it; the one-call rule must be."""
+    from app.services.calling_agent import CallingAgentService
+
+    _dnd_registry(tmp_path, monkeypatch)
+    calls = _dry_voice(monkeypatch)
+    l = _whatsapp_consented_lead(db, outreach_stage="AI_INTEREST_DETECTED", ai_call_count=1)
+
+    ok, reason = CallingAgentService.trigger_vapi_call(db, l)
+
+    assert ok is False
+    assert reason.startswith("cold_call_refused"), reason
+    assert "once per lead" in reason
+    assert calls == []
+
+
+def test_whatsapp_consent_does_not_skip_the_dnd_registry(db, tmp_path, monkeypatch):
+    from app.services.calling_agent import CallingAgentService
+
+    _dnd_registry(tmp_path, monkeypatch, "9876543210")
+    calls = _dry_voice(monkeypatch)
+    l = _whatsapp_consented_lead(db)
+
+    ok, reason = CallingAgentService.trigger_vapi_call(db, l)
+
+    assert ok is False
+    assert "preference registry" in reason, reason
+    assert calls == []
+
+
+def test_a_consented_lead_is_still_called_once_as_a_qualification_call(db, tmp_path, monkeypatch):
+    """Consent doesn't block a call either: a clean, never-called lead gets
+    the ordinary disclosed qualification call, with its constraints."""
+    from app.services.calling_agent import CallingAgentService
+
+    _dnd_registry(tmp_path, monkeypatch)
+    calls = _dry_voice(monkeypatch)
+    l = _whatsapp_consented_lead(db)
 
     ok, reason = CallingAgentService.trigger_vapi_call(db, l)
 
     assert ok is True, reason
-    assert reason == "consented_call_placed: dry-run-provider-call"
-    assert calls == [(l.id, {"purpose": "consented_followup"})]
-    assert l.call_provider == "nuraveda"
-    assert l.call_attempts == 1
+    assert reason == "qualification_call_placed: dry-run-provider-call"
+    assert len(calls) == 1
+    assert "opening" in calls[0][1] and "constraints" in calls[0][1]
+    assert l.ai_call_count == 1
+    assert l.outreach_stage == "AI_CALL_ATTEMPTED"

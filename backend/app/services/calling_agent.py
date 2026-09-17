@@ -12,10 +12,8 @@ class CallingAgentService:
     CALLING_ENGINE_ENABLED = True
     VOICE = "hi-IN-MadhurNeural"
     DEFAULT_REALIZATION_PER_KG = 1400.0
-    AUTO_COLD_CALLING = False
     AUTO_SAMPLE_DISPATCH = False
     AUTO_ORDER_BOOKING = False
-    FOUNDER_APPROVAL_REQUIRED = True
     DNC_ENABLED = True
     MAX_CALL_ATTEMPTS = 3
     COOLDOWN_DAYS = 14
@@ -23,8 +21,6 @@ class CallingAgentService:
     MAX_CALLS_PER_DAY = 25
     MAX_CALL_COST_PER_DAY = 500.0
     FOUNDER_OVERRIDE_ENABLED = True
-    LEAD_LOCK_DURATION_MINUTES = 30
-    CALL_ALLOWED_IF = ["IMPLIED_B2B", "EXPLICIT"]
     CALLABLE_SEGMENTS = _CALLABLE_SEGMENTS
 
     @staticmethod
@@ -86,7 +82,6 @@ class CallingAgentService:
         db,
         lead: B2BLead,
         ignore_dnc_override: bool = False,
-        cold_qualification: bool = False,
     ) -> tuple[bool, str]:
         """Apply the common call gates before any provider-side execution."""
         if not CallingAgentService.CALLING_ENGINE_ENABLED:
@@ -113,10 +108,6 @@ class CallingAgentService:
         if CallingAgentService.DNC_ENABLED and lead.do_not_call:
             if not (CallingAgentService.FOUNDER_OVERRIDE_ENABLED and lead.dnc_override_by):
                 return False, "do_not_call_active"
-
-        consent = (lead.consent_status or "UNKNOWN").upper()
-        if not cold_qualification and consent not in CallingAgentService.CALL_ALLOWED_IF:
-            return False, f"insufficient_consent ({consent})"
 
         if (lead.call_attempts or 0) >= CallingAgentService.MAX_CALL_ATTEMPTS:
             return False, "max_call_attempts_reached"
@@ -177,29 +168,6 @@ class CallingAgentService:
         return True, f"qualification_call_placed: {result.provider_call_id}"
 
     @staticmethod
-    def _place_consented_call(db, lead: B2BLead) -> tuple[bool, str]:
-        """Place an already-consented call through voice_router; never call a provider directly."""
-        from app.services import voice_router
-
-        result = voice_router.place_call(
-            lead,
-            context={"purpose": "consented_followup"},
-        )
-        if not result.placed:
-            return False, f"provider_refused: {result.error}"
-
-        lead.lead_owner = "AI Agent"
-        lead.lead_locked_until = datetime.utcnow() + timedelta(
-            minutes=CallingAgentService.LEAD_LOCK_DURATION_MINUTES
-        )
-        lead.call_attempts = (lead.call_attempts or 0) + 1
-        lead.last_call_date = datetime.utcnow()
-        lead.call_status = "CALLING"
-        lead.call_provider = voice_router.active()
-        db.commit()
-        return True, f"consented_call_placed: {result.provider_call_id}"
-
-    @staticmethod
     def trigger_vapi_call(db, lead: B2BLead, scheduled_at=None) -> tuple[bool, str]:
         """Backward-compatible entry point; all voice execution is routed centrally.
 
@@ -213,12 +181,7 @@ class CallingAgentService:
         """
         from app.services import founder_call_pipeline as pipeline
 
-        consent = (lead.consent_status or "UNKNOWN").upper()
-        is_cold = consent not in CallingAgentService.CALL_ALLOWED_IF
-
-        eligible, reason = CallingAgentService.check_eligibility(
-            db, lead, cold_qualification=is_cold
-        )
+        eligible, reason = CallingAgentService.check_eligibility(db, lead)
         if not eligible:
             return False, reason
 
@@ -227,17 +190,21 @@ class CallingAgentService:
         if not cfg_ok:
             return False, f"voice_not_configured: {cfg_reason}"
 
-        if is_cold:
-            may_call, why = pipeline.may_place_ai_call(lead)
-            if not may_call:
-                return False, f"cold_call_refused: {why}"
-            if pipeline.daily_budget_remaining(db) <= 0:
-                return False, (
-                    f"daily_ai_call_cap_reached: {pipeline.MAX_AI_CALLS_PER_DAY} placed in the last 24h"
-                )
-            return CallingAgentService._place_qualification_call(db, lead, pipeline, scheduled_at=scheduled_at)
-
-        return CallingAgentService._place_consented_call(db, lead)
+        # Every AI call is a cold qualification call, including for a lead with
+        # consent_status EXPLICIT. That consent is only ever recorded for email
+        # or WhatsApp (the AI-call WhatsApp opt-in, an inbound WhatsApp reply,
+        # the call sheet's "OK to email/WhatsApp?"). It used to unlock a
+        # "consented call" path that skipped the DND registry scrub and the
+        # one-call rule. Nothing records consent to be called, so no lead
+        # bypasses may_place_ai_call.
+        may_call, why = pipeline.may_place_ai_call(lead)
+        if not may_call:
+            return False, f"cold_call_refused: {why}"
+        if pipeline.daily_budget_remaining(db) <= 0:
+            return False, (
+                f"daily_ai_call_cap_reached: {pipeline.MAX_AI_CALLS_PER_DAY} placed in the last 24h"
+            )
+        return CallingAgentService._place_qualification_call(db, lead, pipeline, scheduled_at=scheduled_at)
 
     @staticmethod
     def get_campaign_preview(db) -> tuple[list[B2BLead], float, float]:
