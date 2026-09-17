@@ -130,7 +130,7 @@ def test_interest_is_not_consent(db, registry):
 
 
 def test_pipeline_stages_are_not_consent_values():
-    """If a stage is ever added to CONSENT_OK or CALL_ALLOWED_IF, fail here."""
+    """If a stage is ever added to CONSENT_OK, fail here."""
     p.assert_consent_neutral()
 
 

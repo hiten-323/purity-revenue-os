@@ -17,8 +17,7 @@ Why a separate column instead of consent_status
 -----------------------------------------------
 The obvious implementation is to write the pipeline states into
 `consent_status`. That would be a bug, and a familiar one. `consent_status` is
-read by whatsapp_sender.CONSENT_OK, smart_outreach (:507) and
-CallingAgentService.CALL_ALLOWED_IF. Any value written there becomes a sending
+read by whatsapp_sender.CONSENT_OK and smart_outreach. Any value written there becomes a sending
 permission somewhere else the moment it exists, so "an AI rang this shop once"
 would silently become "this number may be messaged on WhatsApp" under Meta's
 opt-in rules -- without the shop doing anything.
@@ -250,14 +249,12 @@ def assert_consent_neutral() -> None:
     """No pipeline stage may be a consent value anywhere else.
 
     Imported and called by the test suite. If a later edit adds a stage that
-    whatsapp_sender or the calling agent would accept as permission, this
-    raises rather than letting the escalation ship.
+    whatsapp_sender would accept as permission, this raises rather than
+    letting the escalation ship.
     """
-    from app.services.calling_agent import CallingAgentService
     from app.services.whatsapp_sender import CONSENT_OK
 
-    leaked = set(STAGES) & (
-        set(CONSENT_OK) | set(CallingAgentService.CALL_ALLOWED_IF))
+    leaked = set(STAGES) & set(CONSENT_OK)
     if leaked:
         raise AssertionError(
             "pipeline stage(s) %s are also treated as consent. A call-pipeline "

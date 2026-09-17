@@ -177,7 +177,7 @@ def post_ai_call_outcome(body: AICallOutcomeBody, db: Session = Depends(get_db))
 
     # record_ai_outcome()/advance() never commit themselves — every other
     # caller in this codebase (calling_agent.py's _place_qualification_call,
-    # _place_consented_call, etc.) commits explicitly after calling into the
+    # etc.) commits explicitly after calling into the
     # pipeline, and this endpoint is the one place that didn't. Without this,
     # get_db()'s `finally: db.close()` silently discards every mutation
     # record_ai_outcome made — the response still reports the correct

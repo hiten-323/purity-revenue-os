@@ -1,8 +1,8 @@
 """
 The voice adapter dials. It does not decide who may be dialled.
 
-That split changed. This adapter used to take a lead and run may_call() on it
-before dispatching, which read as defence in depth and was really a second
+That split changed. This adapter used to take a lead and run a consent check on
+it before dispatching, which read as defence in depth and was really a second
 authority: once founder_call_pipeline owns permission for the cold
 qualification call, an adapter that re-checks consent_status refuses every call
 the pipeline just authorised -- every lead is UNKNOWN -- and two gates disagree
@@ -12,9 +12,10 @@ So place_call() now takes a PHONE. With no lead in scope it cannot form an
 opinion about permission, the same way scrapling_dry_run cannot write because
 it never receives a db handle. Structure beats a rule someone has to remember.
 
-may_call() survives as an exported helper for the consented path, and the test
-that it imports its vocabulary rather than restating it survives with it --
-that one has caught real drift before.
+may_call() is gone too. It served a "consented call" path that treated
+email/WhatsApp consent as permission to call; that path was removed, and every
+AI call now goes through founder_call_pipeline.may_place_ai_call()
+(test_outreach_e2e_contract pins that).
 """
 from __future__ import annotations
 
@@ -76,37 +77,6 @@ def test_adapter_does_not_re_check_consent(monkeypatch):
 
     result = nv.place_call("+91-98765-43210")
     assert result.placed is True
-
-
-# ------------------------------------ may_call still owns the consented path --
-
-def test_consent_vocabulary_is_imported_not_restated():
-    """Two copies of an allow-list drift, and the drift shows up as calls
-    nobody agreed to receive."""
-    import inspect
-    src = inspect.getsource(nv.may_call)
-    assert "from app.services.calling_agent import CallingAgentService" in src
-    assert "CALL_ALLOWED_IF" in src
-    code = " ".join(line.split("#", 1)[0] for line in src.splitlines())
-    assert '"IMPLIED_B2B"' not in code and "'IMPLIED_B2B'" not in code, (
-        "the allowed consent states appear to be hardcoded in the adapter")
-
-
-def test_may_call_refuses_an_unconsented_lead():
-    allowed, why = nv.may_call(Lead(consent_status="UNKNOWN"))
-    assert allowed is False
-    assert "no consent on record" in why
-
-
-def test_do_not_call_outranks_consent():
-    allowed, why = nv.may_call(Lead(consent_status="EXPLICIT", do_not_call=True))
-    assert allowed is False
-    assert "do_not_call" in why
-
-
-def test_may_call_allows_a_consented_lead():
-    allowed, why = nv.may_call(Lead(consent_status="EXPLICIT"))
-    assert allowed is True, why
 
 
 # ------------------------------------------------------------- dispatch --

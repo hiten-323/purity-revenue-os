@@ -102,11 +102,10 @@ def test_no_phone_is_refused_before_dialling(monkeypatch):
     assert "no phone" in result.error
 
 
-def test_kill_switch_blocks_both_cold_and_consented_paths(monkeypatch):
-    """A kill switch that only covered may_place_ai_call would miss the
-    consented (_place_consented_call) path entirely — place_call() is the
-    one function both paths actually dial through, so that is where this
-    has to live to be a real kill switch rather than half of one."""
+def test_kill_switch_blocks_every_dial(monkeypatch):
+    """place_call() is the one function every dial goes through, so the kill
+    switch lives there rather than in may_place_ai_call, where any future
+    path that skipped the pipeline gate would also skip the switch."""
     monkeypatch.setenv("VOICE_PROVIDER", "nuraveda")
     monkeypatch.setenv("NURAVEDA_ENABLED", "1")
     monkeypatch.setenv("NURAVEDA_TOOL_SECRET", "x")
@@ -123,8 +122,8 @@ def test_kill_switch_off_by_default(monkeypatch):
 
 
 def test_router_holds_no_consent_opinion():
-    """Permission belongs to founder_call_pipeline (cold) or to
-    check_eligibility (consented). A third opinion is a future disagreement."""
+    """Permission belongs to founder_call_pipeline.may_place_ai_call. A second
+    opinion is a future disagreement."""
     import inspect
     src = inspect.getsource(vr)
     body = "\n".join(line for line in src.splitlines()
