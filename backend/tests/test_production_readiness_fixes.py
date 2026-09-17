@@ -56,3 +56,37 @@ def test_whatsapp_queue_defaults_to_no_journal():
     text = source.read_text(encoding="utf-8")
     assert 'add_argument("--journal", action="store_true"' in text
     assert "journal=args.journal" in text
+
+
+def test_settings_payload_is_whitelisted_and_newlines_are_removed():
+    import json
+
+    from app.services.settings_guard import sanitize_settings_payload
+
+    body = json.dumps(
+        {
+            "SENDER_NAME": "Hiten\nJain\r",
+            "SHOPIFY_STORE": "p3online.in",
+        }
+    ).encode("utf-8")
+
+    sanitized = json.loads(sanitize_settings_payload(body))
+    assert sanitized == {
+        "SENDER_NAME": "HitenJain",
+        "SHOPIFY_STORE": "p3online.in",
+    }
+
+
+def test_settings_payload_rejects_unknown_keys():
+    import json
+
+    from app.services.settings_guard import sanitize_settings_payload
+
+    body = json.dumps({"SECRET_ADMIN_PASSWORD": "do-not-accept"}).encode("utf-8")
+
+    try:
+        sanitize_settings_payload(body)
+    except ValueError as exc:
+        assert "Unsupported settings key" in str(exc)
+    else:
+        raise AssertionError("unknown settings keys must be rejected")
