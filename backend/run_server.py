@@ -28,11 +28,13 @@ if __name__ == "__main__":
     setup_logging("api")
 
     # Import the application first so its route modules are loaded, then
-    # install the two last-mile guards before uvicorn can accept traffic.
+    # install the last-mile guards before uvicorn can accept traffic.
     import app.main as application
     from app.services.email_send_guard import install_email_send_guard
+    from app.services.settings_guard import install_settings_guard
     from app.services.shopify_security import install_shopify_hmac_guard
     install_email_send_guard()
+    install_settings_guard(application.app)
     install_shopify_hmac_guard()
 
     uvicorn.run(
