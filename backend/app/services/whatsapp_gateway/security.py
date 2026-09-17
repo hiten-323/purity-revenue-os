@@ -12,7 +12,7 @@ Supported verification modes (best-effort, provider-agnostic):
   1. Shared secret header: X-Webhook-Secret / X-Klaviyo-Webhook-Secret /
      X-AiSensy-Webhook-Secret must equal the configured secret.
   2. HMAC-SHA256 of raw body using the secret, compared to
-     X-Webhook-Signature / X-Hub-Signature-256 as a base64 digest.
+     X-Webhook-Signature / X-Hub-Signature-256 as a hex digest.
 
 Replay protection:
   Klaviyo webhook signature scheme for custom HTTPS webhooks is not fully
@@ -21,7 +21,6 @@ Replay protection:
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import logging
@@ -91,9 +90,8 @@ def _extract_shared_secret_header(headers: Mapping[str, str]) -> str:
     return ""
 
 
-def _hmac_base64(secret: str, body: bytes) -> str:
-    digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).digest()
-    return base64.b64encode(digest).decode("ascii")
+def _hmac_hex(secret: str, body: bytes) -> str:
+    return hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
 
 
 def _check_timestamp(headers: Mapping[str, str]) -> Optional[str]:
@@ -151,7 +149,7 @@ def verify_webhook(
 
     sig = _extract_signature(hdrs)
     if sig:
-        expected = _hmac_base64(secret, body or b"")
+        expected = _hmac_hex(secret, body or b"")
         if _constant_time_eq(sig, expected):
             return AuthResult(allowed=True, reason="hmac matched", mode="hmac")
 
