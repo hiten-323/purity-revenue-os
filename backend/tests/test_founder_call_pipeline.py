@@ -26,6 +26,7 @@ from sqlalchemy.orm import sessionmaker
 from app.models.models import B2BLead, Base, CallHistory
 from app.services import founder_call_pipeline as p
 from app.services import preference_registry as pref
+from app.services import identity
 from conftest import memory_engine
 
 
@@ -49,7 +50,7 @@ def db():
 def registry(tmp_path, monkeypatch):
     """A configured registry holding one suppressed number."""
     f = tmp_path / "dnd.txt"
-    f.write_text("# operator scrub export\n9000000001\n", encoding="utf-8")
+    f.write_text("# operator scrub export\n9845123067\n", encoding="utf-8")
     monkeypatch.setenv("DND_SUPPRESSION_FILE", str(f))
     pref._cache_key = None          # the cache keys on mtime; force a reload
     return f
@@ -168,8 +169,61 @@ def test_scrub_fails_closed_when_unconfigured(db, monkeypatch):
     assert "no preference registry configured" in why
 
 
+def test_fabricated_placeholder_phone_is_refused(db, registry):
+    lead = _lead(db, phone="+91 88888 88888")
+    ok, why = p.may_place_ai_call(lead)
+    assert ok is False
+    assert "fabricated" in why
+
+
+def test_id_derived_phone_is_refused(db, registry):
+    """The exact 2026-07-17 incident: a phone ending in this lead's own row
+    id, zero-padded to 5 digits — a stale seed value, not a real number."""
+    lead = _lead(db, phone="+91 98765 00000")  # placeholder; id set below
+    lead.phone = f"+91 98765 {str(lead.id).zfill(5)}"
+    db.commit()
+    ok, why = p.may_place_ai_call(lead)
+    assert ok is False
+    assert "derived from this lead's own id" in why
+
+
+def test_phone_shared_by_many_unrelated_leads_is_refused(db, registry):
+    """The 2026-09-15 incident: a still-unroot-caused process put the same
+    well-formed, non-fabricated-looking number on 150+ unrelated leads. This
+    is the containment — a number that answers for dozens of different
+    businesses is not this lead's phone, whatever its digits look like."""
+    shared = "+91 73260 59369"
+    for i in range(identity.SHARED_PHONE_THRESHOLD):
+        _lead(db, company=f"Other Business {i}", phone=shared)
+    target = _lead(db, company="The Actual Lead", phone=shared)
+
+    ok, why = p.may_place_ai_call(target)
+    assert ok is False
+    assert "other leads" in why
+
+
+def test_a_number_shared_by_only_a_few_leads_is_not_refused(db, registry):
+    """The threshold exists so a genuinely shared line (a small chain's
+    single reception desk) doesn't get refused on principle alone."""
+    shared = "+91 88990 11223"
+    for i in range(identity.SHARED_PHONE_THRESHOLD - 2):
+        _lead(db, company=f"Branch {i}", phone=shared)
+    target = _lead(db, company="Branch Main", phone=shared)
+
+    ok, why = p.may_place_ai_call(target)
+    assert ok is True
+
+
+def test_a_real_looking_phone_is_not_flagged_as_fabricated(db, registry):
+    """Guard against the fabrication checks being too aggressive — a normal
+    number must not collide with either pattern."""
+    lead = _lead(db, phone="+91 98765 43210")
+    ok, why = p.may_place_ai_call(lead)
+    assert ok is True
+
+
 def test_suppressed_number_is_refused(db, registry):
-    lead = _lead(db, phone="+91 90000 00001")
+    lead = _lead(db, phone="+91 98451 23067")
     ok, why = p.may_place_ai_call(lead)
     assert ok is False
     assert "preference registry" in why
@@ -414,6 +468,33 @@ def test_no_other_outcome_grants_whatsapp(db, registry, outcome):
     assert (lead.consent_status or "UNKNOWN").upper() in ("UNKNOWN", "")
 
 
+def test_whatsapp_opt_in_binds_consent_to_the_number_actually_called(db, registry):
+    """Consent is granted for a NUMBER, not for the lead row in general.
+
+    Without this, a later change to phone/whatsapp_number (re-enrichment, a
+    manual correction, or the 2026-09-15 class of corruption bug that put one
+    fabricated number on 1,166 leads) would silently carry an old opt-in over
+    to a destination that never gave it. consent_phone is what
+    whatsapp_sender.consent_check() checks the current number against.
+    """
+    lead = _lead(db, phone="9876500001")
+    p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN", summary="send it on WhatsApp")
+    db.commit()
+
+    assert lead.consent_phone == "9876500001"
+
+
+def test_whatsapp_opt_in_prefers_whatsapp_number_over_phone_for_binding(db, registry):
+    """Matches send_whatsapp()'s own destination resolution order, so the
+    number consent is checked against at send time is the number it was
+    captured against at grant time."""
+    lead = _lead(db, phone="9876500001", whatsapp_number="9111100002")
+    p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN", summary="send it on WhatsApp")
+    db.commit()
+
+    assert lead.consent_phone == "9111100002"
+
+
 def test_verification_alone_never_grants_whatsapp(db, registry):
     """The link this deliberately does NOT make.
 
@@ -436,3 +517,46 @@ def test_verification_alone_never_grants_whatsapp(db, registry):
     p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN", summary="send it on WhatsApp")
     db.commit()
     assert o.eligibility(lead, db)["whatsapp"]["eligible"] is True
+
+
+def test_the_call_carries_constraints_not_just_questions():
+    """Asked "what is your price?" with no constraints, the live model replied
+    "Our wholesale price ... is Rs 450 per kilogram." Nobody gave it a price.
+
+    The profile's _scope_note says the AI never negotiates price, but that is a
+    note for humans. This asserts the rule actually reaches the model.
+    """
+    from app.services import founder_call_pipeline as p
+
+    assert p.CALL_CONSTRAINTS, "no constraints defined"
+    blob = " ".join(p.CALL_CONSTRAINTS).lower()
+    assert "never state a price" in blob
+    assert "never take an order" in blob
+    assert "do not guess" in blob
+
+    # The forbidden-claims list must match the one the email copy honours.
+    for banned in ("turnover", "iso", "capacity", "government supply", "client"):
+        assert banned in blob, f"{banned} is not forbidden to the caller"
+
+
+def test_constraints_are_dispatched_with_every_qualification_call():
+    """A rule that exists but is never sent is decoration."""
+    import ast
+    import inspect
+    import textwrap
+
+    from app.services.calling_agent import CallingAgentService
+
+    # dedent, not lstrip: lstrip only fixes the first line, leaving the body
+    # indented and ast.parse raising IndentationError.
+    src = textwrap.dedent(inspect.getsource(CallingAgentService._place_qualification_call))
+    tree = ast.parse(src)
+    keys = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            keys |= {k.value for k in node.keys
+                     if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+    assert "constraints" in keys, (
+        "the qualification call ships opening and questions but not the "
+        "constraints — the model will invent prices")
+    assert "opening" in keys and "questions" in keys

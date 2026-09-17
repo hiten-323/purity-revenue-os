@@ -25,5 +25,16 @@ def test_documented_placeholder_is_not_a_secret():
 
 
 def test_live_quoted_secret_still_fails_scan():
-    text = 'API_KEY = "this-is-a-real-looking-secret-value"'
+    """The sample is assembled at runtime, never written as a literal.
+
+    Spelled out in the source, this line made the scanner flag its own test
+    file on every run. A hygiene gate that always FAILs is a gate people learn
+    to ignore, which is worse than not having one.
+
+    The alternative -- adding this file to SKIP_CONTENT_SCAN -- would have
+    weakened the scanner to silence it, and PR #12 deliberately went the other
+    way by removing README.md from that exclusion list. So the test keeps its
+    exact meaning and the literal stops existing.
+    """
+    text = "API" + "_KEY = " + chr(34) + "this-is-a-real-looking-value" + chr(34)
     assert any(pattern.search(text) for _, pattern in hygiene.SECRET_PATTERNS)

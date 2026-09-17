@@ -19,6 +19,10 @@ def _capture_boot_commit():
 
 _BOOT_COMMIT = _capture_boot_commit()
 _BOOT_TIME = __import__("datetime").datetime.utcnow().isoformat()
+# One definition of "the digits that identify this subscriber", shared with
+# every sender. Three local copies had already drifted; two of them built
+# wa.me links that were wrong for any number stored without a country code.
+from app.services.identity import msisdn as _msisdn
 from app.database.database import get_db
 from app.services.providers import AmazonProvider, FlipkartProvider, BlinkitProvider
 import logging
@@ -3108,34 +3112,19 @@ async def enrich_contacts(lead_ids: list[int], db: Session = Depends(get_db)):
 
 _PLACEHOLDER_PHONE_RE = None
 
+# Delegate to app.services.identity — the shared, single-source-of-truth home
+# for phone validation (moved there 2026-09-15 so the calling eligibility
+# gate and this cleanup endpoint can't drift into disagreeing about what
+# counts as a fabricated number). Kept as thin wrappers so existing call
+# sites below don't need to change.
 def _is_placeholder_phone(value: str | None) -> bool:
-    """Detect fabricated numbers like +91-88888-88888 / 99999-99999 / 12345…"""
-    import re as _re
-    if not value:
-        return False
-    digits = _re.sub(r"\D", "", value)
-    core = digits[-10:] if len(digits) >= 10 else digits
-    if len(set(core)) <= 2:                    # 8888888888, 9999999999
-        return True
-    return bool(_re.search(r"(12345|00000|11111)", core))
+    from app.services.identity import is_fabricated_pattern
+    return is_fabricated_pattern(value)
 
 
 def _is_id_derived_phone(value: str | None, lead_id: int) -> bool:
-    """
-    Detect a phone number mechanically generated from the lead's own row id
-    (e.g. +91-98765-00156 on lead 156). Found live in the DB on 2026-07-17:
-    67 leads carried this pattern with no phone_source — a stale seed/fixture
-    value, not a real scraped number. The odds of a genuine phone number
-    ending in the exact zero-padded row id are effectively zero, so this is a
-    safe, specific signal — unlike the generic digit-run checks above, it
-    can't false-positive on a real number.
-    """
-    import re as _re
-    if not value:
-        return False
-    digits = _re.sub(r"\D", "", value)
-    tail = digits[-5:] if len(digits) >= 5 else digits
-    return tail == str(lead_id).zfill(5)
+    from app.services.identity import is_id_derived_phone
+    return is_id_derived_phone(value, lead_id)
 
 
 def _is_pattern_email(email: str | None, company: str | None) -> bool:
@@ -3187,8 +3176,20 @@ def quarantine_fabricated(db: Session = Depends(get_db)):
     cleaned = []
     FALSE_OUTREACH = {"INTRO_EMAIL_SENT", "EMAIL_SENT", "WHATSAPP_SENT", "AI_CALLED"}
     for l in leads:
-        fake_phone = _is_placeholder_phone(l.phone)
-        fake_wa = _is_placeholder_phone(l.whatsapp_number)
+        # fabricated_audit (the read-only report above) already checked both
+        # detectors; this action endpoint only checked the pattern one,
+        # so an id-derived fake number showed up in the AUDIT count but was
+        # never actually cleaned. Matching the audit's own logic here.
+        # 2026-09-15/16 incident: Bing's own <meta fb:app_id> boilerplate was
+        # being extracted as a phone by contact_enricher (fixed separately —
+        # see is_shared_across_many_leads / _phones_near_company). The bug is
+        # fixed; this endpoint is how the ~1,166 leads it already wrote to
+        # are cleaned rather than left carrying a real stranger's number.
+        from app.services.founder_call_pipeline import is_shared_across_many_leads
+        shared_phone = is_shared_across_many_leads(l.phone, db, l.id)
+        shared_wa = is_shared_across_many_leads(l.whatsapp_number, db, l.id)
+        fake_phone = _is_placeholder_phone(l.phone) or _is_id_derived_phone(l.phone, l.id) or shared_phone
+        fake_wa = _is_placeholder_phone(l.whatsapp_number) or _is_id_derived_phone(l.whatsapp_number, l.id) or shared_wa
         fake_email = _is_pattern_email(l.email, l.company)
         if not (fake_phone or fake_wa or fake_email):
             continue
@@ -5768,49 +5769,46 @@ def fire_whatsapp_blast(
     limit: int = 20,
     db: Session = Depends(get_db),
 ):
-    """
-    V1.1 POLICY: draft-only. Returns pre-composed WhatsApp messages with
-    wa.me links for the founder to review and send personally. No lead
-    status is changed here — the founder confirms each send afterwards
-    via /b2b/leads/{id}/mark-whatsapp.
-    """
-    import urllib.parse
+    """Draft-only. The founder sends these from their own WhatsApp.
 
-    leads = db.query(B2BLead).filter(
-        B2BLead.whatsapp_number.isnot(None),
-        B2BLead.whatsapp_number != "",
-        B2BLead.phone_verified == True,   # V1.1: only web-verified numbers
-        B2BLead.status.in_(["DISCOVERED", "QUALIFIED"]),
-    ).order_by(B2BLead.score.desc()).limit(limit).all()
+    Nothing here talks to Meta, AiSensy or Evolution, and nothing changes a
+    lead status. It returns wa.me links; a message exists only once a human
+    presses send, and that is recorded afterwards via
+    /b2b/leads/{id}/mark-whatsapp.
 
-    drafts = []
-    for lead in leads:
-        name = (lead.contact_name or "").split()[0] if lead.contact_name else ""
-        greeting = f"Hi {name}," if name else "Hi,"
-        msg = (
-            f"{greeting} Hiten here from Purity Beans. "
-            f"We supply 100% pure instant coffee (zero chicory) to corporates, "
-            f"hotels and distributors across India.\n\n"
-            f"Can I send a free tasting kit to {lead.company} and set a quick 15-min call?\n\n"
-            f"Reply 1 = Sample  |  2 = Call  |  3 = Pricing\n\n"
-            f"📞 +91 90849 58495  ·  p3online.in"
-        )
-        phone = "".join(c for c in (lead.whatsapp_number or "") if c.isdigit())
-        drafts.append({
-            "lead_id": lead.id,
-            "company": lead.company,
-            "wa": lead.whatsapp_number,
-            "message": msg,
-            "whatsapp_url": f"https://wa.me/{phone}?text={urllib.parse.quote(msg)}",
-        })
+    WHY THIS IS THE WHATSAPP CHANNEL THAT WORKS TODAY
+    -------------------------------------------------
+    The API channel needs three things we do not have: Meta business
+    verification, an approved template, and recorded opt-in. Opt-in stands at
+    0 of 1858, and the only automated thing that creates it is the AI
+    qualification call, which is waiting on telecom KYC. So the API path is
+    blocked behind the same queue it was supposed to route around.
+
+    A founder messaging from their own phone is person-to-person contact. It
+    needs no template and cannot cost the business number a quality rating it
+    does not have. It costs founder minutes instead, which is why this is a
+    queue to pull from rather than a blast to fire.
+
+    Eligibility and ranking both live in outreach_orchestrator. This endpoint
+    holds no opinion about who may be contacted -- the previous version did,
+    and its `phone_verified == True` filter passed exactly 1 lead of 1309
+    while looking like it worked.
+    """
+    from app.services.outreach_orchestrator import manual_whatsapp_queue
+
+    drafts = manual_whatsapp_queue(db, limit=limit)
 
     return {
         "mode": "draft_only",
         "queued": 0,
         "drafted": len(drafts),
         "leads": drafts,
-        "message": "Review each message and send from WhatsApp — then mark as sent.",
+        "channel": "whatsapp_manual",
+        "message": ("Review each message and send from your own WhatsApp, "
+                    "then mark it sent. A reply records EXPLICIT consent and "
+                    "is what opens the API channel later."),
     }
+
 
 
 # ── EMAIL APPROVAL & VERIFICATION SYSTEM ──────────────────────────────────────
@@ -6502,7 +6500,11 @@ def get_followup_inbox(db: Session = Depends(get_db)):
     for draft, lead in rows:
         days_stalled = (datetime.utcnow() - (lead.last_updated or datetime.utcnow())).days
         wa_msg = _followup_whatsapp(lead, days_stalled)
-        phone = (lead.whatsapp_number or lead.phone or "").replace(" ", "").replace("-", "").replace("+", "")
+        # identity.msisdn, not local stripping. Stripping "+" leaves a bare
+        # ten-digit string for the 26 leads stored without a country code,
+        # and wa.me reads ten digits as a US number -- a link that quietly
+        # opens a chat with whoever owns them.
+        phone = _msisdn(lead.whatsapp_number or lead.phone or "")
         wa_url = f"https://wa.me/{phone}?text={_requests.utils.quote(wa_msg)}" if phone else None
 
         total_pipeline += int(lead.estimated_value or 0)
@@ -6930,7 +6932,11 @@ def one_click_execute(req: OneClickExecuteRequest, db: Session = Depends(get_db)
                 if _rem and _rem.sequence_step:
                     wa_step = _rem.sequence_step
             msg = _followup_whatsapp(lead, days, step=wa_step)
-            phone = (lead.whatsapp_number or lead.phone or "").replace(" ", "").replace("-", "").replace("+", "")
+            # identity.msisdn, not local stripping. Stripping "+" leaves a bare
+            # ten-digit string for the 26 leads stored without a country code,
+            # and wa.me reads ten digits as a US number -- a link that quietly
+            # opens a chat with whoever owns them.
+            phone = _msisdn(lead.whatsapp_number or lead.phone or "")
             if not phone:
                 raise RuntimeError("no phone/WhatsApp number on record")
 

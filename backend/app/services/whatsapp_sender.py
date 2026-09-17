@@ -24,7 +24,7 @@ CONFIG (dormant until set — nothing sends without these):
 Business-initiated messages must use an approved template; AiSensy's campaign API
 maps a campaign -> template. Inside the 24h window free-form text is allowed.
 """
-from __future__
+from __future__ import annotations
 
 import os
 from dataclasses import dataclass
@@ -33,16 +33,14 @@ from typing import Optional
 
 import httpx
 
-# The endpoint constant is gone: whatsapp_evolution owns where a message
-goes, and a constant here is what let a second transport appear.
+# The endpoint constant is gone: whatsapp_aisensy owns where a message goes,
+# and a constant here is what let a second transport appear.
 
-# Smart Outreach policy: WhatsApp is unlocked only by the disclosed AI
-# qualification call explicitly recording a WhatsApp request. A generic
-# EXPLICIT/OPTED_IN value is intentionally insufficient because another
-# workflow can write those values for non-WhatsApp purposes.
+# Consent values we treat as a real opt-in.
 CONSENT_OK = {"EXPLICIT", "OPTED_IN"}
-AI_WHATSAPP_CONSENT_SOURCE = "AI_CALL_WHATSAPP_REQUEST"
 
+# Statuses that prove the lead messaged/replied to us — that is an opt-in and
+# opens Meta's 24h customer-service window.
 ENGAGED = {"REPLIED", "MEETING_BOOKED", "MEETING_COMPLETED", "SAMPLE_SENT",
            "FEEDBACK_PENDING", "FEEDBACK_RECEIVED", "PROPOSAL_SENT",
            "NEGOTIATION", "ORDER_WON", "ONBOARDED"}
@@ -52,7 +50,9 @@ SERVICE_WINDOW_HOURS = 24
 
 @dataclass
 class WaResult:
-    status: str
+    # `sent` means AiSensy accepted the request. It does NOT mean the recipient
+    # received/read it; those facts must come from provider status callbacks.
+    status: str                      # sent | blocked | failed | not_configured
     reason: str = ""
     message_id: str = ""
     response: str = ""
@@ -61,41 +61,56 @@ class WaResult:
 
 
 def is_configured() -> bool:
-    from app.services import whatsapp_evolution as transport
+    # Asks the one transport rather than looking for a provider key of its
+    # own — two answers to "can we send" is how three transports happened.
+    from app.services import whatsapp_aisensy as transport
     return transport.config_status()[0]
 
 
 def consent_check(lead) -> tuple[bool, str]:
-    """May we send this lead a WhatsApp message via the API?
+    """
+    May we send this lead a WhatsApp message via the API?
 
-    This is the final send-boundary gate. It deliberately requires all three
-    facts on the current lead: a verified WhatsApp number, a completed AI call,
-    and explicit WhatsApp consent created by that AI call. A generic
-    consent_status value is not enough because it can represent consent for a
-    different purpose or an older workflow.
+    Returns (allowed, reason). Deliberately strict: an unknown consent state is
+    a NO, never a maybe.
     """
     status = (getattr(lead, "consent_status", None) or "UNKNOWN").upper()
     if getattr(lead, "do_not_call", False):
         return False, "lead is on do-not-contact"
+    if status in CONSENT_OK:
+        # Consent is granted for a NUMBER, recorded at consent_phone; the row
+        # can still drift (re-enrichment, a manual fix, a corruption bug) so
+        # that phone/whatsapp_number no longer match what actually opted in.
+        # Only enforced when consent_phone was captured -- NULL means this
+        # consent predates the field or came from a provenance that doesn't
+        # set it (e.g. phone_intelligence's FOUNDER_CALL), and those keep
+        # behaving exactly as before.
+        bound_to = (getattr(lead, "consent_phone", None) or "").strip()
+        if bound_to:
+            from app.services.identity import digits_only
 
-    phone = (getattr(lead, "whatsapp_number", None) or "").strip()
-    if not phone:
-        return False, "no WhatsApp number on record"
-
-    if getattr(lead, "whatsapp_verified", None) is not True:
-        return False, "WhatsApp number is not verified"
-
-    if (getattr(lead, "ai_call_count", 0) or 0) < 1:
-        return False, "WhatsApp consent requires a completed AI consent call"
-
-    source = (getattr(lead, "consent_source", None) or "").strip().upper()
-    if status not in CONSENT_OK or source != AI_WHATSAPP_CONSENT_SOURCE:
-        return False, "WhatsApp consent has not been obtained by the AI consent call"
-
-    return True, "verified WhatsApp number + AI-call WhatsApp consent"
+            current = getattr(lead, "whatsapp_number", None) or getattr(lead, "phone", "") or ""
+            if digits_only(current) != digits_only(bound_to):
+                return False, (
+                    "consent was recorded for a different number than the one on "
+                    "file now (consent_phone=%r, current=%r) — an opt-in does not "
+                    "carry over to a changed number" % (bound_to, current)
+                )
+        return True, f"consent recorded: {status}"
+    if (getattr(lead, "status", "") or "") in ENGAGED:
+        return True, "lead replied to us — opt-in + 24h service window open"
+    return False, (
+        f"no opt-in on record (consent_status={status}). Meta requires opt-in before "
+        f"business-initiated WhatsApp. Use the wa.me Send Queue for cold first touch."
+    )
 
 
 def in_service_window(lead) -> bool:
+    """
+    True if the lead messaged us within the last 24h — inside Meta's
+    customer-service window, where free-form (non-template) text is allowed.
+    Outside it, only an approved template may be sent.
+    """
     last = getattr(lead, "last_reply_at", None) or getattr(lead, "last_updated", None)
     if not last or (getattr(lead, "status", "") or "") not in ENGAGED:
         return False
@@ -103,21 +118,25 @@ def in_service_window(lead) -> bool:
 
 
 def _normalise_msisdn(raw: str) -> str:
+    """AiSensy wants a country-coded number without + or separators."""
     d = "".join(ch for ch in (raw or "") if ch.isdigit())
-    if len(d) == 10:
+    if len(d) == 10:            # bare Indian mobile
         d = "91" + d
     return d
 
 
 def _extract_provider_message_id(response_text: str, headers) -> str:
+    """Extract a provider message identifier without assuming one transport shape."""
     header_id = str(headers.get("x-message-id") or headers.get("x-messageid") or "").strip()
     if header_id:
         return header_id
+
     try:
         import json
         body = json.loads(response_text or "{}")
     except Exception:
         return ""
+
     if not isinstance(body, dict):
         return ""
     for key in ("messageId", "message_id", "id", "data"):
@@ -135,14 +154,38 @@ def _extract_provider_message_id(response_text: str, headers) -> str:
 def send_whatsapp(lead, message: str, campaign_name: Optional[str] = None,
                   template_params: Optional[list[str]] = None,
                   timeout: float = 20.0) -> WaResult:
-    """The single WhatsApp send path. Consent first, then the one transport."""
+    """
+    The single WhatsApp send path. Consent first, then the one transport.
+
+    Consent is checked here and nowhere below, on purpose, so no future caller
+    can bypass it by passing the right arguments — and so the transport cannot
+    grow a second opinion about who may be messaged.
+
+    The transport is AiSensy's API campaign endpoint. It was three modules
+    each defining AISENSY_URL and each transmitting -- one of them, the
+    connector, with no consent check at all until it was fixed mid-audit.
+    Then it was Evolution driving Meta's Cloud API. It is AiSensy again now,
+    for a reason that is not preference: the business number already lives in
+    a WhatsApp Business Account under AiSensy, a number belongs to exactly one
+    WABA, and moving it would have broken seven Live campaigns carrying real
+    orders.
+
+    What has not changed through any of that is the shape: ONE transport,
+    reached from here, with consent decided before it is called.
+
+    A successful response means PROVIDER_ACCEPTED only. Delivery and read must
+    be established from webhooks, never inferred from the send call.
+    """
     allowed, reason = consent_check(lead)
     if not allowed:
         return WaResult(status="blocked", reason=reason)
 
-    from app.services import whatsapp_evolution as transport
+    from app.services import whatsapp_aisensy as transport
 
     phone = getattr(lead, "whatsapp_number", None) or getattr(lead, "phone", "") or ""
+    # WHATSAPP_TEMPLATE names a LIVE AiSensy API campaign, which is itself a
+    # binding to one Meta-approved template. AISENSY_CAMPAIGN_NAME is the
+    # older name for the same thing and is still read by the transport.
     template = (campaign_name
                 or os.getenv("WHATSAPP_TEMPLATE")
                 or os.getenv("AISENSY_CAMPAIGN_NAME") or "").strip()

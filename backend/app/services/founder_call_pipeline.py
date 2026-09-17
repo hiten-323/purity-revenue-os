@@ -100,10 +100,49 @@ OUTCOMES: dict[str, str] = {
     # turning a fact into a licence to contact someone.
     "WHATSAPP_OPT_IN": AI_INTEREST_DETECTED,
     "INTERESTED": AI_INTEREST_DETECTED,
+    # Richer interest signals than a bare "yes, interested" — kept as distinct
+    # keys (not folded into INTERESTED) so founder_brief() and reporting can
+    # show which ones actually asked for a next step, without opening a new
+    # TRANSITIONS edge. Promoting AI_INTEREST_DETECTED -> FOUNDER_CALL_REQUESTED
+    # stays request_founder_call()'s job, same as it already is for INTERESTED;
+    # the AI's tool call does not get to skip that step just because the ask
+    # was more specific.
+    "MEETING_REQUESTED": AI_INTEREST_DETECTED,
+    "CALLBACK_REQUESTED": AI_INTEREST_DETECTED,
+    "HUMAN_HANDOFF": AI_INTEREST_DETECTED,
+    # Distinct from WHATSAPP_OPT_IN on purpose: "send me details" without the
+    # word WhatsApp must never manufacture WhatsApp consent — that would be
+    # this codebase's ninth instance of turning a fact (they want info) into
+    # a licence (we may message this channel). Interested enough to want
+    # something sent, consent unresolved either way.
+    "SEND_INFO_EMAIL": AI_INTEREST_DETECTED,
     "NOT_INTERESTED": AI_NOT_INTERESTED,
+    # Right business, wrong individual ("I'm not the decision maker"). Same
+    # disposition as NOT_INTERESTED for this contact path — nothing here
+    # licenses trying a different number at the same business, since that
+    # would need its own phone record and its own eligibility check, not an
+    # inference from this call.
+    "WRONG_PERSON": AI_NOT_INTERESTED,
     "NO_ANSWER": AI_NO_ANSWER,
+    # Engine-detected (voicemail greeting pattern match), not something the
+    # model decides — see livekit-agent.js VOICEMAIL_PATTERNS. Same terminal
+    # stage as NO_ANSWER: this system is one attempt per lead regardless of
+    # who or what picked up (test_no_answer_does_not_license_a_retry).
+    "VOICEMAIL": AI_NO_ANSWER,
+    # Engine-reported on a technical failure (dropped call, provider error)
+    # before any outcome could be established. Same terminal stage as
+    # NO_ANSWER for the same one-shot reason — a failed dial is not evidence
+    # of anything about the lead, but it still consumed the one attempt, and
+    # "the connection dropped" retried indefinitely is its own kind of
+    # unwanted-contact bug.
+    "FAILED": AI_NO_ANSWER,
     "WRONG_NUMBER": AI_WRONG_NUMBER,
     "OPT_OUT": AI_OPTED_OUT,
+    # Catch-all for a real, connected conversation that fits none of the
+    # above. Deliberately conservative: routes to NOT_INTERESTED rather than
+    # INTERESTED, because an unclassifiable result is not evidence of
+    # interest and this system does not get a second attempt to find out.
+    "OTHER": AI_NOT_INTERESTED,
 }
 
 # ----------------------------------------------------------- invariants ----
@@ -156,6 +195,34 @@ OPENING_DISCLOSURE = (
     "time for one quick question?"
 )
 
+# What the AI may NOT say, sent with every dispatch.
+#
+# Tested against the live model before writing this: asked "what is your
+# price?" -- the single most predictable question on a cold coffee call --
+# sarvam-105b-conversations answered "Our wholesale price for Purity Beans
+# instant coffee is Rs 450 per kilogram." Nobody gave it a price. It invented
+# one, fluently, in the voice of the business.
+#
+# The profile's _scope_note already says "the AI never negotiates price or
+# takes an order", but a note in a JSON file is not an instruction to a model.
+# This is.
+#
+# The allowed list mirrors COMPANY_PROFILE in gov_revenue_engine.py. The
+# forbidden list is the same one the email copy has honoured for months: no
+# turnover, no ISO, no capacity, no past government supply, no client names.
+CALL_CONSTRAINTS = (
+    "Never state a price, a discount, or a delivery date. If asked, say the "
+    "founder will confirm exact pricing and offer to have him call.",
+    "Never take an order or commit to a quantity.",
+    "Only these claims are permitted: 100% coffee, zero chicory, no fillers, "
+    "no artificial flavours, FSSAI licensed, GST and MSME registered, "
+    "PAN-India dispatch, food-grade glass jars.",
+    "Never claim turnover, ISO certification, manufacturing capacity, past "
+    "government supply, or name any client.",
+    "If you do not know something, say you will have the founder confirm it. "
+    "Do not guess.",
+)
+
 QUALIFICATION_QUESTIONS = (
     "Are you the person who handles coffee or procurement here?",
     "Are you buying coffee commercially at the moment?",
@@ -203,6 +270,61 @@ def stage_of(lead) -> str:
     return (getattr(lead, "outreach_stage", None) or ELIGIBLE).upper()
 
 
+def is_shared_across_many_leads(value, db, record_id=None) -> bool:
+    """True if this exact phone/WhatsApp number is already on record for
+    identity.SHARED_PHONE_THRESHOLD or more OTHER leads. A real subscriber's
+    number does not simultaneously belong to dozens of unrelated businesses;
+    that pattern is placeholder data, a merge/enrichment bug, or a stale
+    seed — not a dialable, message-able destination for any one of them.
+
+    Lives here rather than in identity.py: it needs B2BLead, and identity
+    must stay a leaf module (test_identity_imports_nothing_from_the_app) so
+    every service that already depends on it — including this one — can do
+    so without a cycle. outreach_orchestrator already imports from this
+    module, so its two WhatsApp gates reuse this instead of a third copy.
+
+    Compares normalised digits in Python rather than a SQL LIKE on the raw
+    column: stored numbers use inconsistent separators ("+91-73260-59369"
+    vs "+91 73260 59369"), and a dash-vs-space mismatch would silently make
+    a LIKE-based version a no-op — found by this function's own test failing
+    against a realistically-formatted number, not by inspection.
+    """
+    import re as _re
+
+    from app.services.identity import SHARED_PHONE_THRESHOLD
+
+    if not value or db is None:
+        return False
+    digits = _re.sub(r"\D", "", str(value))
+    if not digits:
+        return False
+    target_tail = digits[-10:]
+
+    from sqlalchemy import or_
+    from app.models.models import B2BLead
+
+    # Both columns: the 2026-09-15 incident this guards against put the same
+    # placeholder value in whatsapp_number on some rows and phone on others,
+    # so a number that looks clean in one column can still be the same
+    # contaminated value seen from the other. A cheap non-null prefilter
+    # narrows the scan; the actual comparison is the normalised digit tail.
+    rows = db.query(B2BLead.id, B2BLead.phone, B2BLead.whatsapp_number).filter(
+        or_(B2BLead.phone.isnot(None), B2BLead.whatsapp_number.isnot(None))
+    )
+    if record_id is not None:
+        rows = rows.filter(B2BLead.id != record_id)
+
+    count = 0
+    for _id, phone, wa in rows:
+        for candidate in (phone, wa):
+            if candidate and _re.sub(r"\D", "", str(candidate))[-10:] == target_tail:
+                count += 1
+                break
+        if count >= SHARED_PHONE_THRESHOLD:
+            return True
+    return False
+
+
 def may_place_ai_call(lead) -> tuple[bool, str]:
     """The single authority on whether the ONE cold qualification call is
     permitted. Reasons are returned, never raised, so a batch reports instead
@@ -230,6 +352,30 @@ def may_place_ai_call(lead) -> tuple[bool, str]:
     phone = (getattr(lead, "phone", "") or "").strip()
     if not phone:
         return False, "no phone on record"
+
+    # A phone that exists is not the same question as a phone that is real.
+    # These two detectors already existed (contact_enricher's fabrication
+    # sweep found 67 id-derived fake numbers live on 2026-07-17) but were
+    # only ever wired into a MANUAL, on-demand cleanup endpoint
+    # (endpoints.quarantine_fabricated) — never into this gate. A fabricated
+    # number introduced after the last manual run would pass every other
+    # check here and could be dialed; at best that wastes the one attempt
+    # this lead ever gets, at worst an id-derived digit run coincides with a
+    # real subscriber who never asked to be called.
+    from app.services import identity
+    if identity.is_fabricated_pattern(phone):
+        return False, f"phone looks fabricated (placeholder pattern): {phone}"
+    if identity.is_id_derived_phone(phone, getattr(lead, "id", None)):
+        return False, f"phone looks mechanically derived from this lead's own id: {phone}"
+    # object_session, not a new db parameter: lead is already loaded through
+    # one, and every existing caller of may_place_ai_call(lead) would need to
+    # start passing a session otherwise. See is_shared_across_many_leads
+    # above for why this check exists — containment for an unroot-caused
+    # incident, not a fix for its cause.
+    from sqlalchemy.orm import object_session
+    _session = object_session(lead)
+    if _session is not None and is_shared_across_many_leads(phone, _session, getattr(lead, "id", None)):
+        return False, f"phone is on record for {identity.SHARED_PHONE_THRESHOLD}+ other leads — not a dialable number for this one: {phone}"
 
     allowed, why = preference_registry.check(phone)
     if not allowed:
@@ -348,6 +494,37 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
         lead.consent_status = "EXPLICIT"
         lead.consent_source = "AI_CALL_WHATSAPP_REQUEST"
         lead.consent_timestamp = datetime.utcnow()
+        # Bound to the number this opt-in actually covers -- the same
+        # resolution order whatsapp_sender.send_whatsapp() uses to pick a
+        # destination, so what gets checked at send time is the same number
+        # consent was captured against. Without this, consent lives on the
+        # LEAD ROW rather than the number, so a later change to phone/
+        # whatsapp_number would silently inherit an opt-in nobody at that
+        # number ever gave (see whatsapp_sender.consent_check()).
+        lead.consent_phone = (
+            (getattr(lead, "whatsapp_number", None) or getattr(lead, "phone", "") or "").strip()
+            or None
+        )
+
+        # Consent alone doesn't reach decision_engine.evaluate_next_action —
+        # its commitment system (BLOCKER_ORDER, _OPEN_COMMITMENTS) only sees a
+        # promise from a NEXT_ACTION_SET event, which is how
+        # phone_intelligence.log_call already reports this exact real-world
+        # event (outcome WHATSAPP_CONSENT) for a human-logged call. Without
+        # this, the trust/record-quality gates ahead of the commitment check
+        # in evaluate_next_action can block or delay a lead who just asked
+        # for WhatsApp on a live call the same as any untouched cold lead —
+        # the commitment gate exists specifically to outrank those for a
+        # promise already made, and it can't do that for a promise it was
+        # never told about.
+        from app.models.models import WorkflowEvent
+        db.add(WorkflowEvent(
+            lead_id=lead.id, event_type="NEXT_ACTION_SET", actor="SYSTEM",
+            channel="phone",
+            payload={"action": "SEND_WHATSAPP",
+                     "detail": "consent given on AI call — WhatsApp now permitted",
+                     "from_outcome": "WHATSAPP_OPT_IN", "blocked": None},
+            occurred_at=datetime.utcnow()))
 
     if target == AI_OPTED_OUT:
         lead.do_not_call = True

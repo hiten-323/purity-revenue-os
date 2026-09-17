@@ -196,6 +196,16 @@ class B2BLead(Base):
     consent_status = Column(String, default="UNKNOWN", nullable=True)
     consent_source = Column(String, nullable=True)
     consent_timestamp = Column(DateTime, nullable=True)
+    # The number consent actually covers, captured at the moment it was
+    # granted. consent_status lives on the LEAD ROW, not on a phone number --
+    # so without this, a later change to phone/whatsapp_number (re-enrichment,
+    # a manual correction, or the 2026-09-15 class of corruption bug) would
+    # silently carry an old opt-in over to a number that never gave it.
+    # whatsapp_sender.consent_check() refuses to send when the current number
+    # no longer matches. NULL for consent recorded before this existed, or for
+    # a provenance that doesn't set it -- those keep behaving exactly as
+    # before (see consent_check's guard).
+    consent_phone = Column(String, nullable=True)
 
     # AI-qualification -> founder-call pipeline (founder_call_pipeline.py).
     # Deliberately NOT folded into consent_status: whatsapp_sender.CONSENT_OK,

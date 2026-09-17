@@ -385,10 +385,31 @@ def read_root():
 
 @app.get("/health")
 def health_check(db: Session = Depends(get_db)):
+    """Report what is actually true, and fail only on what is actually needed.
+
+    The database is a real dependency: if it is unreachable this process
+    cannot do its job, so that stays fatal.
+
+    Redis is not. It appears in exactly one place in this codebase -- the line
+    below. Nothing reads from it, nothing writes to it, and no Redis server has
+    ever run on this host. Making its absence return 503 meant a working system
+    reported itself as down for a component that does nothing, and anything
+    watching /health would flap forever.
+
+    So its presence is now DECLARED rather than assumed, in either direction.
+    REDIS_REQUIRED=1 restores the strict behaviour the moment something
+    genuinely depends on it. Either way the real state is reported: "healthy"
+    with "redis": "disconnected" is not a lie, it is the truth about a
+    component that is not required.
+    """
+    redis_required = (os.getenv("REDIS_REQUIRED", "0") or "0").strip().lower() in (
+        "1", "true", "yes", "on")
+
     health_status = {
         "status": "healthy",
         "database": "disconnected",
-        "redis": "disconnected"
+        "redis": "disconnected",
+        "redis_required": redis_required,
     }
 
     try:
@@ -402,8 +423,11 @@ def health_check(db: Session = Depends(get_db)):
         r = redis.from_url(redis_url, socket_timeout=1.0, socket_connect_timeout=1.0)
         if r.ping():
             health_status["redis"] = "connected"
+        elif redis_required:
+            health_status["status"] = "unhealthy"
     except Exception:
-        health_status["status"] = "unhealthy"
+        if redis_required:
+            health_status["status"] = "unhealthy"
 
     from fastapi.responses import JSONResponse
     return JSONResponse(

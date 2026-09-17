@@ -29,6 +29,21 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+# Load .env HERE rather than relying on the entry point (or some other
+# module's import order) to have done it — see email_sender.py for the
+# incident this pattern was already introduced to fix: a bare os.getenv()
+# only sees a credential in processes that happened to import a module
+# which called load_dotenv() first, so "connected" silently varies by
+# which code path ran first. connected()/status() below must be correct
+# regardless of import order, since a false NOT_CONNECTED is exactly the
+# kind of wrong answer this module exists to prevent.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "..", ".env"))
+except Exception as _e:
+    print(f"[marketplace_director] .env load skipped: {_e}")
+
 # Capabilities every marketplace shares. The Director aggregates these.
 COMMON = ("sales", "orders", "inventory", "pricing", "reviews", "listings")
 

@@ -1,9 +1,49 @@
 """V3 acceptance tests — real API, real DB, cleaned up after."""
 import sys, httpx
 import os
-_EXPECT_TREE = os.getenv(
-    "V3_TREE",
-    r"C:\Users\hiten\Desktop\ppp\claude\CODE\purity_beans_ai\jules_session\backend")
+from pathlib import Path
+
+# Explicit opt-in, checked before anything else, including the sys.path
+# manipulation below. This file is not pytest-style (no def test_* — it is a
+# linear script with module-level side effects), so pytest still IMPORTS it
+# during ordinary collection even though it collects zero test items from it.
+# Before this gate, that import ran the entire script -- every HTTP call,
+# every write to the live production database, the sleep-through-history
+# 21-check sequence -- as an unrequested side effect of `pytest tests/`,
+# taking ~2 minutes and mutating real leads on every routine suite run.
+#
+# The tree-mismatch skip a few lines down USED to prevent this by accident:
+# while the legacy jules_session tree existed, _EXPECT_TREE's old default
+# pointed at it, so the mismatch check was almost always true under normal
+# pytest collection and skipped. Once that default was corrected to point at
+# this repository's own tree (the fix for the tree actually being gone), the
+# accidental protection went with it -- the paths now match, so that check no
+# longer skips anything. A test that mutates production must never depend on
+# an accident for its opt-in; it needs one on purpose. Mirrors
+# test_system_integrity.py's SYSTEM_INTEGRITY convention.
+if os.getenv("V3_ACCEPTANCE", "0").strip().lower() not in ("1", "true", "yes", "on"):
+    if "pytest" in sys.modules:
+        import pytest
+        pytest.skip(
+            "V3 acceptance suite mutates the live production database and "
+            "does not run by default. Set V3_ACCEPTANCE=1 and run it in its "
+            "own process: python tests/test_outreach_v3_acceptance.py",
+            allow_module_level=True)
+    print("V3 acceptance suite mutates the live production database and "
+         "does not run by default.\nSet V3_ACCEPTANCE=1 to run it: "
+         "V3_ACCEPTANCE=1 python tests/test_outreach_v3_acceptance.py")
+    sys.exit(0)
+
+# The legacy jules_session tree this default once pointed at is gone —
+# deleted 2026-09-16 as the confirmed source of repeated wrong-tree incidents
+# (a stale pm2 dump serving it, Python 3.11 vs this tree's 3.12, a database
+# frozen since 2026-09-08). Its removal made this test both unrunnable
+# standalone (ModuleNotFoundError: no `app` on sys.path at all) and
+# permanently skipped under pytest (the mismatch check below always failed,
+# since nothing imports from a path that no longer exists). The correct
+# default is this repository's own backend — the tree that has been correct
+# since the deletion, not a relic of the tree that was wrong.
+_EXPECT_TREE = os.getenv("V3_TREE", str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, _EXPECT_TREE)
 
 # Python caches modules: if another suite in this pytest session already
@@ -16,12 +56,15 @@ import app.database.database as _dbmod
 if not os.path.abspath(_dbmod.__file__).startswith(os.path.abspath(_EXPECT_TREE)):
     import pytest
     # Undo the sys.path.insert before skipping. Skipping protects THIS file,
-    # but the insert leaks: jules_session stays at sys.path[0] for the rest of
-    # the session, so every module imported for the first time afterwards binds
-    # to the legacy tree instead of this one. That is how
-    # test_phone_provenance_guard came to import contact_enricher from
-    # jules_session and fail on a symbol that exists only here — a suite that
-    # does not even run was silently repointing the ones that do.
+    # but the insert leaks: whatever _EXPECT_TREE names stays at sys.path[0]
+    # for the rest of the session, so every module imported for the first
+    # time afterwards binds to that tree instead of the one pytest already
+    # loaded. That is how test_phone_provenance_guard once came to import
+    # contact_enricher from the (now-deleted) legacy jules_session tree and
+    # fail on a symbol that existed only in the current one — a suite that
+    # does not even run was silently repointing the ones that do. The
+    # legacy tree is gone, but the leak this guards against is general, not
+    # specific to it.
     try:
         sys.path.remove(_EXPECT_TREE)
     except ValueError:
@@ -36,14 +79,39 @@ from app.models.models import B2BLead, ActionQueue, LeadInteraction, WorkflowEve
 
 # Integration suite against a LIVE server. sys.path above deliberately points
 # at the deployed tree, because this file's database MUST be the same one the
-# API is serving — repointing the path at this repo while the API still runs
-# jules_session makes it create a lead through the API and then fail to find it
-# locally. Repoint both together at deploy time, never one alone.
+# API is serving — pointing this file at a different tree than the one the
+# API process is actually running from makes it create a lead through the
+# API and then fail to find it locally. Repoint both together at deploy
+# time, never one alone.
 #
 # Port is overridable: the API has run on 8001 and 8003, and a hardcoded port
 # turns "server on another port" into a hard failure.
 import os
 B = os.getenv("API_BASE", "http://127.0.0.1:8003/api/v1")
+
+# Every mutating call below (call-outcome, discovery/run) started failing with
+# 401 {"detail":"admin authentication required"} the day app.api.auth's
+# require_api_admin middleware shipped -- this suite predates it and never
+# sent the header. The failures did not read as auth failures: this file's
+# own .json() call on the 401 body then raised KeyError('next_action'),
+# which looks like a missing field on a broken endpoint, not a missing
+# header on an old test. Read from .env exactly like every other script in
+# this repo -- never hardcoded, never printed.
+def _admin_headers() -> dict:
+    env_path = os.path.join(_EXPECT_TREE, ".env")
+    secret = os.getenv("API_ADMIN_SECRET", "")
+    if not secret and os.path.exists(env_path):
+        for line in open(env_path, encoding="utf-8"):
+            if line.strip().startswith("API_ADMIN_SECRET="):
+                secret = line.strip().split("=", 1)[1].strip()
+                break
+    if not secret:
+        print("  WARNING: API_ADMIN_SECRET not found -- mutating calls will 401")
+        return {}
+    return {"x-api-admin-secret": secret}
+
+
+ADMIN = _admin_headers()
 
 # Module-level code runs at IMPORT, so any failure here aborts pytest collection
 # for the whole directory — one unreachable server took down every other suite.
@@ -97,7 +165,7 @@ before_mail = db.query(B2BLead).filter(B2BLead.email != "",
 # ---- TEST C: phone -> email becomes a FOLLOW-UP, not an intro -------------
 LID = p["power_hour"][0]["lead_id"]
 company = p["power_hour"][0]["company"]
-o = httpx.post(f"{B}/b2b/outreach/call-outcome/{LID}", timeout=120, json={
+o = httpx.post(f"{B}/b2b/outreach/call-outcome/{LID}", timeout=120, headers=ADMIN, json={
     "outcome": "SEND_DETAILS", "email": "buyer@testco-v3.example",
     "decision_maker": "Rajesh Sharma",
     "remark": "Interested. Send details."}).json()
@@ -117,7 +185,7 @@ check("C4 the business no longer qualifies for an INTRO email",
       len(still_intro) == 0)
 
 # ---- TEST D: phone -> WhatsApp ------------------------------------------
-o2 = httpx.post(f"{B}/b2b/outreach/call-outcome/{LID}", timeout=120, json={
+o2 = httpx.post(f"{B}/b2b/outreach/call-outcome/{LID}", timeout=120, headers=ADMIN, json={
     "outcome": "SEND_WHATSAPP", "remark": "Send catalogue on WhatsApp."}).json()
 check("D1 SEND_WHATSAPP switches the channel to whatsapp",
       o2["channel"] == "whatsapp" and o2["next_action"] == "WHATSAPP",
@@ -127,7 +195,7 @@ check("D2 the stale email action was cancelled",
       f"cancelled {o2['next_action_state']['cancelled']}")
 
 # ---- TEST E: no answer is not rejection ---------------------------------
-o3 = httpx.post(f"{B}/b2b/outreach/call-outcome/{LID}", timeout=120, json={
+o3 = httpx.post(f"{B}/b2b/outreach/call-outcome/{LID}", timeout=120, headers=ADMIN, json={
     "outcome": "NO_ANSWER"}).json()
 db.expire_all()
 lead = db.query(B2BLead).get(LID)
@@ -145,7 +213,7 @@ for k in ("GATEKEEPER", "INTERESTED", "CALL_LATER", "EXISTING_SUPPLIER",
           "SAMPLE_REQUESTED", "MEETING_REQUESTED", "PRICE_OBJECTION",
           "WRONG_PERSON", "BUSY", "SEND_PRICING"):
     rr = httpx.post(f"{B}/b2b/outreach/call-outcome/{LID}", timeout=120,
-                    json={"outcome": k}).json()
+                    headers=ADMIN, json={"outcome": k}).json()
     st = rr["next_action_state"]
     if not (st["ok"] and st["active_now"] == 1):
         ok_all = False
@@ -154,7 +222,7 @@ check("F1 every non-terminal outcome leaves EXACTLY ONE next action", ok_all)
 
 # terminal outcomes correctly leave zero
 rt = httpx.post(f"{B}/b2b/outreach/call-outcome/{LID}", timeout=120,
-                json={"outcome": "NOT_INTERESTED"}).json()
+                headers=ADMIN, json={"outcome": "NOT_INTERESTED"}).json()
 check("F2 a terminal outcome leaves zero next actions and says so",
       rt["next_action_state"]["active_now"] == 0 and rt["terminal"] is True)
 db.expire_all()
@@ -163,7 +231,7 @@ check("F3 NOT_INTERESTED closes the opportunity",
 
 # ---- TEST G: suppression -------------------------------------------------
 rd = httpx.post(f"{B}/b2b/outreach/call-outcome/{LID}", timeout=120,
-                json={"outcome": "DO_NOT_CONTACT"}).json()
+                headers=ADMIN, json={"outcome": "DO_NOT_CONTACT"}).json()
 db.expire_all()
 lead = db.query(B2BLead).get(LID)
 check("G1 DO_NOT_CONTACT suppresses the business",
@@ -219,7 +287,7 @@ db.add(evt_a)
 db.commit()
 
 # Call discovery run API
-run_res = httpx.post(f"{B}/discovery/run", json={
+run_res = httpx.post(f"{B}/discovery/run", headers=ADMIN, json={
     "segment": "",
     "cities": [],
     "radius": "punjab",
@@ -268,11 +336,18 @@ db.delete(lead_a)
 db.delete(lead_b)
 db.commit()
 
-if not is_ok:
-    print("Acceptance Test Failed: Buying Intent Dominance violated!")
-    sys.exit(1)
-
-# ---- cleanup -----------------------------------------------------------
+# ---- cleanup -------------------------------------------------------------
+# Moved AHEAD of the is_ok exit below on purpose. It used to sit after it, so
+# a failing Test I hit sys.exit(1) and skipped this block entirely -- every
+# write this script made to the real production lead LID (fabricated test
+# email, decision_maker, status) stayed there permanently. That is exactly
+# how leads 132 and 177 ended up carrying "buyer@testco-v3.example" /
+# "Rajesh Sharma" in production for weeks, found and cleaned 2026-09-16 --
+# this script's own past failed runs, not a bug anywhere else. A test that
+# mutates real production rows must clean up unconditionally, success or
+# failure, or it is not "cleaned up after" (the module docstring's promise),
+# it is "cleaned up after, unless the thing being tested is broken" -- which
+# is backwards: a broken feature is exactly when you most need the mess gone.
 db.query(LeadInteraction).filter(LeadInteraction.lead_id == LID).delete()
 db.query(ActionQueue).filter(ActionQueue.lead_id == LID).delete()
 db.query(WorkflowEvent).filter(
@@ -292,3 +367,7 @@ db.close()
 
 print(f"\n  {sum(res)}/{len(res)} passed")
 print(f"  test lead {LID} ({company}) restored to DISCOVERED, test rows removed")
+
+if not is_ok:
+    print("Acceptance Test Failed: Buying Intent Dominance violated!")
+    sys.exit(1)

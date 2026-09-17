@@ -82,6 +82,30 @@ def main() -> int:
         for reason, n in r["top_blockers"][ch]:
             print(f"            {n:>6}  {reason}")
         print()
+    # Reported separately, and deliberately not as a fifth channel.
+    # The four above are what the SYSTEM can reach unaided. This one is what
+    # the FOUNDER can reach by hand, and printing it in the same list would
+    # invite planning automated touches against founder minutes.
+    #
+    # It is here because "whatsapp reachable 0" is true of the API channel
+    # and false of WhatsApp as a whole, and a report that stops at the first
+    # number tells the founder they have no WhatsApp channel when they do.
+    db = SessionLocal()
+    try:
+        from app.models.models import B2BLead
+        with_number = (db.query(B2BLead)
+                         .filter(B2BLead.whatsapp_number.isnot(None),
+                                 B2BLead.whatsapp_number != "")
+                         .all())
+        manual = sum(1 for l in with_number if o.manual_whatsapp_ok(l, db)[0])
+    finally:
+        db.close()
+
+    print(f"  {'wa (manual)':<9} reachable {manual}"
+          f"   <- founder sends these personally; no Meta approval needed")
+    print(f"            {len(with_number) - manual:>6}  suppressed, or the number is not dialable")
+    print("            run: python scripts/whatsapp_queue.py")
+
     print("Every number above is a count of rows, not an estimate.")
     return 0
 

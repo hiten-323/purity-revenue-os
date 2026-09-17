@@ -7,7 +7,7 @@ A sweep for duplicated definitions found the same concepts implemented
 repeatedly, and — the part that matters — the copies had drifted:
 
     normalise_msisdn   2 implementations, and they DISAGREED:
-                         "09876543210" -> 919876543210  (whatsapp_evolution)
+                         "09876543210" -> 919876543210  (whatsapp_aisensy)
                                        -> 09876543210   (whatsapp_gateway)
                        The second is not a dialable destination. A test in this
                        repo already said "two normalisers that disagree send to
@@ -108,6 +108,60 @@ def is_landline(value) -> bool:
 
 def is_mobile(value) -> bool:
     return not is_landline(value)
+
+
+# Promoted from app/api/endpoints.py's private _is_placeholder_phone /
+# _is_id_derived_phone (2026-07-17 audit: 67 leads found live carrying
+# id-derived fake numbers, e.g. +91-98765-00156 on lead 156). Those detectors
+# were only ever wired into a manual, on-demand cleanup endpoint
+# (quarantine_fabricated) — never into the actual calling eligibility gate,
+# so a fabricated number introduced after the last manual run would still
+# pass may_place_ai_call() and could be dialed. Moved here so both the
+# cleanup endpoint and the calling gate read the same definition, the same
+# reason every other phone/email rule in this module was consolidated: two
+# copies agree on the day they're written and silently disagree later.
+def is_fabricated_pattern(value) -> bool:
+    """Digit-run / sequence placeholders: 8888888888, 9999999999, 12345…"""
+    if not value:
+        return False
+    digits = re.sub(r"\D", "", str(value))
+    core = digits[-10:] if len(digits) >= 10 else digits
+    if len(set(core)) <= 2:
+        return True
+    return bool(re.search(r"(12345|00000|11111)", core))
+
+
+def is_id_derived_phone(value, record_id) -> bool:
+    """A number mechanically generated from the record's own id (e.g. the
+    phone ends in the row id zero-padded to 5 digits). The odds of a real
+    phone number ending in the exact zero-padded id of the row it's stored
+    on are effectively zero, so this is a safe, specific signal — unlike
+    is_fabricated_pattern, it can't false-positive on a genuine number."""
+    if not value or record_id is None:
+        return False
+    digits = re.sub(r"\D", "", str(value))
+    tail = digits[-5:] if len(digits) >= 5 else digits
+    return tail == str(record_id).zfill(5)
+
+
+# Threshold for founder_call_pipeline.is_shared_across_many_leads. Kept here
+# (a plain int, no import needed) rather than there, so every module that
+# already imports identity's other constants sees this one too.
+#
+# Found 2026-09-15: a still-unroot-caused process was silently overwriting
+# freshly-created leads' phone numbers with +91-73260-59369 within ~2-10
+# minutes of creation — already present on 150+ otherwise-unrelated leads
+# (cafes, hospitals, government offices, industrial firms) in this database.
+# Neither is_fabricated_pattern nor is_id_derived_phone catches it: the
+# number is a plausible, well-formed Indian mobile number: the tell is
+# social, not lexical, and only visible by looking at how many DIFFERENT
+# businesses supposedly answer it. The check itself lives in
+# founder_call_pipeline, not here — it needs B2BLead, and this module must
+# stay a leaf (test_identity_imports_nothing_from_the_app) so every service
+# that already depends on identity can keep doing so without a cycle. A
+# phone shared by a handful of leads (e.g. a shared reception desk) is not
+# impossible, so the threshold is set well below the observed 150+, not at 2.
+SHARED_PHONE_THRESHOLD = 5
 
 
 # --------------------------------------------------------------- email --

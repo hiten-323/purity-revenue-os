@@ -33,15 +33,21 @@ def test_schema_compatibility_accepts_matching_schema():
     assert_schema_compatible(engine, metadata)
 
 
-def test_health_is_unhealthy_when_required_redis_is_unavailable(monkeypatch):
+def _unavailable_redis(monkeypatch):
     import app.main as main
 
     class _UnavailableRedis:
         def ping(self):
             raise ConnectionError("redis unavailable")
 
-    monkeypatch.setattr(main.redis, "from_url", lambda *args, **kwargs: _UnavailableRedis())
-    db = SimpleNamespace(execute=lambda statement: True)
+    monkeypatch.setattr(main.redis, "from_url", lambda *a, **k: _UnavailableRedis())
+    return main, SimpleNamespace(execute=lambda statement: True)
+
+
+def test_health_is_unhealthy_when_required_redis_is_unavailable(monkeypatch):
+    """The original assertion, kept, behind the flag that now declares it."""
+    monkeypatch.setenv("REDIS_REQUIRED", "1")
+    main, db = _unavailable_redis(monkeypatch)
 
     response = main.health_check(db)
 
@@ -50,7 +56,43 @@ def test_health_is_unhealthy_when_required_redis_is_unavailable(monkeypatch):
         "status": "unhealthy",
         "database": "connected",
         "redis": "disconnected",
+        "redis_required": True,
     }
+
+
+def test_health_is_healthy_when_redis_is_not_required(monkeypatch):
+    """Redis appears in exactly one place in this codebase: the health check.
+
+    Nothing reads it, nothing writes it, and no Redis server has ever run on
+    this host. Reporting 503 for it meant a working system called itself down
+    for a component that does nothing. The state is still reported honestly --
+    "redis": "disconnected" -- it just is not fatal.
+    """
+    monkeypatch.delenv("REDIS_REQUIRED", raising=False)
+    main, db = _unavailable_redis(monkeypatch)
+
+    response = main.health_check(db)
+
+    assert response.status_code == 200
+    body = json.loads(response.body)
+    assert body["status"] == "healthy"
+    assert body["redis"] == "disconnected", "the real state must still be reported"
+    assert body["redis_required"] is False
+
+
+def test_the_database_is_still_fatal(monkeypatch):
+    """Relaxing Redis must not have relaxed the dependency that is real."""
+    import app.main as main
+
+    def _boom(statement):
+        raise RuntimeError("database gone")
+
+    monkeypatch.delenv("REDIS_REQUIRED", raising=False)
+    response = main.health_check(SimpleNamespace(execute=_boom))
+
+    assert response.status_code == 503
+    assert json.loads(response.body)["database"] == "disconnected"
+
 
 
 def _gateway_client(monkeypatch):

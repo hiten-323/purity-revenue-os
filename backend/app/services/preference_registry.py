@@ -38,6 +38,23 @@ import re
 import threading
 from typing import Iterable
 
+# Load .env HERE rather than relying on some other module's import order to
+# have done it first — see email_sender.py for the incident this pattern
+# exists to prevent. This module fails CLOSED (an unconfigured registry
+# refuses every cold call rather than allowing one), so the risk of the
+# missing-load version of this bug is not a compliance breach — it is every
+# cold call in a given process silently refusing with "no preference
+# registry configured" while DND_SUPPRESSION_FILE sits correctly set in
+# backend/.env, unnoticed for exactly the reason the "0 replies" email
+# incident went unnoticed: a fail-safe with no alarm looks identical to
+# a quiet day.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "..", ".env"))
+except Exception as _e:
+    print(f"[preference_registry] .env load skipped: {_e}")
+
 _lock = threading.Lock()
 _cache: set[str] | None = None
 _cache_key: tuple[str, float, int] | None = None

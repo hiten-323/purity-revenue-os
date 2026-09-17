@@ -20,7 +20,7 @@ import httpx
 # No module-level endpoint any more, deliberately. Three modules each held
 # a copy of AISENSY_URL and each POSTed to it; the endpoint being a
 # convenient constant is what made adding a third transport trivial.
-# whatsapp_evolution owns the destination now.
+# whatsapp_aisensy owns the destination now.
 
 logger = logging.getLogger("whatsapp_gateway.client")
 
@@ -50,13 +50,12 @@ class ProviderResult:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
-def _api_key() -> str:
-    return (os.getenv("EVOLUTION_API_KEY") or "").strip()
-
-
+# Asked of the transport, not answered here. This module used to read
+# EVOLUTION_API_KEY directly, which meant "can we send?" had two answers the
+# moment the transport changed -- and it changed.
 def is_configured() -> bool:
-    key = _api_key()
-    return bool(key and key not in ("", "your_evolution_api_key_here"))
+    from app.services import whatsapp_aisensy as transport
+    return transport.config_status()[0]
 
 
 # Imported, not reimplemented. This module's own version left the national
@@ -66,51 +65,10 @@ def is_configured() -> bool:
 from app.services.identity import msisdn as normalise_msisdn
 
 
-def extract_message_id(response_text: str, headers: Any) -> str:
-    """
-    Extract provider message id without assuming one transport shape.
-    Prefer header, then common JSON keys used by AiSensy / Meta BSPs.
-    """
-    try:
-        header_id = str(
-            (headers.get("x-message-id") if headers else None)
-            or (headers.get("x-messageid") if headers else None)
-            or ""
-        ).strip()
-    except Exception:
-        header_id = ""
-    if header_id:
-        return header_id
-
-    try:
-        body = json.loads(response_text or "{}")
-    except Exception:
-        return ""
-
-    if not isinstance(body, dict):
-        return ""
-
-    for key in ("messageId", "message_id", "id", "wamid"):
-        value = body.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    # Nested shapes seen in some BSP responses
-    for container_key in ("data", "messages", "result"):
-        container = body.get(container_key)
-        if isinstance(container, dict):
-            for key in ("messageId", "message_id", "id", "wamid"):
-                value = container.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-        if isinstance(container, list) and container:
-            first = container[0]
-            if isinstance(first, dict):
-                for key in ("messageId", "message_id", "id", "wamid"):
-                    value = first.get(key)
-                    if isinstance(value, str) and value.strip():
-                        return value.strip()
-    return ""
+# The transport owns this. A second copy here had already drifted: it looked
+# for key.id and id but not messageId or wamid, so a successful send with a
+# differently-shaped body read as a failure.
+from app.services.whatsapp_aisensy import extract_message_id
 
 
 class WhatsAppGatewayClient:
@@ -144,11 +102,22 @@ class WhatsAppGatewayClient:
         template_params: list[str] | None = None,
         source: str = "purity-whatsapp-gateway",
     ) -> ProviderResult:
-        if not is_configured():
-            return ProviderResult(
-                status="NOT_CONFIGURED",
-                reason="EVOLUTION_API_KEY not set",
-            )
+        """Delegate to the one transport and translate its answer.
+
+        This method used to build its own URL, headers and payload out of
+        whatsapp_evolution's base_url. Borrowing another module's endpoint is
+        not the same as sharing its implementation: it was still a second
+        request, with its own idea of the payload shape, one edit away from
+        drifting. Now there is exactly one place a WhatsApp request is
+        constructed, and this translates SendResult into the ledger's
+        vocabulary.
+
+        Consent is NOT checked here. The gateway's own consent module governs
+        its Klaviyo-sourced callers; whatsapp_sender governs B2B leads. Adding
+        a third opinion in the transport layer is the bug this codebase has
+        produced eight times.
+        """
+        from app.services import whatsapp_aisensy as transport
 
         campaign = (campaign_name or "").strip()
         if not campaign:
@@ -157,77 +126,43 @@ class WhatsAppGatewayClient:
                 reason="campaign_name is required",
             )
 
-        phone = normalise_msisdn(destination)
-        if len(phone) < 11:
-            return ProviderResult(
-                status="INVALID_REQUEST",
-                reason="destination phone is missing or invalid after normalisation",
-            )
-
-        # Evolution API in Meta Cloud API mode, resolved at call time from
-        # whatsapp_evolution — the one module that owns where a WhatsApp
-        # message goes. `campaign` is the Meta-approved template name.
-        from app.services import whatsapp_evolution as transport
-
-        url = f"{transport.base_url()}/message/sendTemplate/{transport.instance()}"
-        headers_out = {"apikey": (os.getenv("EVOLUTION_API_KEY") or "").strip(),
-                       "Content-Type": "application/json"}
-        payload: dict[str, Any] = {
-            "number": phone,
-            "name": campaign,
-            "language": "en",
-        }
-        params = template_params if template_params is not None else [user_name or "there"]
-        if params:
-            payload["components"] = [{
-                "type": "body",
-                "parameters": [{"type": "text", "text": str(p)} for p in params],
-            }]
-
         # Log only safe fields — never the API key.
         logger.info(
-            "whatsapp_send_attempt template=%s destination_len=%s source=%s",
+            "whatsapp_send_attempt campaign=%s destination_len=%s source=%s",
             campaign,
-            len(phone),
+            len(normalise_msisdn(destination)),
             source,
         )
 
-        try:
-            if self._http_client is not None:
-                # Injected client (tests / custom transport)
-                r = self._http_client.post(url, json=payload, headers=headers_out)
-            else:
-                with httpx.Client(timeout=self.timeout) as c:
-                    r = c.post(url, json=payload, headers=headers_out)
+        result = transport.send_template(
+            destination, campaign,
+            params=template_params if template_params is not None else [user_name or "there"],
+            timeout=self.timeout,
+            user_name=user_name,
+            client=self._http_client,
+        )
 
-            body = (getattr(r, "text", None) or "")[:1000]
-            status_code = int(getattr(r, "status_code", 0) or 0)
-            headers = getattr(r, "headers", {}) or {}
-
-            if 200 <= status_code < 300:
-                mid = extract_message_id(body, headers)
-                return ProviderResult(
-                    status="PROVIDER_ACCEPTED",
-                    reason="Evolution accepted the send request; delivery must be confirmed by status webhook",
-                    message_id=mid,
-                    http_status=status_code,
-                    provider_accepted=True,
-                    delivery_confirmed=False,
-                    raw_response_snippet=body[:300],
-                )
-
+        if result.status == "sent":
             return ProviderResult(
-                status="FAILED",
-                reason=f"Evolution HTTP {status_code}",
-                http_status=status_code,
-                raw_response_snippet=body[:300],
+                status="PROVIDER_ACCEPTED",
+                reason=result.reason,
+                message_id=result.message_id,
+                http_status=result.http_status,
+                provider_accepted=True,
+                delivery_confirmed=False,
+                raw_response_snippet=result.response[:300],
             )
-        except Exception as e:
-            # Never include exception args that might echo the request body.
-            return ProviderResult(
-                status="FAILED",
-                reason=f"{type(e).__name__}: transport or timeout error",
-            )
+        if result.status == "not_configured":
+            return ProviderResult(status="NOT_CONFIGURED", reason=result.reason)
+        if result.status == "blocked":
+            return ProviderResult(status="INVALID_REQUEST", reason=result.reason)
+        return ProviderResult(
+            status="FAILED",
+            reason=result.reason,
+            http_status=result.http_status,
+            raw_response_snippet=result.response[:300],
+        )
+
 
 
 # Back-compat: this class was AiSensyClient when there were three AiSensy
