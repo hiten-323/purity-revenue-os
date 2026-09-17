@@ -13,7 +13,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1] / "app"
 
 RULES = [
-    ("RELAXED_GATE", re.compile(r'email_verification_status\s*=\s*"VALID"'),
+    ("RELAXED_GATE", re.compile(r'email_verification_status\s*==\s*"VALID"'),
      "trusts a column any process can write; use contact_trust.sendable()"),
     ("SILENT_SWALLOW", re.compile(r'except\s+Exception\s*:\s*\n\s*pass\s*$', re.M),
      "swallows the reason; log it or narrow the except"),
