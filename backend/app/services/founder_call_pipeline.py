@@ -494,6 +494,37 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
         lead.consent_status = "EXPLICIT"
         lead.consent_source = "AI_CALL_WHATSAPP_REQUEST"
         lead.consent_timestamp = datetime.utcnow()
+        # Bound to the number this opt-in actually covers -- the same
+        # resolution order whatsapp_sender.send_whatsapp() uses to pick a
+        # destination, so what gets checked at send time is the same number
+        # consent was captured against. Without this, consent lives on the
+        # LEAD ROW rather than the number, so a later change to phone/
+        # whatsapp_number would silently inherit an opt-in nobody at that
+        # number ever gave (see whatsapp_sender.consent_check()).
+        lead.consent_phone = (
+            (getattr(lead, "whatsapp_number", None) or getattr(lead, "phone", "") or "").strip()
+            or None
+        )
+
+        # Consent alone doesn't reach decision_engine.evaluate_next_action —
+        # its commitment system (BLOCKER_ORDER, _OPEN_COMMITMENTS) only sees a
+        # promise from a NEXT_ACTION_SET event, which is how
+        # phone_intelligence.log_call already reports this exact real-world
+        # event (outcome WHATSAPP_CONSENT) for a human-logged call. Without
+        # this, the trust/record-quality gates ahead of the commitment check
+        # in evaluate_next_action can block or delay a lead who just asked
+        # for WhatsApp on a live call the same as any untouched cold lead —
+        # the commitment gate exists specifically to outrank those for a
+        # promise already made, and it can't do that for a promise it was
+        # never told about.
+        from app.models.models import WorkflowEvent
+        db.add(WorkflowEvent(
+            lead_id=lead.id, event_type="NEXT_ACTION_SET", actor="SYSTEM",
+            channel="phone",
+            payload={"action": "SEND_WHATSAPP",
+                     "detail": "consent given on AI call — WhatsApp now permitted",
+                     "from_outcome": "WHATSAPP_OPT_IN", "blocked": None},
+            occurred_at=datetime.utcnow()))
 
     if target == AI_OPTED_OUT:
         lead.do_not_call = True

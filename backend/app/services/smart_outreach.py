@@ -159,6 +159,23 @@ def _proven_email_touches(db: Session, lead_id: int) -> list[OutreachTouch]:
     )
 
 
+def _proven_touch(db: Session, lead_id: int, touch_type: str) -> bool:
+    """General one-shot-touch guard, channel-agnostic. Same PROVEN_SEND
+    definition as _proven_email_touches; that one stays name-specific
+    because WARM_ACTIONS is its own list, not because the underlying
+    question is different."""
+    return (
+        db.query(OutreachTouch)
+        .filter(
+            OutreachTouch.lead_id == lead_id,
+            OutreachTouch.touch_type == touch_type,
+            OutreachTouch.status.in_(PROVEN_SEND),
+        )
+        .first()
+        is not None
+    )
+
+
 def classify_lead(db: Session, lead: B2BLead) -> OutreachProfile:
     """Classify from current evidence + recent interaction history.
 
@@ -229,6 +246,24 @@ def classify_lead(db: Session, lead: B2BLead) -> OutreachProfile:
     elif prior_intent in ("OUT_OF_OFFICE", "MACHINE_REPLY", "CALL_LATER"):
         warmth, intent = "CONTACTED", prior_intent
         evidence.append(f"memory:{prior_intent}")
+    elif (
+        (getattr(lead, "consent_source", "") or "") == "AI_CALL_WHATSAPP_REQUEST"
+        and not _proven_touch(db, lead.id, "SEND_CALL_FOLLOWUP")
+    ):
+        # The prospect asked for WhatsApp DURING a live call minutes or hours
+        # ago — the highest-intent, freshest signal this classifier ever
+        # sees, and one the generic warmth ladder below has no way to
+        # recognise (it only reads reply-history text, and a phone call
+        # writes no such text). Before this branch existed, this lead fell
+        # through to COLD/CONTACTED and got the same cold-open message
+        # ("We're introducing Purity Beans...") as a lead who has never
+        # spoken to anyone here — exactly backwards for someone who just
+        # finished a qualification conversation and named the channel
+        # themselves. Guarded by _proven_touch so this fires exactly once:
+        # after the follow-up sends, later cycles fall through to the
+        # normal reply/warmth ladder like any other contacted lead.
+        evidence.append("history:ai_call_whatsapp_opt_in")
+        warmth, intent = "HOT", "AI_CALL_WHATSAPP_FOLLOWUP"
     elif prior_intent in ("PRICING_REQUESTED", "NEGOTIATION") or _mentions(event_text, "PRICING_REQUESTED", "NEGOTIATION"):
         evidence.append("history:pricing_or_negotiation")
         warmth, intent = "HOT", "PRICING_REQUESTED"
@@ -400,6 +435,28 @@ def _wa_text(lead: B2BLead, profile: OutreachProfile) -> str:
     )
 
 
+def _call_followup_text(lead: B2BLead, profile: OutreachProfile) -> str:
+    """The b2b_call_followup message — sent once, only to a lead whose
+    consent_source is AI_CALL_WHATSAPP_REQUEST (see plan_touch above).
+
+    Deliberately references the call rather than opening cold: this
+    prospect already heard the disclosure, already spoke with the AI agent,
+    and already asked for this specific message — repeating the cold-open
+    introduction from _wa_text() here would read as if the call never
+    happened. AiSensy still requires an approved template for this content;
+    AISENSY_CAMPAIGN_CALL_FOLLOWUP names it, separate from whatever campaign
+    handles other touches, because Meta approves exact template text per
+    campaign, not a channel in general.
+    """
+    n = _name(lead)
+    return (
+        f"Hi {n}, Hiten here from Pure Pantry Provisions — following up on our call. "
+        f"As discussed, here's a bit more on Purity Beans for {lead.company or 'your business'}: "
+        "100% coffee, zero chicory, no fillers, FSSAI licensed, PAN-India dispatch. "
+        "Happy to send a sample or set up a quick call with the founder — just let me know which."
+    )
+
+
 # Kept identical to decision_engine's suppression set on purpose. Two modules
 # disagreeing about what "stop contacting them" means is how a buyer who
 # unsubscribed keeps receiving automated outreach.
@@ -500,6 +557,21 @@ def plan_touch(db: Session, lead: B2BLead, profile: OutreachProfile | None = Non
     if profile.intent == "BOUNCED":
         return {"action": "COOLDOWN", "channel": None, "execute": False,
                 "reason": "hard bounce"}
+
+    if profile.intent == "AI_CALL_WHATSAPP_FOLLOWUP":
+        # This is the ONLY place a phone number turning into a WhatsApp send
+        # is conditioned on the call outcome rather than the number merely
+        # existing. consent_status is already EXPLICIT by the time this
+        # fires (record_ai_outcome sets it the moment WHATSAPP_OPT_IN is
+        # recorded — see founder_call_pipeline.py), so this branch is about
+        # picking the right MESSAGE for a lead who just asked for one, not
+        # about permission, which was already decided.
+        return {
+            "action": "SEND_CALL_FOLLOWUP",
+            "channel": "whatsapp",
+            "reason": "prospect asked for WhatsApp during the AI qualification call",
+            "execute": True,
+        }
 
     if profile.intent == "CATALOGUE_REQUESTED":
         # Prefer WA only with recorded consent; else email catalogue.
@@ -671,6 +743,8 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
         )
         if prior:
             return {**decision, "status": "SKIPPED", "reason": "catalogue already sent"}
+    if decision["action"] == "SEND_CALL_FOLLOWUP" and _proven_touch(db, lead.id, "SEND_CALL_FOLLOWUP"):
+        return {**decision, "status": "SKIPPED", "reason": "call follow-up already sent"}
 
     if decision["channel"] == "email":
         from app.services.email_sender import build_outreach_email, send_email
@@ -730,9 +804,25 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
         return {**decision, "status": status, "error": result.error, "message_id": result.message_id}
 
     if decision["channel"] == "whatsapp":
+        import os
+
         from app.services.whatsapp_sender import send_whatsapp
 
-        result = send_whatsapp(lead, _wa_text(lead, profile))
+        if decision["action"] == "SEND_CALL_FOLLOWUP":
+            text = _call_followup_text(lead, profile)
+            # Own campaign, not the generic one: Meta approves exact template
+            # text per campaign, and this content differs from every other
+            # WhatsApp touch this system sends. Falls back to the shared
+            # campaign only if a dedicated one was never configured, so this
+            # doesn't hard-fail a deployment that hasn't set it up yet.
+            campaign = (os.getenv("AISENSY_CAMPAIGN_CALL_FOLLOWUP") or "").strip() or None
+            template_key = "call_followup"
+        else:
+            text = _wa_text(lead, profile)
+            campaign = None
+            template_key = "catalogue_request"
+
+        result = send_whatsapp(lead, text, campaign_name=campaign)
         _record(
             db,
             lead,
@@ -740,7 +830,7 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
             "whatsapp",
             decision["action"],
             result.status.upper(),
-            "catalogue_request",
+            template_key,
             reason=result.reason,
             message_id=result.message_id,
         )

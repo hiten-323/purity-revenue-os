@@ -468,6 +468,33 @@ def test_no_other_outcome_grants_whatsapp(db, registry, outcome):
     assert (lead.consent_status or "UNKNOWN").upper() in ("UNKNOWN", "")
 
 
+def test_whatsapp_opt_in_binds_consent_to_the_number_actually_called(db, registry):
+    """Consent is granted for a NUMBER, not for the lead row in general.
+
+    Without this, a later change to phone/whatsapp_number (re-enrichment, a
+    manual correction, or the 2026-09-15 class of corruption bug that put one
+    fabricated number on 1,166 leads) would silently carry an old opt-in over
+    to a destination that never gave it. consent_phone is what
+    whatsapp_sender.consent_check() checks the current number against.
+    """
+    lead = _lead(db, phone="9876500001")
+    p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN", summary="send it on WhatsApp")
+    db.commit()
+
+    assert lead.consent_phone == "9876500001"
+
+
+def test_whatsapp_opt_in_prefers_whatsapp_number_over_phone_for_binding(db, registry):
+    """Matches send_whatsapp()'s own destination resolution order, so the
+    number consent is checked against at send time is the number it was
+    captured against at grant time."""
+    lead = _lead(db, phone="9876500001", whatsapp_number="9111100002")
+    p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN", summary="send it on WhatsApp")
+    db.commit()
+
+    assert lead.consent_phone == "9111100002"
+
+
 def test_verification_alone_never_grants_whatsapp(db, registry):
     """The link this deliberately does NOT make.
 

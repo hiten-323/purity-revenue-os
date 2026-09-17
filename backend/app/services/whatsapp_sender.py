@@ -78,6 +78,24 @@ def consent_check(lead) -> tuple[bool, str]:
     if getattr(lead, "do_not_call", False):
         return False, "lead is on do-not-contact"
     if status in CONSENT_OK:
+        # Consent is granted for a NUMBER, recorded at consent_phone; the row
+        # can still drift (re-enrichment, a manual fix, a corruption bug) so
+        # that phone/whatsapp_number no longer match what actually opted in.
+        # Only enforced when consent_phone was captured -- NULL means this
+        # consent predates the field or came from a provenance that doesn't
+        # set it (e.g. phone_intelligence's FOUNDER_CALL), and those keep
+        # behaving exactly as before.
+        bound_to = (getattr(lead, "consent_phone", None) or "").strip()
+        if bound_to:
+            from app.services.identity import digits_only
+
+            current = getattr(lead, "whatsapp_number", None) or getattr(lead, "phone", "") or ""
+            if digits_only(current) != digits_only(bound_to):
+                return False, (
+                    "consent was recorded for a different number than the one on "
+                    "file now (consent_phone=%r, current=%r) — an opt-in does not "
+                    "carry over to a changed number" % (bound_to, current)
+                )
         return True, f"consent recorded: {status}"
     if (getattr(lead, "status", "") or "") in ENGAGED:
         return True, "lead replied to us — opt-in + 24h service window open"
