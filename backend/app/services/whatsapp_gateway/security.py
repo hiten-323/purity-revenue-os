@@ -5,14 +5,14 @@ Production rule: fail closed.
   ENVIRONMENT=production  → KLAVIYO_WEBHOOK_SECRET is mandatory.
   Unsigned or missing-secret requests are rejected.
 
-Development rule: if secrets are unset, allow local testing with an explicit
-warning. This bypass MUST NOT apply when ENVIRONMENT=production.
+Development rule: if secrets are unset, reject as well. A webhook without a
+configured secret is never safe to accept.
 
 Supported verification modes (best-effort, provider-agnostic):
   1. Shared secret header: X-Webhook-Secret / X-Klaviyo-Webhook-Secret /
      X-AiSensy-Webhook-Secret must equal the configured secret.
   2. HMAC-SHA256 of raw body using the secret, compared to
-     X-Webhook-Signature / X-Hub-Signature-256 (sha256=<hex> or bare hex).
+     X-Webhook-Signature / X-Hub-Signature-256 as a base64 digest.
 
 Replay protection:
   Klaviyo webhook signature scheme for custom HTTPS webhooks is not fully
@@ -21,6 +21,7 @@ Replay protection:
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import logging
@@ -84,15 +85,15 @@ def _extract_shared_secret_header(headers: Mapping[str, str]) -> str:
         val = (headers.get(key) or "").strip()
         if val:
             return val
-    # Authorization: Bearer <secret>
     auth = (headers.get("authorization") or "").strip()
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
     return ""
 
 
-def _hmac_hex(secret: str, body: bytes) -> str:
-    return hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+def _hmac_base64(secret: str, body: bytes) -> str:
+    digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).digest()
+    return base64.b64encode(digest).decode("ascii")
 
 
 def _check_timestamp(headers: Mapping[str, str]) -> Optional[str]:
@@ -104,10 +105,9 @@ def _check_timestamp(headers: Mapping[str, str]) -> Optional[str]:
         or ""
     ).strip()
     if not ts_raw:
-        return None  # UNKNOWN / not provided by provider
+        return None
     try:
         ts = int(float(ts_raw))
-        # Accept ms or seconds
         if ts > 10_000_000_000:
             ts = ts // 1000
     except Exception:
@@ -126,17 +126,8 @@ def verify_webhook(
     body: bytes,
     secret_env_var: str,
 ) -> AuthResult:
-    """
-    Verify an inbound webhook.
-
-    provider: "klaviyo" | "aisensy" | "sandbox" (for logging only)
-    secret_env_var: e.g. KLAVIYO_WEBHOOK_SECRET or AISENSY_WEBHOOK_SECRET
-    """
-    # Normalise header keys to lowercase
     hdrs = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
-
     secret = _env(secret_env_var)
-    prod = is_production()
 
     if not secret:
         logger.error(
@@ -150,20 +141,17 @@ def verify_webhook(
             mode="none",
         )
 
-    # Timestamp check when provider sends one
     ts_err = _check_timestamp(hdrs)
     if ts_err:
         return AuthResult(allowed=False, reason=ts_err, mode="timestamp")
 
-    # 1) Shared secret header
     provided_secret = _extract_shared_secret_header(hdrs)
     if provided_secret and _constant_time_eq(provided_secret, secret):
         return AuthResult(allowed=True, reason="shared secret matched", mode="shared_secret")
 
-    # 2) HMAC of body
     sig = _extract_signature(hdrs)
     if sig:
-        expected = _hmac_hex(secret, body or b"")
+        expected = _hmac_base64(secret, body or b"")
         if _constant_time_eq(sig, expected):
             return AuthResult(allowed=True, reason="hmac matched", mode="hmac")
 
@@ -175,14 +163,9 @@ def verify_webhook(
 
 
 def require_admin_secret(headers: Mapping[str, str]) -> AuthResult:
-    """
-    Protect internal endpoints (/ledger, /metrics).
-
-    Uses GATEWAY_ADMIN_SECRET. In production the secret is mandatory.
-    """
+    """Protect internal gateway endpoints using GATEWAY_ADMIN_SECRET."""
     hdrs = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
     secret = _env("GATEWAY_ADMIN_SECRET") or _env("KLAVIYO_WEBHOOK_SECRET")
-    prod = is_production()
 
     if not secret:
         return AuthResult(
