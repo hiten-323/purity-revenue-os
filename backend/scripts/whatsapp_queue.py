@@ -1,27 +1,8 @@
 r"""
 The WhatsApp messages the founder should send by hand, highest value first.
 
-WHY THIS EXISTS AND THE API PATH DOES NOT
------------------------------------------
-There are two WhatsApp channels and only one of them is open.
-
-    API  (Evolution -> Meta Cloud API)   business number, automated
-         needs Meta business verification, an approved template, and
-         recorded opt-in. Opt-in is 0 of 1858. The only automated thing
-         that creates opt-in is the AI qualification call, which is waiting
-         on telecom KYC -- so the API channel is blocked behind the same
-         queue it was meant to route around.
-
-    MANUAL (wa.me -> founder's own phone) person-to-person
-         needs nothing from Meta. Costs founder minutes instead.
-
-This prints the second one. It is a queue to pull from, not a list to get
-through: 1307 businesses are eligible and the founder's day is not.
-
-Nothing is sent. Nothing changes a lead's status. A message exists only when
-a human presses send, which is recorded afterwards via the mark-whatsapp
-endpoint or the dashboard. A reply writes EXPLICIT consent, and that consent
-is what eventually opens the API channel legitimately.
+This is a draft queue only. Nothing is sent and no lead is mutated unless the
+operator explicitly opts into journaling with --journal.
 
 Usage
 -----
@@ -29,7 +10,7 @@ Usage
     python scripts/whatsapp_queue.py --limit 10
     python scripts/whatsapp_queue.py --segment distributor
     python scripts/whatsapp_queue.py --csv wa_queue.csv
-    python scripts/whatsapp_queue.py --no-journal      (do not log QUEUED)
+    python scripts/whatsapp_queue.py --journal      (record QUEUED)
 """
 from __future__ import annotations
 
@@ -46,8 +27,8 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=15)
     ap.add_argument("--segment", default="", help="only this segment, e.g. cafe or distributor")
     ap.add_argument("--csv", default="", help="write the queue to a CSV instead of printing links")
-    ap.add_argument("--no-journal", action="store_true",
-                    help="do not record a QUEUED step against each lead")
+    ap.add_argument("--journal", action="store_true",
+                    help="explicitly record a QUEUED step against each lead")
     args = ap.parse_args()
 
     from app.database.database import SessionLocal
@@ -60,7 +41,7 @@ def main() -> int:
     db = SessionLocal()
     try:
         want = args.limit * 20 if args.segment else args.limit
-        rows = manual_whatsapp_queue(db, limit=want, journal=not args.no_journal)
+        rows = manual_whatsapp_queue(db, limit=want, journal=args.journal)
         if args.segment:
             seg = args.segment.strip().lower()
             rows = [r for r in rows if (r.get("segment") or "").lower() == seg][:args.limit]

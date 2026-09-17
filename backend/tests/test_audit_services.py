@@ -38,11 +38,6 @@ RULES = [
      "coerces 'never measured' to 'measured zero'"),
     ("LOCAL_TIME", re.compile(r'datetime\.now\(\)'),
      "local time into a UTC column; use datetime.utcnow()"),
-    # Only IDENTITY and PROVENANCE fields. A default status of DISCOVERED or a
-    # priority of MEDIUM is a legitimate initial state — it asserts nothing about
-    # the business. Defaulting the city, the source, or a person's name asserts a
-    # FACT nobody supplied, which is what put 82 leads under a Google Maps
-    # provenance they never had and a job title on every card.
     ("INVENTED_DEFAULT", re.compile(
         r"""\.get\(\s*["'](?:city|company|contact_name|decision_maker|"""
         r"""lead_source|source|email|phone|website|address|region|"""
@@ -50,18 +45,12 @@ RULES = [
      "asserts a fact about the business that nobody supplied"),
 ]
 
-# Files where a pattern is legitimate, with the reason. Anything not listed here
-# is a finding.
 ALLOW = {
     ("LOCAL_TIME", "business_policies.py"): "calling window is local by design",
     ("LOCAL_TIME", "crew_output_reader.py"): "display-only timestamp",
     ("LOCAL_TIME", "founder_brief.py"): "display-only timestamp",
     ("LOCAL_TIME", "gem_monitor.py"): "days-until countdown, local is correct",
     ("LOCAL_TIME", "timeutil.py"): "the IST conversion layer itself",
-    # `(opens or 0) > 0` guards a None comparison and does not assert a
-    # measurement — the branch it feeds prints "no open recorded", which is the
-    # honest answer for a lead never looked at. The defect this rule exists for
-    # is `or 0` that then gets PRESENTED as a measured zero.
     ("NONE_TO_ZERO", "endpoints.py"): (
         "guards a None comparison; the else-branch says 'no open recorded' "
         "rather than claiming a measured zero"),
@@ -84,7 +73,6 @@ def audit() -> list[dict]:
             for m in rx.finditer(src):
                 ln = src[:m.start()].count("\n") + 1
                 text = lines[ln - 1].strip() if ln <= len(lines) else ""
-                # Prose describing the bug is not the bug.
                 if text.startswith(("#", '"', "'")) or "deliberately NOT" in text:
                     continue
                 findings.append({"rule": name, "file": p.name, "line": ln,
@@ -93,12 +81,6 @@ def audit() -> list[dict]:
 
 
 def coordination() -> list[dict]:
-    """
-    Do the modules that answer the SAME question share one implementation?
-
-    Divergence here is what produced "3 email ready" on a dashboard while the
-    sender refused all three.
-    """
     out = []
     users = {"sendable": [], "actionable": [], "verify_email": [],
              "pitch_for": [], "check_send_allowed": []}
