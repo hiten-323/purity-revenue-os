@@ -26,19 +26,42 @@ import redis
 
 app = FastAPI(title="Purity Beans AI Operating System")
 
+# Read-only does not mean public. These endpoints expose operational, CRM,
+# marketplace, Shopify, webhook or founder data and therefore require the same
+# admin credential as state-changing API routes.
+SENSITIVE_GET_PATHS = {
+    "/api/v1/dashboard",
+    "/api/v1/sales",
+    "/api/v1/inventory",
+    "/api/v1/marketplaces",
+    "/api/v1/recommendations",
+    "/api/v1/founder/dashboard",
+    "/api/v1/founder/decision-dashboard",
+    "/api/v1/crew/status",
+    "/api/v1/shopify/snapshot",
+    "/api/v1/shopify/orders",
+    "/api/v1/shopify/inventory",
+    "/api/v1/webhooks/shopify/events",
+    "/api/v1/settings",
+}
+
 
 @app.middleware("http")
-async def protect_mutating_api(request: Request, call_next):
-    if (
-        request.url.path.startswith("/api/v1/")
+async def protect_api(request: Request, call_next):
+    path = request.url.path
+    is_mutation = (
+        path.startswith("/api/v1/")
         and request.method in {"POST", "PUT", "PATCH", "DELETE"}
-        and not is_protected_webhook_path(request.url.path)
-    ):
+        and not is_protected_webhook_path(path)
+    )
+    is_sensitive_get = request.method == "GET" and path in SENSITIVE_GET_PATHS
+    if is_mutation or is_sensitive_get:
         try:
             require_api_admin(request)
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     return await call_next(request)
+
 
 def _quarantine_unverifiable_addresses():
     try:
@@ -182,6 +205,14 @@ async def startup():
             "consent_status": "VARCHAR DEFAULT 'UNKNOWN'",
             "consent_source": "VARCHAR",
             "consent_timestamp": "DATETIME",
+            "consent_phone": "VARCHAR",
+            "whatsapp_verified": "BOOLEAN",
+            "whatsapp_verified_at": "DATETIME",
+            "outreach_stage": "VARCHAR",
+            "outreach_stage_at": "DATETIME",
+            "ai_call_count": "INTEGER DEFAULT 0",
+            "ai_interest_level": "VARCHAR",
+            "founder_callback_window": "VARCHAR",
             "lead_temperature_score": "FLOAT DEFAULT 0.0",
             "lead_temperature_tier": "VARCHAR",
             "reality_score": "FLOAT DEFAULT 0.0",
