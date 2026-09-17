@@ -1,8 +1,17 @@
 """
 Uvicorn launcher for Windows.
 
-Forces the SelectorEventLoop on Windows so abrupt client disconnects do not
-leave a process listening on the port but unable to accept new requests.
+Why this exists instead of `python -m uvicorn app.main:app`:
+
+On Windows, Python 3.8+ defaults asyncio to the ProactorEventLoop. Uvicorn's
+`--loop asyncio` therefore gets Proactor, which has a long-standing bug: when a
+client disconnects abruptly the accept coroutine can raise
+`OSError [WinError 64] The specified network name is no longer available` and
+die with "Accept failed on a socket". The process stays alive and the port stays
+in LISTENING state, but the server never accepts another connection — so the
+service looks healthy to pm2 while every request times out.
+
+Forcing the SelectorEventLoop avoids that failure mode entirely.
 """
 import asyncio
 import os
@@ -14,19 +23,20 @@ if sys.platform == "win32":
 import uvicorn
 
 if __name__ == "__main__":
+    # This process configured no logging at all, so its root logger had zero
+    # handlers and an effective level of WARNING. Every INFO and DEBUG line in
+    # the API — including email_sender's record of why a send was blocked —
+    # was discarded. uvicorn's own log_level below governs uvicorn; it never
+    # governed ours.
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from app.observability import setup_logging
     setup_logging("api")
 
-    # Apply the idempotent schema delta before uvicorn accepts traffic.
-    from app.database.startup_migrations import run_startup_migrations
-    run_startup_migrations()
-
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
-        port=int(os.getenv("API_PORT", "8003")),
-        loop="asyncio",
+        port=int(__import__("os").getenv("API_PORT", "8003")),
+        loop="asyncio",          # now backed by SelectorEventLoop on Windows
         timeout_keep_alive=75,
         backlog=128,
         log_level="warning",
