@@ -68,12 +68,15 @@ def test_endpoint_fails_closed_with_no_secret_configured(monkeypatch):
 
 
 def test_endpoint_refuses_a_missing_secret(monkeypatch):
+    """require_api_admin answers a missing secret the same way as a wrong one
+    (503, not 401) so a caller cannot use the response to learn whether the
+    admin secret is configured at all -- see auth.py."""
     client, session = _client(monkeypatch)
     lead = _lead(session)
 
     resp = client.post("/api/v1/founder/ai-call-outcome",
                        json={"lead_id": lead.id, "outcome": "NOT_INTERESTED"})
-    assert resp.status_code == 401
+    assert resp.status_code == 503
     assert session.get(B2BLead, lead.id).call_outcome_last is None
 
 
@@ -86,7 +89,7 @@ def test_endpoint_refuses_a_wrong_secret(monkeypatch):
         json={"lead_id": lead.id, "outcome": "NOT_INTERESTED"},
         headers={"X-Api-Admin-Secret": "guessed-wrong"},
     )
-    assert resp.status_code == 401
+    assert resp.status_code == 503
     assert session.get(B2BLead, lead.id).call_outcome_last is None
 
 
