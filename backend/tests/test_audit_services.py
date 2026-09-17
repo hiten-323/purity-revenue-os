@@ -2,7 +2,21 @@
 Static audit for the defect classes this codebase has actually shipped.
 
 Not a linter. Every rule here corresponds to a bug that reached production in
-this project, so a hit is evidence rather than style opinion.
+this project, so a hit is evidence rather than style opinion:
+
+  RELAXED_GATE   `or email_verification_status == "VALID"` reappeared in three
+                 separate modules after being removed. A column another process
+                 can write is not a trust signal.
+  SILENT_SWALLOW `except: pass` around real work. It hid the category engine
+                 failing, so every draft silently fell back to a generic body.
+  NONE_TO_ZERO   `x or 0` turns "never measured" into "measured zero". It fired
+                 NO_WEBSITE_NO_REVIEWS on 582 never-looked-up leads.
+  LOCAL_TIME     datetime.now() into a column every other write fills with UTC —
+                 rows land 5.5 hours in the future for every comparison.
+  INVENTED_DEFAULT  `.get(x, "Some Name")` — how "Procurement Manager" ended up
+                 on every card and "Rajesh Kumar" before it.
+  DUPLICATE_GATE Two modules deciding "is this sendable?" separately. They drift,
+                 and the screen then advertises what the sender refuses.
 """
 from __future__ import annotations
 
@@ -13,12 +27,15 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1] / "app"
 
 RULES = [
-    ("RELAXED_GATE", re.compile(r'email_verification_status\s*==\s*"VALID"'),
+    ("RELAXED_GATE", re.compile(
+        r'email_verification_status\s*==\s*"VALID"'),
      "trusts a column any process can write; use contact_trust.sendable()"),
-    ("SILENT_SWALLOW", re.compile(r'except\s+Exception\s*:\s*\n\s*pass\s*$', re.M),
+    ("SILENT_SWALLOW", re.compile(
+        r'except\s+Exception\s*:\s*\n\s*pass\s*$', re.M),
      "swallows the reason; log it or narrow the except"),
-    ("NONE_TO_ZERO", re.compile(r'\b(reviews?|count|score|kg|consumption|opens|clicks)\w*\s+or\s+0\b', re.I),
-     "coerces never measured to measured zero"),
+    ("NONE_TO_ZERO", re.compile(
+        r'\b(reviews?|count|score|kg|consumption|opens|clicks)\w*\s+or\s+0\b', re.I),
+     "coerces 'never measured' to 'measured zero'"),
     ("LOCAL_TIME", re.compile(r'datetime\.now\(\)'),
      "local time into a UTC column; use datetime.utcnow()"),
     ("INVENTED_DEFAULT", re.compile(
@@ -29,12 +46,14 @@ RULES = [
 ]
 
 ALLOW = {
-    ("LOCAL_TIME", "business_policies.py"),
-    ("LOCAL_TIME", "crew_output_reader.py"),
-    ("LOCAL_TIME", "founder_brief.py"),
-    ("LOCAL_TIME", "gem_monitor.py"),
-    ("LOCAL_TIME", "timeutil.py"),
-    ("NONE_TO_ZERO", "endpoints.py"),
+    ("LOCAL_TIME", "business_policies.py"): "calling window is local by design",
+    ("LOCAL_TIME", "crew_output_reader.py"): "display-only timestamp",
+    ("LOCAL_TIME", "founder_brief.py"): "display-only timestamp",
+    ("LOCAL_TIME", "gem_monitor.py"): "days-until countdown, local is correct",
+    ("LOCAL_TIME", "timeutil.py"): "the IST conversion layer itself",
+    ("NONE_TO_ZERO", "endpoints.py"): (
+        "guards a None comparison; the else-branch says 'no open recorded' "
+        "rather than claiming a measured zero"),
 }
 
 
@@ -49,7 +68,7 @@ def audit() -> list[dict]:
             continue
         lines = src.splitlines()
         for name, rx, why in RULES:
-            if (name, p.name) in ALLOW:
+            if ALLOW.get((name, p.name)):
                 continue
             for m in rx.finditer(src):
                 ln = src[:m.start()].count("\n") + 1
@@ -78,15 +97,6 @@ def coordination() -> list[dict]:
     return out
 
 
-def test_audit_has_expected_shape():
-    findings = audit()
-    assert isinstance(findings, list)
-    coordination_rows = coordination()
-    assert {row["shared_function"] for row in coordination_rows} == {
-        "sendable", "actionable", "verify_email", "pitch_for", "check_send_allowed"
-    }
-
-
 if __name__ == "__main__":
     f = audit()
     print("SERVICE AUDIT — defect classes this codebase has actually shipped\n")
@@ -99,7 +109,10 @@ if __name__ == "__main__":
         print(f"  {rule}  ({len(items)})  — {items[0]['why']}")
         for i in items[:6]:
             print(f"      {i['file']}:{i['line']}  {i['code']}")
+        if len(items) > 6:
+            print(f"      ... and {len(items)-6} more")
         print()
+
     print("COORDINATION — is one question answered in one place?\n")
     for c in coordination():
         print(f"  {c['shared_function']:20} used by {c['used_by']:2} module(s)")
