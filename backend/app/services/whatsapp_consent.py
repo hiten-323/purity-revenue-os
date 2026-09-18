@@ -266,7 +266,7 @@ def capture_email_reply(lead, db, body: str, *, message_id: str = "",
         return {"recorded": False, "reason": f"machine reply ({sender.get('kind')})"}
 
     refusing = {i["intent"] for i in ri.classify_intent(text)["intents"]} & _REFUSING_INTENTS
-    explicit_wa_stop = bool(re.search(r"\\b(?:whatsapp|wa)\\b.{0,40}\\b(?:stop|remove|unsubscribe|dont|do not|don't)\\b|\\b(?:stop|remove|unsubscribe|dont|do not|don't)\\b.{0,40}\\b(?:whatsapp|wa)\\b", text, re.IGNORECASE))
+    explicit_wa_stop = bool(re.search(r"\b(?:whatsapp|wa)\b.{0,40}\b(?:stop|remove|unsubscribe|dont|do not|don't)\b|\b(?:stop|remove|unsubscribe|dont|do not|don't)\b.{0,40}\b(?:whatsapp|wa)\b", text, re.IGNORECASE))
     if explicit_wa_stop:
         revoke(lead, db, evidence=text[:1000], source="EMAIL_REPLY_WHATSAPP_REQUEST")
         return {"recorded": False, "revoked": True, "reason": "explicit WhatsApp opt-out"}
