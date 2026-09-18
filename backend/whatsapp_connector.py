@@ -64,17 +64,21 @@ LEADS_DB_PATH = os.getenv(
 def _consent_ok(destination: str) -> tuple[bool, str]:
     """Meta requires opt-in before a template message. So does this connector.
 
-    whatsapp_sender.CONSENT_OK is the single definition of an acceptable
-    consent state; it is imported rather than restated so the two paths cannot
-    drift. If that import fails we refuse to send, because a send path that
-    cannot reach the consent rule has not satisfied it.
+    The rule is whatsapp_sender.consent_check -- called, not restated, so this
+    path and the main sender cannot drift. It is fed the lead row this number
+    belongs to; if the rule cannot be imported or the row cannot be read, we
+    refuse, because a send path that cannot reach the consent rule has not
+    satisfied it.
 
-    Matching is on the last 10 digits: the lead table stores numbers in several
-    formats (+91-98765-43210, 919876543210, 9876543210) and an exact-string
-    match would silently find nothing and read as "no such lead".
+    Matching is on the last 10 digits across phone, whatsapp_number and
+    consent_phone: the table stores numbers in several formats
+    (+91-98765-43210, 919876543210, 9876543210), and a number the business
+    gave us for WhatsApp lives in whatsapp_number/consent_phone, not phone.
     """
     try:
-        from app.services.whatsapp_sender import CONSENT_OK
+        from types import SimpleNamespace
+
+        from app.services.whatsapp_sender import consent_check
     except Exception as exc:  # noqa: BLE001 - fail closed, never open
         return False, f"consent rule unavailable ({exc.__class__.__name__}); refusing to send"
 
@@ -82,32 +86,45 @@ def _consent_ok(destination: str) -> tuple[bool, str]:
     if len(digits) < 10:
         return False, "destination is not a full 10-digit Indian number"
 
+    def norm(col: str) -> str:
+        return f"replace(replace(replace(coalesce({col},''),'-',''),' ',''),'+','')"
+
     try:
         conn = sqlite3.connect(f"file:{LEADS_DB_PATH}?mode=ro", uri=True, timeout=10)
-        row = conn.execute(
-            "SELECT consent_status, do_not_call, company, consent_phone FROM b2b_leads "
-            "WHERE replace(replace(replace(coalesce(phone,''),'-',''),' ',''),'+','') LIKE ? "
-            "LIMIT 1",
-            (f"%{digits}",),
-        ).fetchone()
+        rows = conn.execute(
+            "SELECT consent_status, do_not_call, company, consent_phone, "
+            "whatsapp_number, phone FROM b2b_leads "
+            f"WHERE {norm('phone')} LIKE ? OR {norm('whatsapp_number')} LIKE ? "
+            f"OR {norm('consent_phone')} LIKE ?",
+            (f"%{digits}",) * 3,
+        ).fetchall()
         conn.close()
     except Exception as exc:  # noqa: BLE001
         return False, f"lead lookup failed ({exc.__class__.__name__}); refusing to send"
 
-    if not row:
+    if not rows:
         return False, "no lead on record for this number; consent cannot be established"
-    status = (row[0] or "UNKNOWN").upper()
-    if row[1]:
-        return False, f"{row[2] or 'lead'} is marked do-not-call"
-    if status not in CONSENT_OK:
-        return False, (
-            f"no opt-in on record (consent_status={status}). Meta requires opt-in "
-            f"before a template message."
-        )
-    bound = "".join(ch for ch in (row[3] or "") if ch.isdigit())[-10:]
-    if not bound or bound != digits:
-        return False, "consent is not bound to this exact destination number"
-    return True, status
+    # Any record of this number asking us to stop wins over any other record's yes.
+    for r in rows:
+        if r[1]:
+            return False, f"{r[2] or 'lead'} is marked do-not-call"
+
+    def ends(v) -> bool:
+        return "".join(ch for ch in (v or "") if ch.isdigit())[-10:] == digits
+
+    # The lead that opted in on this exact number, if there is one.
+    row = next((r for r in rows if ends(r[3])), rows[0])
+    lead = SimpleNamespace(consent_status=row[0], do_not_call=bool(row[1]),
+                           consent_phone=row[3], whatsapp_number=row[4], phone=row[5],
+                           status="")  # template sends need opt-in, not a reply
+    ok, why = consent_check(lead)
+    if not ok:
+        return False, why
+    # consent_check proves consent covers the lead's current number; the
+    # message must also be going to that number.
+    if not ends(row[4] or row[5]):
+        return False, "destination is not the number this lead's consent covers"
+    return True, (row[0] or "").upper()
 
 
 def _secret_ok(provided: str | None) -> bool:

@@ -28,12 +28,17 @@ def leads_db(monkeypatch):
     os.close(fd)
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE b2b_leads (phone TEXT, consent_status TEXT, "
-                 "do_not_call INTEGER, company TEXT)")
-    conn.executemany("INSERT INTO b2b_leads VALUES (?,?,?,?)", [
-        ("+91-98765-43210", "EXPLICIT", 0, "Opted In Traders"),
-        ("9876500001",      "UNKNOWN",  0, "No Consent Foods"),
-        ("+91-98765-00002", "EXPLICIT", 1, "Asked Us To Stop"),
-        ("919876500003",    "IMPLIED_B2B", 0, "Implied Wholesale"),
+                 "do_not_call INTEGER, company TEXT, whatsapp_number TEXT, "
+                 "consent_phone TEXT)")
+    conn.executemany("INSERT INTO b2b_leads VALUES (?,?,?,?,?,?)", [
+        ("+91-98765-43210", "EXPLICIT", 0, "Opted In Traders", None, None),
+        ("9876500001",      "UNKNOWN",  0, "No Consent Foods", None, None),
+        ("+91-98765-00002", "EXPLICIT", 1, "Asked Us To Stop", None, None),
+        ("919876500003",    "IMPLIED_B2B", 0, "Implied Wholesale", None, None),
+        # Opted in on the AI call for a DIFFERENT number than the one dialled.
+        ("9876500004", "EXPLICIT", 0, "Read Out A Number", "9812345678", "9812345678"),
+        # Consent bound to a number that is no longer the one on file.
+        ("9876500005", "EXPLICIT", 0, "Number Drifted", "9876500005", "9811100000"),
     ])
     conn.commit()
     conn.close()
@@ -99,10 +104,35 @@ def test_it_fails_closed_when_the_rule_is_unreachable(leads_db, monkeypatch):
 
 
 def test_consent_vocabulary_is_not_redefined_here():
-    """The connector must import CONSENT_OK, not restate it. Two copies drift,
-    and the drift would show up as messages nobody agreed to receive."""
+    """The connector must use whatsapp_sender's rule, not restate it. Two
+    copies drift, and the drift would show up as messages nobody agreed to
+    receive -- the number-binding rule was restated here once and immediately
+    refused every consent recorded before consent_phone existed."""
     import inspect
     src = inspect.getsource(wc._consent_ok)
-    assert "from app.services.whatsapp_sender import CONSENT_OK" in src
+    assert "from app.services.whatsapp_sender import consent_check" in src
+    assert "consent_check(lead)" in src
     assert "EXPLICIT" not in src.replace("consent_status=", ""), (
         "consent states appear to be hardcoded in the connector")
+
+
+# ── consent is for a number, and the bridge honours that ────────────────────
+
+def test_a_number_given_on_the_call_is_found_and_allowed(leads_db):
+    """It lives in whatsapp_number/consent_phone, not phone. A phone-only
+    lookup reported "no lead" for exactly the people who opted in this way."""
+    ok, why = wc._consent_ok("+91 98123 45678")
+    assert ok is True, why
+
+
+def test_the_dialled_number_is_not_covered_by_a_different_numbers_opt_in(leads_db):
+    ok, why = wc._consent_ok("9876500004")
+    assert ok is False
+    assert "number" in why.lower()
+
+
+def test_consent_that_no_longer_matches_the_number_on_file_is_refused(leads_db):
+    ok, why = wc._consent_ok("9876500005")
+    assert ok is False
+    assert "different number" in why.lower()
+
