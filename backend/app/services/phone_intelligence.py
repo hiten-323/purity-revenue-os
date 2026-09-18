@@ -406,16 +406,19 @@ def log_call(lead, db, outcome: str, notes: str = "",
         # EXPLICIT and this exact source shape are what whatsapp_sender's
         # consent_check treats as permission; writing anything else here would
         # record consent that the sender still refuses to act on.
-        lead.consent_status = "EXPLICIT"
-        lead.consent_source = "FOUNDER_CALL"
-        lead.consent_timestamp = _now()
-        db.add(WorkflowEvent(
-            lead_id=lead.id, event_type="CONSENT_GIVEN", actor="FOUNDER",
-            channel="phone",
-            payload={"consent_status": "EXPLICIT", "source": "FOUNDER_CALL",
-                     "heard_on_call": True, "notes": (notes or "")[:300]},
-            occurred_at=_now()))
-        applied.append("consent -> EXPLICIT (WhatsApp now permitted)")
+        from app.services.whatsapp_consent import record as record_whatsapp_consent
+        mentioned = facts.get("phones_mentioned") or []
+        if len(mentioned) > 1:
+            raise ValueError("WHATSAPP_CONSENT note contains multiple phone numbers; record one WhatsApp destination")
+        if mentioned:
+            lead.whatsapp_number = mentioned[0]
+        consent_result = record_whatsapp_consent(
+            lead, db, source="FOUNDER_CALL", evidence=(notes or "")[:1000],
+        )
+        if consent_result.get("recorded"):
+            applied.append(f"consent -> EXPLICIT (WhatsApp permitted for {consent_result['consent_phone']})")
+        else:
+            applied.append(f"WARNING: WhatsApp consent not recorded — {consent_result.get('reason')}")
 
     elif outcome == "EMAIL_COLLECTED":
         # The address is applied above by the shared extraction path. If the
