@@ -418,6 +418,19 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
         email.sent_at = datetime.utcnow().isoformat()
         email.smtp_response = "250 OK - Accepted for delivery"
         print(f"SMTP sent successfully. MsgID: {msg_id}")
+        # Record the consent-request context only after SMTP accepts the message.
+        if not _is_self and getattr(email, "lead_id", None):
+            try:
+                from app.database.database import SessionLocal
+                from app.models.models import B2BLead, WorkflowEvent
+                _db = SessionLocal()
+                _lead = _db.query(B2BLead).filter(B2BLead.id == email.lead_id).first()
+                if _lead and whatsapp_ask(_lead):
+                    _db.add(WorkflowEvent(lead_id=_lead.id, event_type="WHATSAPP_CONSENT_REQUESTED", actor="SYSTEM", channel="email", payload={"message_id": msg_id, "request": WHATSAPP_ASK_SENTENCE}, occurred_at=datetime.utcnow()))
+                    _db.commit()
+                _db.close()
+            except Exception as _exc:
+                _log.warning("WhatsApp consent request audit failed: %s", _exc)
     except smtplib.SMTPAuthenticationError:
         email.status = "failed"
         email.error = "Zoho auth failed — use App Password from accounts.zoho.in, not your login password"
