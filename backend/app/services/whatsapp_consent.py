@@ -35,6 +35,7 @@ number does not transfer to whatever number lands on the record later.
 from __future__ import annotations
 
 import re
+import hashlib
 from datetime import datetime
 
 # Recognised provenances. Each is a real conversation someone can be shown.
@@ -124,7 +125,8 @@ def record(lead, db, *, source: str, evidence: str, message_id: str = "", create
         actor="SYSTEM", channel="whatsapp",
         payload={"source": source, "basis": SOURCES[source],
                  "evidence": evidence[:1000], "message_id": message_id,
-                 "consent_phone": number},
+                 "consent_phone": number,
+                 "evidence_sha256": hashlib.sha256(evidence.encode("utf-8")).hexdigest()},
         occurred_at=now))
 
     # Call-outcome logging already creates the canonical next-action event.
@@ -153,7 +155,8 @@ def revoke(lead, db, *, evidence: str, source: str = "WHATSAPP_INBOUND") -> dict
         lead_id=lead.id, event_type="WHATSAPP_CONSENT_REVOKED",
         actor="SYSTEM", channel="whatsapp",
         payload={"source": source, "evidence": evidence[:1000],
-                 "consent_phone": getattr(lead, "consent_phone", None)},
+                 "consent_phone": getattr(lead, "consent_phone", None),
+                 "evidence_sha256": hashlib.sha256(evidence.encode("utf-8")).hexdigest()},
         occurred_at=now))
     db.add(WorkflowEvent(
         lead_id=lead.id, event_type="NEXT_ACTION_SET", actor="SYSTEM",
