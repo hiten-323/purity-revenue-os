@@ -191,3 +191,44 @@ def test_a_different_outcome_after_the_call_is_already_settled_is_refused(monkey
     lead = session.get(B2BLead, lead.id)
     assert lead.call_outcome_last == "NOT_INTERESTED"
     assert (lead.consent_status or "UNKNOWN").upper() == "UNKNOWN"
+
+
+def test_a_number_read_out_on_the_call_reaches_the_pipeline(monkeypatch):
+    """agent.js sends whatsapp_number when the business gives a different
+    WhatsApp number. If the webhook dropped it, consent would silently bind
+    to the dialled number instead of the one they asked for."""
+    client, session = _client(monkeypatch)
+    lead = _lead(session, phone="+919876543210", segment="cafe")
+
+    resp = client.post(
+        "/api/v1/founder/ai-call-outcome",
+        json={"lead_id": lead.id, "outcome": "WHATSAPP_OPT_IN",
+              "summary": "send it to 98123 45678", "whatsapp_number": "98123 45678"},
+        headers={"X-Api-Admin-Secret": "test-admin-secret"},
+    )
+    assert resp.status_code == 200, resp.text
+    lead = session.get(B2BLead, lead.id)
+    assert lead.consent_phone == "9812345678"
+
+
+def test_what_the_call_learned_reaches_the_pipeline(monkeypatch):
+    """The fields agent.js reports beyond the outcome. Dropped here, the
+    learning loop would count nothing and look like no call learned anything."""
+    from app.models.models import WorkflowEvent
+
+    client, session = _client(monkeypatch)
+    lead = _lead(session, phone="+919876543211", segment="distributor")
+
+    resp = client.post(
+        "/api/v1/founder/ai-call-outcome",
+        json={"lead_id": lead.id, "outcome": "SEND_INFO_EMAIL", "summary": "email it",
+              "preferred_channel": "EMAIL", "handles_instant_coffee": "YES",
+              "decision_maker": "UNKNOWN", "objection": "EXISTING_SUPPLIER"},
+        headers={"X-Api-Admin-Secret": "test-admin-secret"},
+    )
+    assert resp.status_code == 200, resp.text
+    ev = (session.query(WorkflowEvent)
+          .filter(WorkflowEvent.lead_id == lead.id,
+                  WorkflowEvent.event_type == "AI_CALL_DETAILS").one())
+    assert ev.payload["preferred_channel"] == "EMAIL"
+    assert ev.payload["objection"] == "EXISTING_SUPPLIER"

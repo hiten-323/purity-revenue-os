@@ -144,10 +144,14 @@ class CallingAgentService:
         result = voice_router.place_call(
             lead,
             context={
-                "opening": pipeline.OPENING_DISCLOSURE,
+                "opening": pipeline.opening_for(lead),
                 "questions": list(pipeline.QUALIFICATION_QUESTIONS),
                 # Without these the model invents prices. Verified, not feared.
                 "constraints": list(pipeline.CALL_CONSTRAINTS),
+                "handoff_topics": list(pipeline.HANDOFF_TOPICS),
+                # From the record only, so "how did you get my number?" has a
+                # true answer and the agent never improvises one.
+                **pipeline.call_context(lead, db),
             },
             scheduled_at=scheduled_at,
         )

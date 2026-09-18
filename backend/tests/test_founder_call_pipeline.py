@@ -504,15 +504,24 @@ def test_whatsapp_opt_in_binds_consent_to_the_number_actually_called(db, registr
     assert lead.consent_phone == "9876500001"
 
 
-def test_whatsapp_opt_in_prefers_whatsapp_number_over_phone_for_binding(db, registry):
-    """Matches send_whatsapp()'s own destination resolution order, so the
-    number consent is checked against at send time is the number it was
-    captured against at grant time."""
+def test_the_number_messaged_is_the_number_consented(db, registry):
+    """The invariant: whatever send_whatsapp() would resolve as the
+    destination is exactly the number consent was captured against.
+
+    This used to be pinned as "whatsapp_number wins over phone", matching
+    send_whatsapp's lookup order. The 2026-09-18 call flow asks "can I send it
+    to the number I'm speaking with now?", so the number agreed to is the
+    dialled one; a WhatsApp number scraped earlier was never mentioned on the
+    call. The invariant is now kept by writing the agreed number into
+    whatsapp_number, rather than by consenting to whichever was stored."""
+    from app.services.whatsapp_consent import destination
+
     lead = _lead(db, phone="9876500001", whatsapp_number="9111100002")
-    p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN", summary="send it on WhatsApp")
+    p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN", summary="yes, send it on WhatsApp")
     db.commit()
 
-    assert lead.consent_phone == "9111100002"
+    assert lead.consent_phone == "9876500001", "the number they were speaking on"
+    assert destination(lead) == lead.consent_phone, "and it is the one that would be messaged"
 
 
 def test_verification_alone_never_grants_whatsapp(db, registry):
@@ -580,3 +589,225 @@ def test_constraints_are_dispatched_with_every_qualification_call():
         "the qualification call ships opening and questions but not the "
         "constraints — the model will invent prices")
     assert "opening" in keys and "questions" in keys
+
+
+# ── the natural opening, still disclosed ─────────────────────────────────────
+
+@pytest.mark.parametrize("contact_name,expected", [
+    ("Raj Sharma", "Hi Raj, this is an AI assistant calling on behalf of Purity Beans."),
+    ("", "Hi, this is an AI assistant calling on behalf of Purity Beans."),
+    ("Manager", "Hi, this is an AI assistant"),            # a role, not a name
+    ("Mr. Gurpreet Singh", "Hi Gurpreet, this is"),        # salutation skipped
+    ("Sales Team", "Hi, this is"),
+    ("A1 Traders", "Hi, this is"),                         # not a person
+])
+def test_the_opening_greets_a_real_name_or_none(db, contact_name, expected):
+    lead = _lead(db, contact_name=contact_name, company=f"Opening {contact_name or 'blank'}")
+    assert p.opening_for(lead).startswith(expected)
+
+
+def test_every_opening_passes_the_disclosure_gate(db, registry):
+    """Founder decision 2026-09-18: natural, but the AI disclosure stays in
+    the first sentence. The gate runs on the per-lead line, so a name can
+    never push the disclosure out of it."""
+    for name in ("Raj", "", "Manager", "Mr. Gurpreet Singh"):
+        lead = _lead(db, contact_name=name, company=f"Gate {name or 'blank'}")
+        line = p.opening_for(lead)
+        assert p.script_discloses(line)[0] is True, line
+        assert "Purity Beans" in line
+        assert "quick minute" in line
+    assert p.may_place_ai_call(_lead(db, contact_name="Raj", company="Gate call"))[0] is True
+
+
+def test_the_opening_asks_before_it_pitches():
+    """The old opening delivered a pitch before permission. This one asks."""
+    assert "supply" not in p.OPENING_DISCLOSURE.lower()
+    assert p.OPENING_DISCLOSURE.rstrip().endswith("?")
+
+
+# ── which number a WhatsApp yes on the call covers ───────────────────────────
+
+def _consent_events(db, lead, kind):
+    from app.models.models import WorkflowEvent
+    return (db.query(WorkflowEvent)
+            .filter(WorkflowEvent.lead_id == lead.id, WorkflowEvent.event_type == kind).all())
+
+
+def test_this_number_is_fine_binds_the_number_that_was_called(db, registry):
+    """A WhatsApp number scraped earlier is not what they said yes to."""
+    lead = _lead(db, phone="+919876543210", whatsapp_number="+919999911111",
+                 company="Existing Number Co")
+    p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN", summary="yes, this number is fine")
+    db.commit()
+
+    assert lead.consent_status == "EXPLICIT"
+    assert lead.consent_phone == "+919876543210"
+    assert lead.whatsapp_number == "+919876543210"
+
+
+def test_a_number_read_out_on_the_call_is_the_one_bound(db, registry):
+    lead = _lead(db, phone="+919876543210", company="New Number Co")
+    p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN", summary="send it to 98123 45678",
+                        whatsapp_number="98123 45678")
+    db.commit()
+
+    assert lead.consent_phone == "9812345678"
+    assert lead.whatsapp_number == "9812345678"
+    ev = _consent_events(db, lead, "WHATSAPP_CONSENT_RECORDED")
+    assert len(ev) == 1 and "read out on the call" in ev[0].payload["evidence"]
+
+
+def test_a_misheard_number_is_not_consent(db, registry):
+    """Eight digits is a mishearing, not a destination."""
+    lead = _lead(db, phone="+919876543210", company="Misheard Co")
+    p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN", summary="send it there",
+                        whatsapp_number="98123456")
+    db.commit()
+
+    assert (lead.consent_status or "UNKNOWN").upper() != "EXPLICIT"
+    assert len(_consent_events(db, lead, "WHATSAPP_CONSENT_UNBOUND")) == 1
+    # the call itself is still recorded as interest
+    assert lead.outreach_stage == p.AI_INTEREST_DETECTED
+
+
+def test_a_yes_on_a_landline_is_not_consent(db, registry):
+    """They agreed, but the number they were speaking on cannot receive
+    WhatsApp. A person follows up for a mobile; nothing is bound."""
+    lead = _lead(db, phone="+91 172 234 5678", company="Landline Co")
+    p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN", summary="yes this number is fine")
+    db.commit()
+
+    assert (lead.consent_status or "UNKNOWN").upper() != "EXPLICIT"
+    ev = _consent_events(db, lead, "WHATSAPP_CONSENT_UNBOUND")
+    assert len(ev) == 1 and "landline" in ev[0].payload["note"]
+
+
+# ── V3: commercial guardrails ────────────────────────────────────────────────
+
+def test_no_commercial_figure_of_any_kind_may_be_improvised():
+    """A price was the first thing the model invented. Margins, MOQ, credit
+    and territory are the next things a distributor asks, and each is a
+    commitment the business would then have to honour or retract."""
+    blob = " ".join(p.CALL_CONSTRAINTS).lower()
+    for term in ("price", "margins", "minimum order", "credit terms",
+                 "territory", "delivery timelines", "sales figures"):
+        assert term in blob, f"{term} is not ruled out on the call"
+    assert "incorrect figure" in blob, "the agent needs a true thing to say instead"
+
+
+def test_handoff_topics_are_dispatched_with_the_call():
+    """The prompt offers a person for these; the list travels from here so
+    the two cannot drift."""
+    import inspect
+
+    from app.services.calling_agent import CallingAgentService
+
+    src = inspect.getsource(CallingAgentService._place_qualification_call)
+    assert '"handoff_topics"' in src and "call_context(" in src
+    assert "margins" in p.HANDOFF_TOPICS and "territory or exclusivity" in p.HANDOFF_TOPICS
+
+
+# ── V3: what the agent knows before it speaks ────────────────────────────────
+
+def test_provenance_names_the_public_listing_not_the_search_tool(db):
+    """phone_source records the tools that FOUND the listing. "We found you on
+    Perplexity" is neither where the number is published nor something a
+    shopkeeper would recognise."""
+    lead = _lead(db, company="Listed Co",
+                 phone_source="Perplexity, BraveSearch, IndiaMart, TradeIndia",
+                 lead_source="Google Maps")
+    ctx = p.call_context(lead, db)
+    assert ctx["provenance"] == "IndiaMART and TradeIndia"
+    assert "perplexity" not in ctx["provenance"].lower()
+
+
+def test_an_unknown_source_is_said_to_be_unknown(db):
+    """The prompt turns "" into "I don't have that detail". Any value here
+    would be spoken as fact."""
+    lead = _lead(db, company="Unknown Source Co", phone_source=None,
+                 lead_source="UNVERIFIED_IMPORT")
+    assert p.call_context(lead, db)["provenance"] == ""
+
+
+def test_business_type_comes_from_the_record(db):
+    lead = _lead(db, company="Kirana Co", division="retail_kirana", segment="grocery")
+    assert p.call_context(lead, db)["business_type"] == "retail kirana"
+
+
+def test_previous_contact_is_the_last_proven_touch_only(db):
+    from datetime import datetime
+
+    from app.models.models import WorkflowEvent
+
+    lead = _lead(db, company="Emailed Co")
+    assert p.call_context(lead, db)["previous_contact"] == "", "no touch, no claim of one"
+
+    # A decision to email is not an email, and a send with no provider proof
+    # is stored as EMAIL_SENT_UNPROVEN -- neither may be claimed on a call.
+    db.add(WorkflowEvent(lead_id=lead.id, event_type="NEXT_ACTION_SET",
+                         payload={"action": "SEND_EMAIL"}, occurred_at=datetime(2026, 9, 1)))
+    db.add(WorkflowEvent(lead_id=lead.id, event_type="EMAIL_SENT",
+                         occurred_at=datetime(2026, 9, 5)))
+    db.commit()
+    assert p.call_context(lead, db)["previous_contact"] == ""
+
+    db.add(WorkflowEvent(lead_id=lead.id, event_type="EMAIL_SENT", channel="email",
+                         payload={"to": "owner@emailed.in", "message_id": "<ctx-1@test>"},
+                         occurred_at=datetime(2026, 9, 10)))
+    db.commit()
+    assert p.call_context(lead, db)["previous_contact"] == "we sent an email on 10 Sep 2026"
+
+
+# ── V3: what the call learned ────────────────────────────────────────────────
+
+def _details(db, lead):
+    from app.models.models import WorkflowEvent
+    return (db.query(WorkflowEvent)
+            .filter(WorkflowEvent.lead_id == lead.id,
+                    WorkflowEvent.event_type == "AI_CALL_DETAILS").all())
+
+
+def test_what_the_call_learned_is_recorded_in_a_closed_vocabulary(db, registry):
+    lead = _lead(db, company="Learned Co", segment="distributor")
+    p.record_ai_outcome(lead, db, "SEND_INFO_EMAIL", summary="send to a@b.in",
+                        details={"preferred_channel": "email",
+                                 "handles_instant_coffee": "YES",
+                                 "decision_maker": "yes",
+                                 "objection": "EXISTING_SUPPLIER"})
+    db.commit()
+
+    ev = _details(db, lead)
+    assert len(ev) == 1
+    assert ev[0].payload == {"outcome": "SEND_INFO_EMAIL", "preferred_channel": "EMAIL",
+                             "handles_instant_coffee": "YES", "decision_maker": "YES",
+                             "objection": "EXISTING_SUPPLIER"}
+
+
+def test_an_unrecognised_detail_is_dropped_not_mapped(db, registry):
+    """"KEEN" is not a channel. Recording it as the nearest value would turn
+    a model's paraphrase into a fact the reports then count."""
+    lead = _lead(db, company="Paraphrase Co")
+    p.record_ai_outcome(lead, db, "INTERESTED", summary="sounded keen",
+                        details={"preferred_channel": "KEEN", "objection": "price"})
+    db.commit()
+
+    assert _details(db, lead)[0].payload == {"outcome": "INTERESTED", "objection": "PRICE"}
+
+
+def test_no_details_writes_no_details_row(db, registry):
+    lead = _lead(db, company="Silent Co")
+    p.record_ai_outcome(lead, db, "NOT_INTERESTED", summary="no")
+    db.commit()
+    assert _details(db, lead) == []
+
+
+def test_preferring_whatsapp_is_not_consent_to_it(db, registry):
+    """preferred_channel is what they said they like. Only the WHATSAPP_OPT_IN
+    outcome -- they chose it, for this number -- is permission."""
+    lead = _lead(db, company="Prefers WA Co", phone="+919876543210")
+    p.record_ai_outcome(lead, db, "INTERESTED", summary="likes whatsapp generally",
+                        details={"preferred_channel": "WHATSAPP"})
+    db.commit()
+
+    assert (lead.consent_status or "UNKNOWN").upper() != "EXPLICIT"
+    assert _consent_events(db, lead, "WHATSAPP_CONSENT_RECORDED") == []
