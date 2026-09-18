@@ -71,7 +71,6 @@ def test_request_founder_call_creates_actionable_idempotent_work_item(db):
     lead = _lead(db)
     p.record_ai_outcome(lead, db, "HUMAN_HANDOFF", summary="Interested; wants founder to call")
     p.request_founder_call(lead, db, note="Human handoff requested")
-    p.request_founder_call if False else None
     from app.models.models import WorkflowExecution, WorkflowEvent
     items = db.query(WorkflowExecution).filter(
         WorkflowExecution.lead_id == lead.id,
