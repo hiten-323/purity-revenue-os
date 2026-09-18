@@ -85,7 +85,7 @@ def _consent_ok(destination: str) -> tuple[bool, str]:
     try:
         conn = sqlite3.connect(f"file:{LEADS_DB_PATH}?mode=ro", uri=True, timeout=10)
         row = conn.execute(
-            "SELECT consent_status, do_not_call, company FROM b2b_leads "
+            "SELECT consent_status, do_not_call, company, consent_phone FROM b2b_leads "
             "WHERE replace(replace(replace(coalesce(phone,''),'-',''),' ',''),'+','') LIKE ? "
             "LIMIT 1",
             (f"%{digits}",),
@@ -104,6 +104,9 @@ def _consent_ok(destination: str) -> tuple[bool, str]:
             f"no opt-in on record (consent_status={status}). Meta requires opt-in "
             f"before a template message."
         )
+    bound = "".join(ch for ch in (row[3] or "") if ch.isdigit())[-10:]
+    if not bound or bound != digits:
+        return False, "consent is not bound to this exact destination number"
     return True, status
 
 
@@ -176,13 +179,13 @@ def _request_fingerprint(req: WhatsAppSend) -> str:
 
 @app.get("/api/v1/whatsapp/health")
 def health() -> dict[str, Any]:
-    from app.services import whatsapp_evolution as _t
+    from app.services import whatsapp_aisensy as _t
     configured = _t.config_status()[0]
     secret_configured = bool(os.getenv("KLAVIYO_WHATSAPP_WEBHOOK_SECRET"))
     return {
-        "service": "klaviyo-evolution-whatsapp",
+        "service": "klaviyo-aisensy-whatsapp",
         "status": "ready" if configured and secret_configured else "configuration_required",
-        "evolution_configured": configured,
+        "aisensy_configured": configured,
         "webhook_secret_configured": secret_configured,
         "provider_endpoint": _t.base_url(),
         "integration": _t.integration(),
@@ -227,7 +230,7 @@ def send_whatsapp(req: WhatsAppSend, x_connector_secret: str | None = Header(def
     # which made it the second of three transports — and it was the one that
     # shipped with no consent check at all. The idempotency ledger below is
     # kept; only the socket changed.
-    from app.services import whatsapp_evolution as transport
+    from app.services import whatsapp_aisensy as transport
 
     result = transport.send_template(
         req.destination, req.campaign_name,
