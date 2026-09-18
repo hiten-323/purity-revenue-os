@@ -413,7 +413,7 @@ def log_call(lead, db, outcome: str, notes: str = "",
         if mentioned:
             lead.whatsapp_number = mentioned[0]
         consent_result = record_whatsapp_consent(
-            lead, db, source="FOUNDER_CALL", evidence=(notes or "")[:1000],
+            lead, db, source="FOUNDER_CALL", evidence=(notes or "")[:1000], create_next_action=False,
         )
         if consent_result.get("recorded"):
             applied.append(f"consent -> EXPLICIT (WhatsApp permitted for {consent_result['consent_phone']})")
