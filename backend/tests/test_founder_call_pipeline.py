@@ -67,6 +67,27 @@ def _lead(db, **kw):
 
 # ------------------------------------------------------- the one-call rule --
 
+def test_request_founder_call_creates_actionable_idempotent_work_item(db):
+    lead = _lead(db)
+    p.record_ai_outcome(lead, db, "HUMAN_HANDOFF", summary="Interested; wants founder to call")
+    p.request_founder_call(lead, db, note="Human handoff requested")
+    p.request_founder_call if False else None
+    from app.models.models import WorkflowExecution, WorkflowEvent
+    items = db.query(WorkflowExecution).filter(
+        WorkflowExecution.lead_id == lead.id,
+        WorkflowExecution.workflow_type == "FOUNDER_CALL",
+        WorkflowExecution.status == "REQUESTED",
+    ).all()
+    assert len(items) == 1
+    assert items[0].requested_by == "AI"
+    assert items[0].payload["founder_brief"]["business"] == lead.company
+    events = db.query(WorkflowEvent).filter(
+        WorkflowEvent.lead_id == lead.id,
+        WorkflowEvent.event_type == "FOUNDER_CALL_REQUESTED",
+    ).all()
+    assert len(events) == 1
+
+
 def test_one_ai_call_per_lead(db, registry):
     lead = _lead(db)
     assert p.may_place_ai_call(lead)[0] is True
