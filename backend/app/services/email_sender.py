@@ -1399,7 +1399,15 @@ def reconcile_inbound_replies_via_imap(db) -> dict:
             # A reply to the dedicated WhatsApp request can grant consent.
             try:
                 from app.services.whatsapp_consent import capture_email_reply
-                consent_result = capture_email_reply(lead, db, body or msg.get("Subject", ""), message_id=msg.get("Message-ID", ""))
+                consent_result = capture_email_reply(
+                    lead, db, body or "",
+                    message_id=msg.get("Message-ID", ""),
+                    subject=str(msg.get("Subject", "") or ""),
+                    # Headers are the reliable machine signal (Auto-Submitted,
+                    # X-Autoreply); body text alone misses auto-replies that
+                    # do not say "out of office".
+                    headers={k: v for k, v in msg.items()},
+                )
                 if consent_result.get("recorded"):
                     print(f"WhatsApp consent captured for {lead.company}: {consent_result.get('consent_phone')}")
             except Exception as _exc:

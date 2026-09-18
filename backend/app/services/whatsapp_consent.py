@@ -34,6 +34,7 @@ number does not transfer to whatever number lands on the record later.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 # Recognised provenances. Each is a real conversation someone can be shown.
@@ -139,45 +140,129 @@ def record(lead, db, *, source: str, evidence: str, message_id: str = "", create
     return {"recorded": True, "source": source, "consent_phone": number}
 
 
-def capture_email_reply(lead, db, body: str, *, message_id: str = "") -> dict:
-    """Capture consent from a reply to the dedicated WhatsApp-number request.
+# ── Consent from a reply to the dedicated WhatsApp request ──────────────────
+#
+# The first version of this function granted consent to EVERY one of these,
+# verified against the code before it was replaced:
+#
+#     "Please remove me from your list."        "please" matched as a yes
+#     "Not interested, please don't contact"    same
+#     "No thanks. Sent from Outlook for ..."    "ok" inside "Outlook"
+#     "I'm not sure this is relevant"           "sure" inside "not sure"
+#     "We will look into it later."             "ok" inside "look"
+#     "No thanks. --  Rahul  9876543210"        the SIGNATURE number, which it
+#                                               also wrote over whatsapp_number
+#     an out-of-office auto-reply               no human check at all
+#
+# and bound the rest to lead.phone, which for most leads is a published
+# landline WhatsApp cannot reach. An opt-out becoming a WhatsApp opt-in is the
+# single worst outcome this module can produce.
+#
+# So the rules, in order, each failing toward "not recorded":
+#   1. We must have asked, by email (WHATSAPP_CONSENT_REQUESTED).
+#   2. Only the business's NEW words count. Quoted history and signature
+#      blocks are cut first: a signature number was never offered, and a
+#      quoted email is our text, not theirs.
+#   3. A machine reply is never a business agreeing to anything.
+#   4. Any refusal, opt-out or negation refuses. A missed opt-in costs a
+#      founder a follow-up; a false one messages someone who said no.
+#   5. A yes is a word, matched on word boundaries: "okay" is a yes, "Outlook"
+#      is not, and "please" on its own is not a yes at all.
+#   6. Exactly one number, from their new words, or an explicit yes to using
+#      the number already on file -- and never a landline.
 
-    A number supplied in that reply is affirmative even without the word yes.
-    A clear affirmative reply without a number may use the single existing
-    contact number. No prior request means no inferred consent.
-    """
-    import re
+_QUOTE_OR_SIGNATURE_START = re.compile(
+    r"^\s*(?:"
+    r"on\b.{0,120}\bwrote:\s*$"                    # Gmail / Apple Mail
+    r"|-{2,}\s*original message\s*-{2,}"           # Outlook
+    r"|from:\s.+"                                  # forwarded / Outlook header block
+    r"|--\s*$"                                     # RFC 3676 signature delimiter
+    r"|sent from (?:my\s+)?\w+"                    # mobile client footers
+    r"|get outlook for\b"
+    r")",
+    re.IGNORECASE,
+)
+
+_NEGATION = re.compile(
+    r"\b(?:no|not|nope|don'?t|do not|never|stop|remove|unsubscribe|"
+    r"no thanks|not interested)\b",
+    re.IGNORECASE,
+)
+
+_AFFIRMATIVE = re.compile(
+    r"\b(?:yes|yeah|yep|yup|sure|ok|okay|go ahead|please do|"
+    r"use (?:this|my|that|the) number|you (?:can|may) (?:use|whatsapp)|whatsapp me)\b",
+    re.IGNORECASE,
+)
+
+_INDIAN_MOBILE = re.compile(r"(?<!\d)(?:(?:\+91|0091|91)[\s-]?)?([6-9]\d{4}[\s-]?\d{5})(?!\d)")
+
+_REFUSING_INTENTS = {"DO_NOT_CONTACT", "NOT_INTERESTED", "NO_REQUIREMENT"}
+
+
+def new_text(body: str) -> str:
+    """What the business actually wrote in this reply: everything before the
+    first quoted-history or signature marker, minus any '>' quoted lines."""
+    kept = []
+    for line in (body or "").splitlines():
+        if _QUOTE_OR_SIGNATURE_START.match(line):
+            break
+        if line.lstrip().startswith(">"):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def capture_email_reply(lead, db, body: str, *, message_id: str = "",
+                        subject: str = "", headers: dict | None = None) -> dict:
+    """Consent from a reply to the dedicated WhatsApp request, or the reason
+    there is none. Every refusal returns rather than raises; the caller is a
+    reply loop that must keep processing its batch."""
     from app.models.models import WorkflowEvent
+    from app.services import identity
+    from app.services import reply_intelligence as ri
 
-    request = (db.query(WorkflowEvent)
-               .filter(WorkflowEvent.lead_id == lead.id,
-                       WorkflowEvent.event_type == "WHATSAPP_CONSENT_REQUESTED",
-                       WorkflowEvent.channel == "email")
-               .order_by(WorkflowEvent.occurred_at.desc()).first())
-    if not request:
+    asked = (db.query(WorkflowEvent)
+             .filter(WorkflowEvent.lead_id == lead.id,
+                     WorkflowEvent.event_type == "WHATSAPP_CONSENT_REQUESTED",
+                     WorkflowEvent.channel == "email")
+             .order_by(WorkflowEvent.occurred_at.desc()).first())
+    if not asked:
         return {"recorded": False, "reason": "no WhatsApp consent request"}
 
-    numbers = list(dict.fromkeys(re.findall(r"(?<!\d)(?:(?:\+91|0091)[\s-]?)?([6-9]\d{9})(?!\d)", body or "")))
-    if len(numbers) > 1:
-        return {"recorded": False, "reason": "multiple WhatsApp numbers are ambiguous"}
+    text = new_text(body)
+    if not text:
+        return {"recorded": False, "reason": "no new text from the business"}
 
+    sender = ri.classify_sender(subject or "", text, headers or {})
+    if sender.get("sender") != ri.HUMAN:
+        return {"recorded": False, "reason": f"machine reply ({sender.get('kind')})"}
+
+    refusing = {i["intent"] for i in ri.classify_intent(text)["intents"]} & _REFUSING_INTENTS
+    if refusing:
+        return {"recorded": False, "reason": f"reply refuses ({', '.join(sorted(refusing))})"}
+    if _NEGATION.search(text):
+        return {"recorded": False, "reason": "reply contains a negation — founder reads it"}
+
+    numbers = list(dict.fromkeys(re.sub(r"[\s-]", "", m) for m in _INDIAN_MOBILE.findall(text)))
+    if len(numbers) > 1:
+        return {"recorded": False, "reason": "multiple numbers in the reply are ambiguous"}
     supplied = numbers[0] if numbers else ""
-    text = (body or "").lower()
-    affirmative = any(term in text for term in (
-        "yes", "sure", "okay", "ok", "please", "use my number",
-        "use this number", "whatsapp me", "you can whatsapp",
-    ))
-    existing = (getattr(lead, "phone", None) or "").strip()
-    if not supplied and not affirmative:
-        return {"recorded": False, "reason": "no number or affirmative confirmation"}
-    target = supplied or existing
+
+    if not supplied and not _AFFIRMATIVE.search(text):
+        return {"recorded": False, "reason": "no number and no explicit yes"}
+
+    target = supplied or destination(lead)
     if not target:
         return {"recorded": False, "reason": "no WhatsApp number to bind"}
+    if identity.is_landline(target):
+        return {"recorded": False,
+                "reason": f"{target} is a landline — WhatsApp cannot reach it"}
+
     if supplied:
+        # The business gave us this number in reply to a request for exactly
+        # that, so it is the one destination consent covers.
         lead.whatsapp_number = supplied
-        lead.consent_phone = supplied
-    result = record(lead, db, source="EMAIL_REPLY_WHATSAPP_REQUEST",
-                    evidence=(body or "")[:1000], message_id=message_id)
-    if result.get("recorded") and not supplied:
-        lead.consent_phone = existing
-    return result
+
+    return record(lead, db, source="EMAIL_REPLY_WHATSAPP_REQUEST",
+                  evidence=text[:1000], message_id=message_id)
