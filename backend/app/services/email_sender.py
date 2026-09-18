@@ -673,7 +673,7 @@ def get_personalized_intro(lead: B2BLead) -> str:
 _CATEGORY_PROFILE: dict[str, dict] = {
     "distributor": {
         "subject": "Distribution Partnership — Purity Beans Premium Coffee",
-        "why": "we're expanding our distribution network{loc} and are looking for established partners who move FMCG and beverage lines.",
+        "why": "we're expanding our distribution network{loc} and are looking for established partners with experience in the instant coffee category.",
         "angle": "Why distributors partner with Purity Beans",
         "bullets": ["Healthy trade margins on fast-moving freeze-dried SKUs",
                     "Selective regional territory and dealer support",
