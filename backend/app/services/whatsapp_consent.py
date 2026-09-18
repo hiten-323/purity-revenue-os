@@ -51,13 +51,13 @@ SOURCES = {
 CONSENT_GRANTED = "EXPLICIT"
 
 
-def destination(lead) -> str:
+def destination(lead, supplied_number: str = "") -> str:
     """The number consent would cover — the same resolution order
     whatsapp_sender.send_whatsapp uses to pick where a message goes. If the
     two disagreed, consent would be recorded against one number and the
     message sent to another."""
     return (
-        (getattr(lead, "whatsapp_number", None) or getattr(lead, "phone", "") or "")
+        (supplied_number or getattr(lead, "whatsapp_number", None) or getattr(lead, "phone", "") or "")
     ).strip()
 
 
@@ -140,3 +140,47 @@ def record(lead, db, *, source: str, evidence: str, message_id: str = "") -> dic
         occurred_at=now))
 
     return {"recorded": True, "source": source, "consent_phone": number}
+
+
+def capture_email_reply(lead, db, body: str, *, message_id: str = "") -> dict:
+    """Capture consent from a reply to the dedicated WhatsApp-number request.
+
+    A number supplied in that reply is affirmative even without the word yes.
+    A clear affirmative reply without a number may use the single existing
+    contact number. No prior request means no inferred consent.
+    """
+    import re
+    from app.models.models import WorkflowEvent
+
+    request = (db.query(WorkflowEvent)
+               .filter(WorkflowEvent.lead_id == lead.id,
+                       WorkflowEvent.event_type == "WHATSAPP_CONSENT_REQUESTED",
+                       WorkflowEvent.channel == "email")
+               .order_by(WorkflowEvent.occurred_at.desc()).first())
+    if not request:
+        return {"recorded": False, "reason": "no WhatsApp consent request"}
+
+    numbers = list(dict.fromkeys(re.findall(r"(?<!\\d)(?:(?:\\+91|0091)[\\s-]?)?([6-9]\\d{9})(?!\\d)", body or "")))
+    if len(numbers) > 1:
+        return {"recorded": False, "reason": "multiple WhatsApp numbers are ambiguous"}
+
+    supplied = numbers[0] if numbers else ""
+    text = (body or "").lower()
+    affirmative = any(term in text for term in (
+        "yes", "sure", "okay", "ok", "please", "use my number",
+        "use this number", "whatsapp me", "you can whatsapp",
+    ))
+    existing = (getattr(lead, "phone", None) or "").strip()
+    if not supplied and not affirmative:
+        return {"recorded": False, "reason": "no number or affirmative confirmation"}
+    target = supplied or existing
+    if not target:
+        return {"recorded": False, "reason": "no WhatsApp number to bind"}
+    if supplied:
+        lead.whatsapp_number = supplied
+        lead.consent_phone = supplied
+    result = record(lead, db, source="EMAIL_REPLY_WHATSAPP_REQUEST",
+                    evidence=(body or "")[:1000], message_id=message_id)
+    if result.get("recorded") and not supplied:
+        lead.consent_phone = existing
+    return result
