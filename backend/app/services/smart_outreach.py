@@ -159,6 +159,32 @@ def _proven_email_touches(db: Session, lead_id: int) -> list[OutreachTouch]:
     )
 
 
+def _contactable_first():
+    """Order key: 0 for leads a channel could actually reach, 1 for the rest.
+
+    "Could" is deliberately weak — it asks whether any channel has a standing
+    permission on this row, not whether this particular touch is due. The
+    authority on that is still evaluate_next_action, which runs per candidate
+    immediately below; this only decides who gets looked at first, so a lead
+    that ranks 0 and is then refused costs one evaluation, while a lead that
+    never ranks at all costs the whole channel.
+
+    Both vocabularies are imported: trust_promoter.MAY_SEND for email and
+    whatsapp_sender.CONSENT_OK for WhatsApp. Restating either here is how the
+    trust engine and the sender came to disagree about 29 addresses.
+    """
+    from sqlalchemy import case
+
+    from app.services.trust_promoter import MAY_SEND
+    from app.services.whatsapp_sender import CONSENT_OK
+
+    return case(
+        (B2BLead.email_trust.in_(tuple(MAY_SEND)), 0),
+        (B2BLead.consent_status.in_(tuple(CONSENT_OK)), 0),
+        else_=1,
+    )
+
+
 def _proven_touch(db: Session, lead_id: int, touch_type: str) -> bool:
     """General one-shot-touch guard, channel-agnostic. Same PROVEN_SEND
     definition as _proven_email_touches; that one stays name-specific
@@ -865,6 +891,50 @@ SEND_ELIGIBLE_ACTIONS = frozenset({
 })
 
 
+SCAN_FACTOR = 8
+
+
+def select_candidates(db: Session, limit: int = 20) -> list[B2BLead]:
+    """Who this cycle should even look at, in the order it should look.
+
+    ONE selector, used by both executors. outreach_lifecycle.run_automatic_cycle
+    had its own — `order_by(score.desc()).limit(20)` — and score is 0 on nearly
+    every row, so it returned the same 20 uncontactable leads on every cycle
+    forever. Two selectors for one question is the duplication this codebase
+    keeps paying for; this is the shared one, and it is tested.
+
+    Three rules, in order:
+
+      1. A channel must exist. Absent this, 16 of 20 slots once went to leads
+         with no address, ranked and fetched only to be told so.
+      2. Contactable before well-fitting. Measured on production 2026-09-18:
+         1,467 leads had a channel, the first one any channel could actually
+         reach ranked 904th, and the window was 160 — so both executors
+         selected zero every cycle while reporting a healthy run.
+      3. Fit orders what remains, and coffee_buying_score is the real evidence
+         (cafe 95, hotel 90, restaurant 70, kirana 65, office 45). 0 means
+         UNCLASSIFIED, not low fit, so those sort last but are never dropped.
+
+    The window is bounded (limit * SCAN_FACTOR) so a cycle cannot walk 1,800
+    leads looking for work. This decides who is CONSIDERED; evaluate_next_action
+    still decides who may be contacted, per lead, in the caller.
+    """
+    return (
+        db.query(B2BLead)
+        .filter(B2BLead.contact_status.notin_(["OPTED_OUT", "DO_NOT_CONTACT", "BOUNCED"]))
+        .filter(B2BLead.status.notin_(["DO_NOT_CONTACT", "CLOSED_LOST", "DISQUALIFIED",
+                                       "ORDER_WON"]))
+        .filter(
+            ((B2BLead.email.isnot(None)) & (B2BLead.email != ""))
+            | ((B2BLead.whatsapp_number.isnot(None)) & (B2BLead.whatsapp_number != ""))
+        )
+        .order_by(_contactable_first(), B2BLead.coffee_buying_score.desc().nullslast(),
+                  B2BLead.score.desc(), B2BLead.id.asc())
+        .limit(max(limit, limit * SCAN_FACTOR))
+        .all()
+    )
+
+
 def run_cycle(db: Session, limit: int = 20) -> dict:
     """Classify and execute due outreach without founder approval.
 
@@ -889,30 +959,7 @@ def run_cycle(db: Session, limit: int = 20) -> dict:
     Never invents a send: every provider result is persisted and every blocked
     or unconfigured path is explicit. Negative/opted-out contacts stop.
     """
-    SCAN_FACTOR = 8
-
-    candidates = (
-        db.query(B2BLead)
-        .filter(B2BLead.contact_status.notin_(["OPTED_OUT", "DO_NOT_CONTACT", "BOUNCED"]))
-        .filter(B2BLead.status.notin_(["DO_NOT_CONTACT", "CLOSED_LOST", "DISQUALIFIED",
-                                       "ORDER_WON"]))
-        # A channel must actually exist. This is the filter whose absence made
-        # 16 of 20 slots unusable — they were ranked, fetched and executed only
-        # to be told there was no address on file.
-        .filter(
-            ((B2BLead.email.isnot(None)) & (B2BLead.email != ""))
-            | ((B2BLead.whatsapp_number.isnot(None)) & (B2BLead.whatsapp_number != ""))
-        )
-        # Fit first, and deliberately NOT B2BLead.score: that column is 0 on
-        # 1,749 of 1,831 leads, so ordering by it was ordering by insertion id.
-        # coffee_buying_score is real category evidence — cafe 95, hotel 90,
-        # restaurant 70, kirana 65, office 45. 0 means UNCLASSIFIED, not low
-        # fit, so those sort last but are never dropped.
-        .order_by(B2BLead.coffee_buying_score.desc().nullslast(),
-                  B2BLead.score.desc(), B2BLead.id.asc())
-        .limit(max(limit, limit * SCAN_FACTOR))
-        .all()
-    )
+    candidates = select_candidates(db, limit)
 
     leads, skipped_ineligible = [], 0
     for lead in candidates:

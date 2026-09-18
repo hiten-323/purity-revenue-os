@@ -24,6 +24,7 @@ from app.services.smart_outreach import (
     classify_lead,
     plan_touch,
     execute_one,
+    select_candidates,
 )
 
 POSITIVE_INTENTS = {
@@ -263,13 +264,12 @@ def run_automatic_cycle(db: Session, limit: int = 20) -> dict:
     """
     ensure_schema()
     memory = sync_inbound_memory(db)
-    leads = (
-        db.query(B2BLead)
-        .filter(B2BLead.contact_status.notin_(("OPTED_OUT", "DO_NOT_CONTACT", "BOUNCED")))
-        .order_by(B2BLead.score.desc(), B2BLead.id.asc())
-        .limit(limit)
-        .all()
-    )
+    # The same selector run_cycle uses, rather than a second one. This function
+    # used to take the top `limit` by B2BLead.score, and score is 0 on nearly
+    # every row — so it re-examined the identical 20 leads every cycle, none of
+    # which had a usable channel, and sent nothing for as long as it ran while
+    # logging a healthy pass. See smart_outreach.select_candidates.
+    leads = select_candidates(db, limit)
     results = []
     for lead in leads:
         try:
