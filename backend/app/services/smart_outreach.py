@@ -875,7 +875,7 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
             campaign = None
             template_key = "catalogue_request"
 
-        result = send_whatsapp(lead, text, campaign_name=campaign)
+        result = send_whatsapp(lead, text, campaign_name=campaign, db=db)
         _record(
             db,
             lead,
