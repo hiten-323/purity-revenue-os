@@ -143,7 +143,7 @@ def record(lead, db, *, source: str, evidence: str, message_id: str = "", create
 
 def revoke(lead, db, *, evidence: str, source: str = "WHATSAPP_INBOUND") -> dict:
     """Revoke WhatsApp permission when the business explicitly asks us to stop."""
-    from app.models.models import WorkflowEvent
+    from app.models.models import WorkflowEvent, WorkflowExecution, OutreachReminder
     evidence = (evidence or "").strip()
     if not evidence:
         raise ValueError("WhatsApp revocation requires evidence")
@@ -151,6 +151,22 @@ def revoke(lead, db, *, evidence: str, source: str = "WHATSAPP_INBOUND") -> dict
     lead.consent_status = "REVOKED"
     lead.consent_source = source
     lead.consent_timestamp = now
+
+    for execution in db.query(WorkflowExecution).filter(
+        WorkflowExecution.lead_id == lead.id,
+        WorkflowExecution.workflow_type == "WHATSAPP_CONFIRM",
+        WorkflowExecution.status.in_(("REQUESTED", "PENDING")),
+    ).all():
+        execution.status = "FAILED"
+        execution.error = "WhatsApp consent revoked before execution"
+
+    for reminder in db.query(OutreachReminder).filter(
+        OutreachReminder.lead_id == lead.id,
+        OutreachReminder.channel == "whatsapp",
+        OutreachReminder.status == "SCHEDULED",
+    ).all():
+        reminder.status = "CANCELLED"
+
     db.add(WorkflowEvent(
         lead_id=lead.id, event_type="WHATSAPP_CONSENT_REVOKED",
         actor="SYSTEM", channel="whatsapp",
