@@ -125,6 +125,16 @@ class AICallOutcomeBody(BaseModel):
     interest: str = ""
     callback_window: str = ""
     transcript: str = ""
+    # Only meaningful with WHATSAPP_OPT_IN: a number the business read out on
+    # the call. Empty means "the number you are calling" — see
+    # founder_call_pipeline._call_whatsapp_destination.
+    whatsapp_number: str = ""
+    # What the call learned, for reporting only — founder_call_pipeline.
+    # CALL_DETAIL_VALUES is the vocabulary; anything outside it is dropped.
+    preferred_channel: str = ""
+    handles_instant_coffee: str = ""
+    decision_maker: str = ""
+    objection: str = ""
 
 
 @router.post("/ai-call-outcome", dependencies=[Depends(require_api_admin)])
@@ -170,6 +180,11 @@ def post_ai_call_outcome(body: AICallOutcomeBody, db: Session = Depends(get_db))
             interest=body.interest,
             callback_window=body.callback_window,
             transcript=body.transcript,
+            whatsapp_number=body.whatsapp_number,
+            details={"preferred_channel": body.preferred_channel,
+                     "handles_instant_coffee": body.handles_instant_coffee,
+                     "decision_maker": body.decision_maker,
+                     "objection": body.objection},
         )
     except ValueError as e:
         db.rollback()
