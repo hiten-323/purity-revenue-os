@@ -133,6 +133,17 @@ def test_consent_is_not_granted_when_there_is_no_number_to_bind_it_to(db):
     assert _events(db, lead, "WHATSAPP_CONSENT_RECORDED") == []
 
 
+def test_explicit_whatsapp_opt_out_revokes_existing_consent(db):
+    lead = _asked(db, whatsapp_number="+919876543210", consent_status="EXPLICIT",
+                  consent_source="FOUNDER_CALL", consent_phone="+919876543210")
+    result = whatsapp_consent.capture_email_reply(
+        lead, db, "Please don't WhatsApp me anymore.")
+    assert result["revoked"] is True
+    assert lead.consent_status == "REVOKED"
+    assert len(_events(db, lead, "WHATSAPP_CONSENT_REVOKED")) == 1
+    assert consent_check(lead)[0] is False
+
+
 # ── the writer itself ────────────────────────────────────────────────────────
 
 def test_an_unrecognised_source_is_refused(db):
