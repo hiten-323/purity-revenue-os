@@ -155,6 +155,7 @@ def test_2xx_without_a_message_id_is_accepted_not_failed(monkeypatch):
     monkeypatch.setenv("AISENSY_ENABLED", "1")
     monkeypatch.setenv("AISENSY_API_KEY", "k")
     monkeypatch.setenv("WHATSAPP_TEMPLATE", "Purity Outreach")
+    monkeypatch.setenv("WHATSAPP_CAMPAIGN_LIVE", "1")
 
     r = transport.send_template("9876543210", "Purity Outreach",
                                 client=_fake_client(200, '{"success":true}'))
@@ -169,6 +170,7 @@ def test_a_message_id_is_used_when_the_provider_gives_one(monkeypatch):
     monkeypatch.setenv("AISENSY_ENABLED", "1")
     monkeypatch.setenv("AISENSY_API_KEY", "k")
     monkeypatch.setenv("WHATSAPP_TEMPLATE", "Purity Outreach")
+    monkeypatch.setenv("WHATSAPP_CAMPAIGN_LIVE", "1")
 
     for body in ('{"messageId":"abc123"}', '{"data":{"id":"abc123"}}',
                  '{"wamid":"abc123"}'):
@@ -181,6 +183,7 @@ def test_non_2xx_is_a_failure_with_the_status_named(monkeypatch):
     monkeypatch.setenv("AISENSY_ENABLED", "1")
     monkeypatch.setenv("AISENSY_API_KEY", "k")
     monkeypatch.setenv("WHATSAPP_TEMPLATE", "Purity Outreach")
+    monkeypatch.setenv("WHATSAPP_CAMPAIGN_LIVE", "1")
 
     r = transport.send_template("9876543210", "Purity Outreach",
                                 client=_fake_client(400, '{"error":"campaign not live"}'))
@@ -214,6 +217,7 @@ def test_the_sender_still_refuses_without_consent(monkeypatch):
     monkeypatch.setenv("AISENSY_ENABLED", "1")
     monkeypatch.setenv("AISENSY_API_KEY", "k")
     monkeypatch.setenv("WHATSAPP_TEMPLATE", "Purity Outreach")
+    monkeypatch.setenv("WHATSAPP_CAMPAIGN_LIVE", "1")
 
     class Lead:
         consent_status = "UNKNOWN"
