@@ -59,6 +59,38 @@ OPT_OUT_SENTENCE = (
     'If you would rather not hear from us, reply "unsubscribe" and we will '
     "close your file."
 )
+
+# ── Asking for WhatsApp, which is the only lawful way that channel opens ────
+#
+# Enrichment finding a mobile number is not permission, and a business
+# publishing a WhatsApp number is not permission either. The only things that
+# open the channel are a business saying so on a call or saying so in a reply,
+# and email is the one route that can ask at scale.
+#
+# The ask requests the WORD, not a bare "yes", so the reply carries its own
+# evidence: "yes" in an inbox proves nothing on its own, while "yes please
+# send it on WhatsApp" is the sentence that has to survive being questioned
+# years later. reply_intelligence's WHATSAPP_OPT_IN pattern matches this
+# phrasing, and a test pins the round trip.
+WHATSAPP_ASK_SENTENCE = (
+    'If WhatsApp is easier, reply "WhatsApp" and I will send it there instead.'
+)
+
+
+def whatsapp_ask(lead) -> str:
+    """The ask, but only when it could be acted on.
+
+    Asking a lead with no number is noise, and asking one that already
+    consented is asking for permission we have — which reads as if nobody
+    recorded the last answer.
+    """
+    if lead is None:
+        return ""
+    if (getattr(lead, "consent_status", "") or "").upper() in ("EXPLICIT", "OPTED_IN"):
+        return ""
+    if not ((getattr(lead, "whatsapp_number", None) or getattr(lead, "phone", None) or "")).strip():
+        return ""
+    return "\n\n" + WHATSAPP_ASK_SENTENCE
 OPT_OUT_TEXT = "\n\n" + OPT_OUT_SENTENCE
 OPT_OUT_HTML = (
     '<p style="color:#888;font-size:12px;margin-top:18px">' + OPT_OUT_SENTENCE + "</p>"

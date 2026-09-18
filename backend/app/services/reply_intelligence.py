@@ -146,6 +146,24 @@ INTENTS = {
     "DO_NOT_CONTACT":    (r"\b(remove me|unsubscribe|stop (emailing|contacting)|"
                           r"do not (contact|email)|don't contact|"
                           r"take me off)\b", "negative"),
+    # An explicit request to be contacted on WhatsApp, and nothing weaker.
+    #
+    # The reply must NAME the channel. A bare "yes" is not matched here even
+    # when the email that prompted it asked about WhatsApp, because the
+    # evidence row then reads "yes" and proves nothing on its own — which is
+    # precisely the argument someone will need it to survive. The outbound ask
+    # (email_sender.whatsapp_ask) therefore requests the word itself, so the
+    # reply carries its own proof.
+    #
+    # Deliberately NOT matched: "we are on whatsapp", "our whatsapp is 98...",
+    # "whatsapp group", a signature block containing a WhatsApp number. Those
+    # state that the channel exists, which is never permission to use it.
+    "WHATSAPP_OPT_IN":   (r"(?:\b(?:yes|yeah|sure|ok|okay|please|kindly|pls|do)\b[^.!?\n]{0,20}"
+                          r"\bwhats\s?app\b"
+                          r"|\bwhats\s?app\b[^.!?\n]{0,20}\b(?:is\s+)?(?:fine|ok|okay|good|better|"
+                          r"works|preferred|please|yes)\b"
+                          r"|\b(?:send|share|forward|ping|message|msg|share it|send it)\b"
+                          r"[^.!?\n]{0,25}\bwhats\s?app\b)", "positive"),
 }
 
 # Which intents pause cold outreach. Machine kinds are deliberately absent —
@@ -155,7 +173,7 @@ PAUSING = ("PRICING_REQUEST", "CATALOGUE_REQUEST", "SAMPLE_REQUEST",
            "VENDOR_REGISTRATION", "PROCUREMENT_REDIRECT", "CALL_LATER",
            "NEED_INFO", "WRONG_CONTACT", "EXISTING_SUPPLIER",
            "PRICE_TOO_HIGH", "NO_REQUIREMENT", "NOT_INTERESTED",
-           "DO_NOT_CONTACT")
+           "DO_NOT_CONTACT", "WHATSAPP_OPT_IN")
 
 # Response-time targets. Sorting a reply queue by arrival time treats a sample
 # request the same as a vacation notice.
@@ -167,7 +185,7 @@ SLA_MINUTES = {"MEETING_REQUEST": 15, "SAMPLE_REQUEST": 30,
                "WRONG_CONTACT": 1440, "EXISTING_SUPPLIER": 1440,
                "CALL_LATER": 1440, "PRICE_TOO_HIGH": 1440,
                "NO_REQUIREMENT": 2880, "NOT_INTERESTED": 2880,
-               "DO_NOT_CONTACT": 60}
+               "DO_NOT_CONTACT": 60, "WHATSAPP_OPT_IN": 60}
 
 NEXT_ACTION = {
     "PRICING_REQUEST":   ("DRAFT_PRICING", "send the rate card for their category"),
@@ -187,6 +205,7 @@ NEXT_ACTION = {
     "NO_REQUIREMENT":    ("NURTURE", "low frequency, seasonal check-in"),
     "NOT_INTERESTED":    ("CLOSE_POLITELY", "close the file, leave the door open"),
     "DO_NOT_CONTACT":    ("SUPPRESS_ACCOUNT", "suppress immediately, whole account"),
+    "WHATSAPP_OPT_IN":   ("SEND_WHATSAPP", "explicit opt-in — WhatsApp is now a permitted channel"),
 }
 
 # Actions the founder must always take personally.
@@ -252,9 +271,24 @@ def analyse(subject: str, body: str, headers: dict | None = None) -> dict:
     sla = min([SLA_MINUTES[n] for n in names if n in SLA_MINUTES], default=240)
 
     # Rank the actions: the most commercially urgent intent wins.
+    #
+    # `ordered` is empty whenever a human writes something this table does not
+    # recognise, which is most short replies: "ok", "Thanks, noted.", "Yes
+    # please." Indexing it directly raised IndexError, and the caller in
+    # endpoints.sync_email_replies catches that as "reply auto-draft failed" —
+    # so the reply was stored, the lead was marked REPLIED, and then the
+    # intelligence, the trust promotion and the engagement signal that closes
+    # the account to cold outreach were all silently skipped. Found by the
+    # consent tests below, on deployed production code.
+    #
+    # An unreadable reply is founder work, not an error: a human said something
+    # and nobody can tell what, which is exactly when a person should look.
     ordered = sorted(names, key=lambda n: SLA_MINUTES.get(n, 9999))
-    act, why = NEXT_ACTION.get(ordered[0], ("FOUNDER_REVIEW",
-                                            "unclassified — founder decides"))
+    act, why = (
+        NEXT_ACTION.get(ordered[0], ("FOUNDER_REVIEW", "unclassified — founder decides"))
+        if ordered
+        else ("FOUNDER_REVIEW", "a human replied and no intent matched — founder reads it")
+    )
     conf = it["confidence"]
     needs_founder = (conf < 70 or act in FOUNDER_ONLY or not names)
 
@@ -329,6 +363,34 @@ def process(lead, db, subject: str, body: str, headers: dict | None = None,
         tp.on_reply(lead, db, body or "", r["polarity"])
     elif r["sender"]["kind"] == "BOUNCE":
         tp.on_delivery(lead, db, delivered=False, code="550")
+
+    # An explicit WhatsApp opt-in, from a human, becomes recorded consent —
+    # email asking for it is the cleanest automated route to a channel that
+    # otherwise has no lawful way to open.
+    #
+    # Guarded on r["human"] for the reason this whole module exists: an
+    # auto-responder whose signature block mentions WhatsApp is not a business
+    # agreeing to anything. The words themselves are stored as the evidence,
+    # and whatsapp_consent.record refuses to bind consent when there is no
+    # number to bind it to.
+    if r["human"] and any(i["intent"] == "WHATSAPP_OPT_IN" for i in r["intents"]):
+        from app.services import whatsapp_consent
+
+        try:
+            whatsapp_consent.record(
+                lead, db,
+                source="EMAIL_REPLY_WHATSAPP_REQUEST",
+                evidence=(body or "").strip(),
+                message_id=str((headers or {}).get("Message-ID")
+                               or (headers or {}).get("message-id") or ""),
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Never let consent bookkeeping lose the reply itself. A failure
+            # here means no consent was recorded, which is the safe direction.
+            import logging
+            logging.getLogger(__name__).warning(
+                "whatsapp consent not recorded for lead %s: %s: %s",
+                getattr(lead, "id", None), type(exc).__name__, exc)
 
     if facts:
         db.add(WorkflowEvent(
