@@ -1396,6 +1396,14 @@ def reconcile_inbound_replies_via_imap(db) -> dict:
                     _log.debug('suppressed: %s: %s', type(_exc).__name__, _exc)
                     
             intent = classify_intent(body or msg.get("Subject", ""))
+            # A reply to the dedicated WhatsApp request can grant consent.
+            try:
+                from app.services.whatsapp_consent import capture_email_reply
+                consent_result = capture_email_reply(lead, db, body or msg.get("Subject", ""), message_id=msg.get("Message-ID", ""))
+                if consent_result.get("recorded"):
+                    print(f"WhatsApp consent captured for {lead.company}: {consent_result.get('consent_phone')}")
+            except Exception as _exc:
+                _log.warning("WhatsApp consent capture failed: %s", _exc)
             
             # Register interaction + pause sequence
             existing_inter = db.query(LeadInteraction).filter(
