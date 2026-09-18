@@ -188,11 +188,122 @@ CALLABLE_SEGMENTS = tuple(sorted(CALLABLE_CATEGORIES))
 
 # ------------------------------------------------------------- disclosure --
 
+# The line spoken first, before the model takes over.
+#
+# Short and conversational on purpose: the previous opening ("Hello, this is an
+# AI assistant calling on behalf of Pure Pantry Provisions. We supply coffee to
+# cafes and businesses. Is this a good time for one quick question?") delivered
+# a pitch before the person had agreed to listen, which is what makes a call
+# sound like telemarketing. This one asks for the minute and lets the
+# conversation earn the next one.
+#
+# The AI disclosure stays in the first sentence. Founder decision, 2026-09-18,
+# choosing it over "disclose only if asked": it is one clause of the lawful
+# basis in this module's docstring, and script_discloses() refuses to dial
+# without it.
 OPENING_DISCLOSURE = (
-    "Hello, this is an AI assistant calling on behalf of Pure Pantry "
-    "Provisions. We supply coffee to cafes and businesses. Is this a good "
-    "time for one quick question?"
+    "Hi, this is an AI assistant calling on behalf of Purity Beans. "
+    "Do you have a quick minute?"
 )
+
+# Words that sit in contact_name but are not a person's name. Greeting a
+# business as "Hi Manager" or "Hi Sales" is worse than not using a name at all.
+_NOT_A_FIRST_NAME = frozenset({
+    "mr", "mrs", "ms", "dr", "sir", "madam", "maam", "shri", "smt",
+    "manager", "owner", "admin", "sales", "info", "team", "office",
+    "reception", "contact", "purchase", "procurement", "accounts", "hr",
+    "support", "director", "proprietor", "partner", "the",
+})
+
+
+def _first_name(lead) -> str:
+    """A first name worth saying out loud, or "" when the record does not
+    really have one. Scraped contact_name holds roles, companies and
+    salutations as often as names, so anything doubtful is dropped."""
+    for token in (getattr(lead, "contact_name", "") or "").replace(".", " ").split():
+        word = token.strip(",;:()")
+        if word.lower() in _NOT_A_FIRST_NAME:
+            continue
+        if word.isalpha() and 2 <= len(word) <= 20:
+            return word[:1].upper() + word[1:].lower()
+        return ""
+    return ""
+
+
+def call_context(lead, db) -> dict:
+    """What the agent knows before it speaks, taken only from the record.
+
+    Three things, each answering a question a real caller would be expected
+    to handle without improvising:
+
+      provenance        "how did you get my number?" -- answered from
+                        phone_source / lead_source. Empty when unknown, and the
+                        prompt then says so rather than inventing a source.
+      business_type     lets the qualifying question be about THEIR business
+                        ("you work with packaged grocery") instead of generic.
+      previous_contact  "didn't you email us?" -- the last proven email or
+                        WhatsApp touch, so the agent never pretends to be a
+                        first contact when it is not.
+
+    Nothing here is inferred. A field the record does not hold is "".
+    """
+    from app.models.models import WorkflowEvent
+
+    business_type = next(
+        (v.strip().replace("_", " ") for v in (
+            getattr(lead, "division", ""), getattr(lead, "segment", ""),
+            getattr(lead, "searched_category", ""),
+        ) if (v or "").strip()),
+        "",
+    )
+
+    previous_contact = ""
+    if db is not None and getattr(lead, "id", None):
+        last = (db.query(WorkflowEvent)
+                .filter(WorkflowEvent.lead_id == lead.id,
+                        WorkflowEvent.event_type.in_(("EMAIL_SENT", "WHATSAPP_SENT")))
+                .order_by(WorkflowEvent.occurred_at.desc()).first())
+        if last is not None and last.occurred_at:
+            channel = "an email" if last.event_type == "EMAIL_SENT" else "a WhatsApp message"
+            previous_contact = f"we sent {channel} on {last.occurred_at:%d %b %Y}"
+
+    return {"provenance": _provenance(lead), "business_type": business_type[:120],
+            "previous_contact": previous_contact}
+
+
+# Public listings a business can recognise as where its number is published.
+# phone_source also names the search tools that FOUND those listings
+# (Perplexity, BraveSearch); they are not where the number lives, so they are
+# not named on a call. UNVERIFIED_IMPORT maps to nothing: an unknown source is
+# said to be unknown.
+_PUBLIC_LISTINGS = {
+    "googleplaces": "Google Maps", "google maps": "Google Maps",
+    "indiamart": "IndiaMART", "tradeindia": "TradeIndia", "justdial": "Justdial",
+    "openstreetmap": "OpenStreetMap",
+    "nestle_distributor_locator": "a public distributor listing",
+}
+
+
+def _provenance(lead) -> str:
+    """Where the business's number is publicly listed, in words it would know."""
+    names = []
+    raw = f"{getattr(lead, 'phone_source', '') or ''},{getattr(lead, 'lead_source', '') or ''}"
+    for part in raw.split(","):
+        name = _PUBLIC_LISTINGS.get(part.strip().lower())
+        if name and name not in names:
+            names.append(name)
+    return " and ".join(names[:2])
+
+
+def opening_for(lead) -> str:
+    """The opening for this lead: their first name when we genuinely know it.
+
+    Built from OPENING_DISCLOSURE rather than written separately, so the gate
+    that checks OPENING_DISCLOSURE is checking the words this lead will hear.
+    may_place_ai_call runs script_discloses() on this exact string.
+    """
+    name = _first_name(lead)
+    return OPENING_DISCLOSURE.replace("Hi,", f"Hi {name},", 1) if name else OPENING_DISCLOSURE
 
 # What the AI may NOT say, sent with every dispatch.
 #
@@ -210,17 +321,25 @@ OPENING_DISCLOSURE = (
 # forbidden list is the same one the email copy has honoured for months: no
 # turnover, no ISO, no capacity, no past government supply, no client names.
 CALL_CONSTRAINTS = (
-    "Never state a price, a discount, or a delivery date. If asked, say the "
-    "founder will confirm exact pricing and offer to have him call.",
+    "Never state a price, and never estimate one. The same applies to margins, "
+    "discounts, minimum order quantities, credit terms, territory or "
+    "exclusivity, delivery timelines and sales figures. If asked, say: "
+    "\"I don't want to give you an incorrect figure. I'll have the team share "
+    "the current commercial terms with you.\"",
     "Never take an order or commit to a quantity.",
     "Only these claims are permitted: 100% coffee, zero chicory, no fillers, "
     "no artificial flavours, FSSAI licensed, GST and MSME registered, "
     "PAN-India dispatch, food-grade glass jars.",
-    "Never claim turnover, ISO certification, manufacturing capacity, past "
-    "government supply, or name any client.",
-    "If you do not know something, say you will have the founder confirm it. "
-    "Do not guess.",
+    "Never claim turnover, ISO or any certification not listed above, "
+    "manufacturing capacity, past government supply, or name any client.",
+    "If you do not know something, say the team will confirm it. Do not guess.",
 )
+
+# Topics a person should own. When the conversation reaches one, the agent
+# offers the team rather than continuing -- the same list the prompt names,
+# kept here so the backend and the agent cannot drift apart.
+HANDOFF_TOPICS = ("margins", "territory or exclusivity", "credit terms",
+                  "a custom or bulk order", "a formal quotation")
 
 QUALIFICATION_QUESTIONS = (
     "Are you the person who handles coffee or procurement here?",
@@ -383,7 +502,8 @@ def may_place_ai_call(lead) -> tuple[bool, str]:
         return False, ("segment %s is not callable; allowed: %s"
                        % (segment or "(none)", ", ".join(CALLABLE_SEGMENTS)))
 
-    ok, why = script_discloses(OPENING_DISCLOSURE)
+    # The per-lead line, not the template: that is what this lead will hear.
+    ok, why = script_discloses(opening_for(lead))
     if not ok:
         return False, "opening script fails disclosure: %s" % why
 
@@ -449,14 +569,82 @@ def _event(lead, db, frm: str, to: str, note: str) -> None:
         pass
 
 
+def _call_whatsapp_destination(lead, supplied: str) -> tuple[str, str, str]:
+    """Which number a WhatsApp opt-in on this call actually covers.
+
+    The agent asks "can I send it to this number, or would you prefer a
+    different one?" and reports only a number they READ OUT; an empty value
+    means "this number", i.e. the one that was dialled — lead.phone. That is
+    deliberately not whatsapp_sender's destination order (whatsapp_number
+    first): a WhatsApp number scraped earlier is not the number they just
+    agreed to, and binding consent to it would message a destination nobody
+    on this call mentioned.
+
+    Returns (destination, how, refusal). A non-empty refusal means no consent:
+    a landline cannot receive WhatsApp, and a number that is not a
+    well-formed Indian mobile is more likely a mishearing than a destination.
+    """
+    import re
+
+    from app.services import identity
+
+    if (supplied or "").strip():
+        digits = re.sub(r"\D", "", supplied)
+        if digits.startswith("91") and len(digits) == 12:
+            digits = digits[2:]
+        digits = digits.lstrip("0")
+        if not (len(digits) == 10 and digits[0] in "6789"):
+            return "", "", (f"the number given on the call ({supplied!r}) is not a valid "
+                            f"Indian mobile — likely misheard; confirm it before messaging")
+        return digits, "read out on the call", ""
+
+    dialled = (getattr(lead, "phone", "") or "").strip()
+    if not dialled:
+        return "", "", "no dialled number on record to bind the opt-in to"
+    if identity.is_landline(dialled):
+        return "", "", (f"{dialled} is a landline — WhatsApp cannot reach it; "
+                        f"ask for a mobile number")
+    return dialled, "the number that was called", ""
+
+
+# What the call learned, beyond the outcome, in a closed vocabulary so it can
+# be counted: which channel converts, which objection recurs, how many trade
+# leads already carry the category. A value outside a field's set is dropped,
+# not mapped to the nearest one -- an absent field reads as "not learned",
+# which is true, where a guessed one would read as a fact.
+CALL_DETAIL_VALUES = {
+    "preferred_channel": frozenset({"WHATSAPP", "EMAIL", "CALL", "NONE"}),
+    "handles_instant_coffee": frozenset({"YES", "NO", "UNKNOWN"}),
+    "decision_maker": frozenset({"YES", "NO", "UNKNOWN"}),
+    "objection": frozenset({"NONE", "EXISTING_SUPPLIER", "PRICE", "NO_NEED",
+                            "TIMING", "OTHER"}),
+}
+
+
+def clean_call_details(details) -> dict:
+    """Keep only recognised fields holding recognised values."""
+    out = {}
+    for field, allowed in CALL_DETAIL_VALUES.items():
+        value = str((details or {}).get(field) or "").strip().upper()
+        if value in allowed:
+            out[field] = value
+    return out
+
+
 def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
                       interest: str = "", callback_window: str = "",
-                      transcript: str = "") -> str:
+                      transcript: str = "", whatsapp_number: str = "",
+                      details: dict | None = None) -> str:
     """Apply one AI call result. The only entry point after a dial.
 
     Consent is not written here in any branch. An opt-out DOES write
     do_not_call -- that is the business telling us to stop, which is a fact
     about our obligations, not a grant of permission.
+
+    details carries what the call learned beyond the outcome (see
+    CALL_DETAIL_VALUES). It is reporting only: nothing in it grants or
+    withdraws anything. preferred_channel=WHATSAPP in particular is not
+    consent -- only the WHATSAPP_OPT_IN outcome is.
     """
     key = (outcome or "").strip().upper()
     if key not in OUTCOMES:
@@ -496,11 +684,31 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
         # what "who said we could" has to be answerable with years later.
         from app.services import whatsapp_consent
 
-        whatsapp_consent.record(
-            lead, db,
-            source="AI_CALL_WHATSAPP_REQUEST",
-            evidence=(summary or "asked for details on WhatsApp during the AI call"),
-        )
+        destination, how, refusal = _call_whatsapp_destination(lead, whatsapp_number)
+        if refusal:
+            # They asked for WhatsApp, but not on a number WhatsApp can reach.
+            # Recorded as a fact for a person to follow up, never as consent.
+            from app.models.models import WorkflowEvent
+            db.add(WorkflowEvent(
+                lead_id=lead.id, event_type="WHATSAPP_CONSENT_UNBOUND",
+                actor="SYSTEM", channel="phone",
+                payload={"source": "AI_CALL_WHATSAPP_REQUEST",
+                         "evidence": (summary or "")[:1000],
+                         "offered_number": whatsapp_number or getattr(lead, "phone", ""),
+                         "note": refusal},
+                occurred_at=datetime.utcnow()))
+        else:
+            # The destination is the number they agreed to on this call:
+            # either one they read out, or the one they were speaking on. A
+            # WhatsApp number scraped earlier is not what they said yes to, so
+            # it is replaced rather than consulted.
+            lead.whatsapp_number = destination
+            whatsapp_consent.record(
+                lead, db,
+                source="AI_CALL_WHATSAPP_REQUEST",
+                evidence=((summary or "asked for details on WhatsApp during the AI call")
+                          + f" | WhatsApp destination: {destination} ({how})"),
+            )
 
     if target == AI_OPTED_OUT:
         lead.do_not_call = True
@@ -518,6 +726,15 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
                        status="AI_%s" % key, summary=summary[:1000] or None,
                        call_status="COMPLETED"))
 
+    learned = clean_call_details(details)
+    if learned:
+        from app.models.models import WorkflowEvent
+        db.add(WorkflowEvent(
+            lead_id=lead.id, event_type="AI_CALL_DETAILS",
+            actor="ai_voice_agent", channel="phone",
+            payload={"outcome": key, **learned},
+            occurred_at=datetime.utcnow()))
+
     # And on the business's own record, in the same table the founder's own
     # calls write to, so one query gives the whole contact history rather than
     # AI calls in one place and human calls in another.
@@ -526,7 +743,9 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
         lead, db, method=journal.PHONE, outcome=key,
         remark=(summary or f"AI qualification call concluded {key}")
                + (f" | interest: {interest}" if interest else "")
-               + (f" | callback: {callback_window}" if callback_window else ""),
+               + (f" | callback: {callback_window}" if callback_window else "")
+               + "".join(f" | {k.replace('_', ' ')}: {v.lower()}"
+                         for k, v in learned.items()),
         by="ai_voice_agent", force=True)
     return target
 
