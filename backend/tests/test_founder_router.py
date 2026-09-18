@@ -17,7 +17,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.database.database import Base, get_db
-from app.models.models import B2BLead, CallHistory, LeadInteraction, WorkflowEvent
+from app.models.models import B2BLead, CallHistory, LeadInteraction, WorkflowEvent, WorkflowExecution
 from app.api import founder_router
 from conftest import memory_engine
 
@@ -33,7 +33,7 @@ def _client(monkeypatch, secret="test-admin-secret"):
     engine = memory_engine()
     Base.metadata.create_all(engine, tables=[
         B2BLead.__table__, CallHistory.__table__,
-        LeadInteraction.__table__, WorkflowEvent.__table__,
+        LeadInteraction.__table__, WorkflowEvent.__table__, WorkflowExecution.__table__,
     ])
     from sqlalchemy.orm import sessionmaker
     session = sessionmaker(bind=engine)()
@@ -232,3 +232,45 @@ def test_what_the_call_learned_reaches_the_pipeline(monkeypatch):
                   WorkflowEvent.event_type == "AI_CALL_DETAILS").one())
     assert ev.payload["preferred_channel"] == "EMAIL"
     assert ev.payload["objection"] == "EXISTING_SUPPLIER"
+
+
+# ── #27: the founder call queue over HTTP ────────────────────────────────────
+
+def test_a_handoff_on_the_call_shows_up_in_the_founder_queue_and_can_be_closed(monkeypatch):
+    client, session = _client(monkeypatch)
+    lead = _lead(session, phone="9876543212", company="Queue Cafe")
+    hdr = {"X-Api-Admin-Secret": "test-admin-secret"}
+
+    r = client.post("/api/v1/founder/ai-call-outcome", headers=hdr,
+                    json={"lead_id": lead.id, "outcome": "HUMAN_HANDOFF",
+                          "summary": "wants to talk about margins"})
+    assert r.status_code == 200, r.text
+    assert r.json()["stage"] == "FOUNDER_CALL_REQUESTED", "the response says where the lead really is"
+
+    q = client.get("/api/v1/founder/call-queue", headers=hdr)
+    assert q.status_code == 200, q.text
+    items = q.json()["items"]
+    assert [i["lead_id"] for i in items] == [lead.id]
+    assert items[0]["brief"]["business"] == "Queue Cafe"
+    assert "margins" in items[0]["note"]
+
+    done = client.post(f"/api/v1/founder/call-queue/{lead.id}/complete", headers=hdr,
+                       json={"outcome": "NEEDS_PROPOSAL", "note": "send terms"})
+    assert done.status_code == 200, done.text
+    assert done.json()["stage"] == "FOUNDER_CALL_COMPLETED"
+    assert client.get("/api/v1/founder/call-queue", headers=hdr).json()["count"] == 0
+
+    again = client.post(f"/api/v1/founder/call-queue/{lead.id}/complete", headers=hdr,
+                        json={"outcome": "NEEDS_PROPOSAL"})
+    assert again.status_code == 409, "a finished call is not finished twice"
+
+
+def test_the_founder_queue_is_not_public(monkeypatch):
+    """Every item carries a phone number and what the business said."""
+    client, _ = _client(monkeypatch)
+    # require_api_admin refuses with 503, the same as every admin route.
+    assert client.get("/api/v1/founder/call-queue").status_code == 503
+    assert client.get("/api/v1/founder/call-queue",
+                      headers={"X-Api-Admin-Secret": "wrong"}).status_code == 503
+    assert client.post("/api/v1/founder/call-queue/1/complete",
+                       json={"outcome": "X"}).status_code == 503

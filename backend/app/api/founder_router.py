@@ -203,3 +203,50 @@ def post_ai_call_outcome(body: AICallOutcomeBody, db: Session = Depends(get_db))
     db.commit()
 
     return {"status": "recorded", "lead_id": lead.id, "stage": target_stage}
+
+
+# ── the founder call queue ───────────────────────────────────────────────────
+# Where an AI call that ended in "please call me back" / "I'd like to speak to
+# someone" becomes work a person can see and close. Admin-only: every item
+# carries a phone number and the call summary.
+
+class FounderCallDone(BaseModel):
+    outcome: str
+    note: str = ""
+
+
+@router.get("/call-queue", dependencies=[Depends(require_api_admin)])
+def get_founder_call_queue(limit: int = 50, db: Session = Depends(get_db)):
+    """Open founder-call work items, oldest ask first."""
+    from app.services import founder_call_pipeline as pipeline
+
+    items = pipeline.founder_call_queue(db, limit=limit)
+    return {
+        "count": len(items),
+        "items": [{
+            "lead_id": i.lead_id,
+            "requested_at": i.requested_at.isoformat() if i.requested_at else None,
+            "requested_by": i.requested_by,
+            "reason": (i.payload or {}).get("reason"),
+            "note": (i.payload or {}).get("note"),
+            "brief": (i.payload or {}).get("founder_brief"),
+        } for i in items],
+    }
+
+
+@router.post("/call-queue/{lead_id}/complete", dependencies=[Depends(require_api_admin)])
+def post_founder_call_complete(lead_id: int, body: FounderCallDone,
+                               db: Session = Depends(get_db)):
+    """The founder made the call: close the item and record what happened."""
+    from app.services import founder_call_pipeline as pipeline
+
+    lead = db.query(B2BLead).filter(B2BLead.id == lead_id).first()
+    if lead is None:
+        raise HTTPException(404, f"lead {lead_id} not found")
+    try:
+        stage = pipeline.complete_founder_call(lead, db, outcome=body.outcome, note=body.note)
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(409, str(e))
+    db.commit()
+    return {"status": "completed", "lead_id": lead.id, "stage": stage}
