@@ -13,9 +13,9 @@ prospects to call, so losing it costs more than the channel.
 
 So this module refuses to send to a lead without recorded consent. Cold
 first-touch stays on wa.me (the founder's own phone, manual send) via the
-WhatsApp Send Queue. This API path is for people who have opted in — in practice
-someone who REPLIED, which both proves consent and opens Meta's 24-hour
-customer-service window where free-form (non-template) messages are allowed.
+WhatsApp Send Queue. This API path is for people who have opted in, recorded by
+whatsapp_consent with the number it covers. Replying to an email is not that:
+a reply on one channel is not permission on another.
 
 CONFIG (dormant until set — nothing sends without these):
   AISENSY_API_KEY        API key from the AiSensy dashboard
@@ -39,8 +39,8 @@ import httpx
 # Consent values we treat as a real opt-in.
 CONSENT_OK = {"EXPLICIT", "OPTED_IN"}
 
-# Statuses that prove the lead messaged/replied to us — that is an opt-in and
-# opens Meta's 24h customer-service window.
+# Statuses reached after the lead replied to us on SOME channel. Read only by
+# in_service_window(). A reply is not WhatsApp consent -- see consent_check.
 ENGAGED = {"REPLIED", "MEETING_BOOKED", "MEETING_COMPLETED", "SAMPLE_SENT",
            "FEEDBACK_PENDING", "FEEDBACK_RECEIVED", "PROPOSAL_SENT",
            "NEGOTIATION", "ORDER_WON", "ONBOARDED"}
@@ -52,7 +52,7 @@ SERVICE_WINDOW_HOURS = 24
 class WaResult:
     # `sent` means AiSensy accepted the request. It does NOT mean the recipient
     # received/read it; those facts must come from provider status callbacks.
-    status: str                      # sent | blocked | failed | not_configured
+    status: str                      # sent | blocked | failed | unknown | not_configured
     reason: str = ""
     message_id: str = ""
     response: str = ""
@@ -77,6 +77,8 @@ def consent_check(lead) -> tuple[bool, str]:
     status = (getattr(lead, "consent_status", None) or "UNKNOWN").upper()
     if getattr(lead, "do_not_call", False):
         return False, "lead is on do-not-contact"
+    if status == "REVOKED":
+        return False, "WhatsApp consent was revoked — the business asked us to stop"
     if status in CONSENT_OK:
         # Consent is granted for a NUMBER, recorded at consent_phone; the row
         # can still drift (re-enrichment, a manual fix, a corruption bug) so
@@ -97,8 +99,13 @@ def consent_check(lead) -> tuple[bool, str]:
                     "carry over to a changed number" % (bound_to, current)
                 )
         return True, f"consent recorded: {status}"
-    if (getattr(lead, "status", "") or "") in ENGAGED:
-        return True, "lead replied to us — opt-in + 24h service window open"
+    # There used to be a shortcut here: any lead whose status was REPLIED (or
+    # further along) passed as "opt-in + 24h window open". Nothing checked the
+    # window or the channel, so an EMAIL reply -- "not interested" included --
+    # licensed WhatsApp, and a business that replied "stop" and was REVOKED
+    # still passed. A real WhatsApp reply records EXPLICIT consent through
+    # whatsapp_consent.capture_whatsapp_inbound, bound to its number, so the
+    # shortcut granted nothing a genuine reply needs.
     return False, (
         f"no opt-in on record (consent_status={status}). Meta requires opt-in before "
         f"business-initiated WhatsApp. Use the wa.me Send Queue for cold first touch."
@@ -151,9 +158,28 @@ def _extract_provider_message_id(response_text: str, headers) -> str:
     return ""
 
 
+# A second send to the same lead minutes after the first is a double-click or
+# a retried request, never a cadence: the shortest real follow-up gap is days.
+DUPLICATE_WINDOW_MINUTES = 10
+
+
+def recent_send(db, lead, minutes: int = DUPLICATE_WINDOW_MINUTES) -> bool:
+    """True if a WhatsApp to this lead was sent inside the window. Every send
+    path -- the manual endpoint, the reminder executor, Smart Outreach --
+    records WHATSAPP_SENT, so one ledger answers for all three."""
+    from app.models.models import WorkflowEvent
+
+    since = datetime.utcnow() - timedelta(minutes=minutes)
+    return db.query(WorkflowEvent.id).filter(
+        WorkflowEvent.lead_id == lead.id,
+        WorkflowEvent.event_type.in_(("WHATSAPP_SENT", "WHATSAPP_SEND_UNCONFIRMED")),
+        WorkflowEvent.occurred_at >= since,
+    ).first() is not None
+
+
 def send_whatsapp(lead, message: str, campaign_name: Optional[str] = None,
                   template_params: Optional[list[str]] = None,
-                  timeout: float = 20.0) -> WaResult:
+                  timeout: float = 20.0, db=None) -> WaResult:
     """
     The single WhatsApp send path. Consent first, then the one transport.
 
@@ -179,6 +205,12 @@ def send_whatsapp(lead, message: str, campaign_name: Optional[str] = None,
     allowed, reason = consent_check(lead)
     if not allowed:
         return WaResult(status="blocked", reason=reason)
+    # AiSensy takes no idempotency key, so a repeat is refused before it can
+    # reach the provider. Callers pass db; without it there is no ledger to read.
+    if db is not None and recent_send(db, lead):
+        return WaResult(status="blocked", reason=(
+            f"a WhatsApp was sent to this lead in the last "
+            f"{DUPLICATE_WINDOW_MINUTES} minutes — not sending a duplicate"))
 
     from app.services import whatsapp_aisensy as transport
 
@@ -195,6 +227,15 @@ def send_whatsapp(lead, message: str, campaign_name: Optional[str] = None,
 
     result = transport.send_template(phone, template, params=params,
                                      timeout=timeout)
+    if result.status == "unknown" and db is not None:
+        # Possibly delivered. Recorded so the duplicate guard treats it as a
+        # send; the founder reconciles it against the AiSensy log.
+        from app.models.models import WorkflowEvent
+        db.add(WorkflowEvent(
+            lead_id=lead.id, event_type="WHATSAPP_SEND_UNCONFIRMED",
+            actor="SYSTEM", channel="whatsapp",
+            payload={"to": phone, "template": template, "reason": result.reason[:300]},
+            occurred_at=datetime.utcnow()))
     return WaResult(
         status=result.status,
         reason=result.reason,

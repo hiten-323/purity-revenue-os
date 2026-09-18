@@ -747,12 +747,117 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
                + "".join(f" | {k.replace('_', ' ')}: {v.lower()}"
                          for k, v in learned.items()),
         by="ai_voice_agent", force=True)
-    return target
+
+    # The business asked for a person. MAX_AI_COLD_CALLS_PER_LEAD is 1, so a
+    # callback, a meeting or a handoff can only ever be kept by a human --
+    # left at AI_INTEREST_DETECTED, the ask was recorded and nobody was told.
+    if key in FOUNDER_CALL_ASKS:
+        request_founder_call(
+            lead, db, reason=FOUNDER_CALL_ASKS[key], requested_by="AI",
+            note=(summary or "")
+                 + (f" | callback: {callback_window}" if callback_window else ""))
+    # Where the lead actually is -- past `target` when the ask was queued.
+    # The webhook reports this, and a retry reports stage_of(); they must agree.
+    return stage_of(lead)
 
 
-def request_founder_call(lead, db, *, note: str = "") -> str:
-    """Promote an interested lead into the founder queue."""
-    return advance(lead, db, FOUNDER_CALL_REQUESTED, note=note)
+# AI outcomes where the business asked to talk to a person. Each creates a
+# founder-call work item; plain INTERESTED does not -- that one the founder
+# promotes by choice.
+FOUNDER_CALL_ASKS = {
+    "HUMAN_HANDOFF": "asked on the AI call to speak with the team",
+    "CALLBACK_REQUESTED": "asked on the AI call to be called back",
+    "MEETING_REQUESTED": "asked on the AI call for a meeting",
+}
+
+
+def _json_safe(value):
+    """WorkflowExecution.payload is a JSON column; founder_brief holds datetimes."""
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+def request_founder_call(lead, db, *, note: str = "", reason: str = "",
+                         requested_by: str = "FOUNDER") -> str:
+    """Put the lead in the founder's call queue: stage FOUNDER_CALL_REQUESTED
+    plus one REQUESTED "FOUNDER_CALL" work item carrying the brief. Dials
+    nothing. Idempotent: a second request while one is open adds nothing."""
+    from app.models.models import WorkflowEvent, WorkflowExecution
+
+    if stage_of(lead) != FOUNDER_CALL_REQUESTED:
+        advance(lead, db, FOUNDER_CALL_REQUESTED, note=note)
+    if _open_founder_call(lead, db) is None:
+        why = reason or "promoted to the founder call queue"
+        db.add(WorkflowExecution(
+            workflow_type="FOUNDER_CALL", lead_id=lead.id, status="REQUESTED",
+            requested_by=requested_by,
+            payload={"reason": why, "note": (note or "")[:500],
+                     "founder_brief": _json_safe(founder_brief(lead))},
+        ))
+        db.add(WorkflowEvent(
+            lead_id=lead.id, event_type="FOUNDER_CALL_REQUESTED",
+            actor=requested_by, channel="call",
+            payload={"reason": why, "note": (note or "")[:500]},
+            occurred_at=datetime.utcnow(),
+        ))
+    return FOUNDER_CALL_REQUESTED
+
+
+def _open_founder_call(lead, db):
+    from app.models.models import WorkflowExecution
+    return (db.query(WorkflowExecution)
+              .filter(WorkflowExecution.lead_id == lead.id,
+                      WorkflowExecution.workflow_type == "FOUNDER_CALL",
+                      WorkflowExecution.status == "REQUESTED")
+              .first())
+
+
+def founder_call_queue(db, limit: int = 50) -> list:
+    """Open founder-call work items, oldest first -- the order they were asked for."""
+    from app.models.models import WorkflowExecution
+    return (db.query(WorkflowExecution)
+              .filter(WorkflowExecution.workflow_type == "FOUNDER_CALL",
+                      WorkflowExecution.status == "REQUESTED")
+              .order_by(WorkflowExecution.requested_at.asc())
+              .limit(limit).all())
+
+
+def complete_founder_call(lead, db, *, outcome: str, note: str = "") -> str:
+    """The founder made the call. Closes the open work item, advances the
+    stage to FOUNDER_CALL_COMPLETED and writes the founder's own record of it.
+
+    WorkflowEngine's FOUNDER_CALL handler opens a NEW execution each time, so
+    it cannot close the item request_founder_call() opened; this can.
+    """
+    from app.models.models import WorkflowEvent
+
+    outcome = (outcome or "").strip()
+    if not outcome:
+        raise ValueError("a completed founder call needs an outcome")
+    if stage_of(lead) != FOUNDER_CALL_REQUESTED:
+        raise ValueError(f"lead {lead.id} is at {stage_of(lead)}, not in the founder call queue")
+
+    item = _open_founder_call(lead, db)
+    advance(lead, db, FOUNDER_CALL_COMPLETED, note=f"{outcome}: {note}"[:300])
+    if item is not None:
+        item.status = "COMPLETED"
+        item.finished_at = datetime.utcnow()
+        item.result = {"outcome": outcome, "note": (note or "")[:500]}
+    db.add(WorkflowEvent(
+        lead_id=lead.id, event_type="FOUNDER_CALL_COMPLETED",
+        actor="FOUNDER", channel="call",
+        payload={"outcome": outcome, "note": (note or "")[:500]},
+        occurred_at=datetime.utcnow()))
+
+    from app.services import lead_journal as journal
+    journal.record(lead, db, method=journal.PHONE, outcome=outcome[:40],
+                   remark=note or "founder call completed", by="founder", force=True)
+    return FOUNDER_CALL_COMPLETED
 
 
 def founder_queue(db, limit: int = 50):

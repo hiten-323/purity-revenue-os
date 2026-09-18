@@ -87,7 +87,7 @@ class ClientTests(unittest.TestCase):
 
     def test_invalid_phone_rejected(self):
         os.environ.update({"AISENSY_ENABLED": "1", "AISENSY_API_KEY": "test-key-not-real",
-                           "WHATSAPP_TEMPLATE": "PB_TEST"})
+                           "WHATSAPP_TEMPLATE": "PB_TEST", "WHATSAPP_CAMPAIGN_LIVE": "1"})
         try:
             result = AiSensyClient().send(
                 campaign_name="PB_TEST",
@@ -95,7 +95,7 @@ class ClientTests(unittest.TestCase):
             )
             self.assertEqual(result.status, "INVALID_REQUEST")
         finally:
-            [os.environ.pop(k, None) for k in ("AISENSY_ENABLED", "AISENSY_API_KEY", "WHATSAPP_TEMPLATE")]
+            [os.environ.pop(k, None) for k in ("AISENSY_ENABLED", "AISENSY_API_KEY", "WHATSAPP_TEMPLATE", "WHATSAPP_CAMPAIGN_LIVE")]
 
     def test_successful_provider_response(self):
         class _Resp:
@@ -108,7 +108,7 @@ class ClientTests(unittest.TestCase):
                 return _Resp()
 
         os.environ.update({"AISENSY_ENABLED": "1", "AISENSY_API_KEY": "test-key-not-real",
-                           "WHATSAPP_TEMPLATE": "PB_TEST"})
+                           "WHATSAPP_TEMPLATE": "PB_TEST", "WHATSAPP_CAMPAIGN_LIVE": "1"})
         try:
             result = AiSensyClient(http_client=_Client()).send(
                 campaign_name="PB_TEST",
@@ -120,7 +120,7 @@ class ClientTests(unittest.TestCase):
             self.assertFalse(result.delivery_confirmed)
             self.assertEqual(result.message_id, "wamid.TEST123")
         finally:
-            [os.environ.pop(k, None) for k in ("AISENSY_ENABLED", "AISENSY_API_KEY", "WHATSAPP_TEMPLATE")]
+            [os.environ.pop(k, None) for k in ("AISENSY_ENABLED", "AISENSY_API_KEY", "WHATSAPP_TEMPLATE", "WHATSAPP_CAMPAIGN_LIVE")]
 
     def test_http_error(self):
         class _Resp:
@@ -133,7 +133,7 @@ class ClientTests(unittest.TestCase):
                 return _Resp()
 
         os.environ.update({"AISENSY_ENABLED": "1", "AISENSY_API_KEY": "test-key-not-real",
-                           "WHATSAPP_TEMPLATE": "PB_TEST"})
+                           "WHATSAPP_TEMPLATE": "PB_TEST", "WHATSAPP_CAMPAIGN_LIVE": "1"})
         try:
             result = AiSensyClient(http_client=_Client()).send(
                 campaign_name="PB_TEST",
@@ -142,7 +142,7 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(result.status, "FAILED")
             self.assertIn("500", result.reason)
         finally:
-            [os.environ.pop(k, None) for k in ("AISENSY_ENABLED", "AISENSY_API_KEY", "WHATSAPP_TEMPLATE")]
+            [os.environ.pop(k, None) for k in ("AISENSY_ENABLED", "AISENSY_API_KEY", "WHATSAPP_TEMPLATE", "WHATSAPP_CAMPAIGN_LIVE")]
 
     def test_timeout(self):
         class _Client:
@@ -150,7 +150,7 @@ class ClientTests(unittest.TestCase):
                 raise TimeoutError("simulated")
 
         os.environ.update({"AISENSY_ENABLED": "1", "AISENSY_API_KEY": "test-key-not-real",
-                           "WHATSAPP_TEMPLATE": "PB_TEST"})
+                           "WHATSAPP_TEMPLATE": "PB_TEST", "WHATSAPP_CAMPAIGN_LIVE": "1"})
         try:
             result = AiSensyClient(http_client=_Client()).send(
                 campaign_name="PB_TEST",
@@ -159,12 +159,12 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(result.status, "FAILED")
             self.assertIn("TimeoutError", result.reason)
         finally:
-            [os.environ.pop(k, None) for k in ("AISENSY_ENABLED", "AISENSY_API_KEY", "WHATSAPP_TEMPLATE")]
+            [os.environ.pop(k, None) for k in ("AISENSY_ENABLED", "AISENSY_API_KEY", "WHATSAPP_TEMPLATE", "WHATSAPP_CAMPAIGN_LIVE")]
 
     def test_secret_not_in_result_reason(self):
         secret = "super-secret-key-abc123"
         os.environ.update({"AISENSY_ENABLED": "1", "AISENSY_API_KEY": secret,
-                           "WHATSAPP_TEMPLATE": "PB_TEST"})
+                           "WHATSAPP_TEMPLATE": "PB_TEST", "WHATSAPP_CAMPAIGN_LIVE": "1"})
 
         class _Client:
             def post(self, *a, **k):
@@ -178,7 +178,7 @@ class ClientTests(unittest.TestCase):
             self.assertNotIn(secret, result.reason)
             self.assertNotIn(secret, result.raw_response_snippet)
         finally:
-            [os.environ.pop(k, None) for k in ("AISENSY_ENABLED", "AISENSY_API_KEY", "WHATSAPP_TEMPLATE")]
+            [os.environ.pop(k, None) for k in ("AISENSY_ENABLED", "AISENSY_API_KEY", "WHATSAPP_TEMPLATE", "WHATSAPP_CAMPAIGN_LIVE")]
 
 
 class RouterTests(unittest.TestCase):

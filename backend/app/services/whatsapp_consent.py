@@ -143,7 +143,7 @@ def record(lead, db, *, source: str, evidence: str, message_id: str = "", create
 
 def revoke(lead, db, *, evidence: str, source: str = "WHATSAPP_INBOUND") -> dict:
     """Revoke WhatsApp permission when the business explicitly asks us to stop."""
-    from app.models.models import WorkflowEvent
+    from app.models.models import WorkflowEvent, WorkflowExecution, OutreachReminder
     evidence = (evidence or "").strip()
     if not evidence:
         raise ValueError("WhatsApp revocation requires evidence")
@@ -151,6 +151,22 @@ def revoke(lead, db, *, evidence: str, source: str = "WHATSAPP_INBOUND") -> dict
     lead.consent_status = "REVOKED"
     lead.consent_source = source
     lead.consent_timestamp = now
+
+    for execution in db.query(WorkflowExecution).filter(
+        WorkflowExecution.lead_id == lead.id,
+        WorkflowExecution.workflow_type == "WHATSAPP_CONFIRM",
+        WorkflowExecution.status.in_(("REQUESTED", "PENDING")),
+    ).all():
+        execution.status = "FAILED"
+        execution.error = "WhatsApp consent revoked before execution"
+
+    for reminder in db.query(OutreachReminder).filter(
+        OutreachReminder.lead_id == lead.id,
+        OutreachReminder.channel == "whatsapp",
+        OutreachReminder.status == "SCHEDULED",
+    ).all():
+        reminder.status = "CANCELLED"
+
     db.add(WorkflowEvent(
         lead_id=lead.id, event_type="WHATSAPP_CONSENT_REVOKED",
         actor="SYSTEM", channel="whatsapp",
@@ -164,6 +180,74 @@ def revoke(lead, db, *, evidence: str, source: str = "WHATSAPP_INBOUND") -> dict
         payload={"action": "STOP_WHATSAPP", "from_outcome": source,
                  "blocked": True}, occurred_at=now))
     return {"revoked": True, "consent_phone": getattr(lead, "consent_phone", None)}
+
+
+# ── Consent from a WhatsApp message the business sent us ─────────────────────
+#
+# On WhatsApp the channel is implied, so "stop" alone is an opt-out -- unlike
+# an email, where the words have to name WhatsApp to be about WhatsApp. The
+# webhook used to mark EVERY inbound message EXPLICIT without reading it, so
+# "STOP" granted consent, and a business that had revoked was flipped back.
+_WHATSAPP_STOP = re.compile(
+    r"^\W*(?:stop|unsubscribe|cancel|end|quit|opt[\s-]?out)\W*$"
+    r"|\b(?:unsubscribe|opt[\s-]?out|remove me|no more messages|"
+    r"stop (?:messag|send|text|contact)\w*|"
+    r"(?:don'?t|do not|dont) (?:message|text|contact|send|whatsapp)\w*|"
+    r"band karo|mat bhejo|mat bhejiye)\b",
+    re.IGNORECASE)
+
+
+def is_whatsapp_opt_out(text: str) -> bool:
+    return bool(_WHATSAPP_STOP.search(text or ""))
+
+
+def capture_whatsapp_inbound(lead, db, *, sender: str, text: str, message_id: str = "") -> dict:
+    """Consent, revocation or neither, from a WhatsApp message they sent us.
+
+    Every branch fails toward "not recorded":
+      - no readable text: nothing changes. Without the words we cannot tell a
+        "STOP" from a "yes", and guessing yes is the bug this replaces.
+      - an opt-out: revoked, whatever the consent was before.
+      - a message after a revocation: kept for the founder, never an automatic
+        re-grant -- only a person should decide that "hi" undoes "stop".
+      - otherwise: they messaged the business number first, which is opt-in
+        under Meta's rules. Recorded through record(), bound to the number
+        they wrote from, with their words as the evidence.
+    """
+    from app.models.models import WorkflowEvent
+    from app.services import identity
+
+    text = (text or "").strip()
+    now = datetime.utcnow()
+    if not text:
+        db.add(WorkflowEvent(
+            lead_id=lead.id, event_type="WHATSAPP_INBOUND_UNREAD", actor="LEAD",
+            channel="whatsapp",
+            payload={"from": (sender or "")[:24], "message_id": message_id,
+                     "note": "no readable text; consent unchanged — read it in AiSensy"},
+            occurred_at=now))
+        return {"recorded": False, "reason": "no readable text in the inbound message"}
+
+    if is_whatsapp_opt_out(text):
+        revoke(lead, db, evidence=text[:1000], source="WHATSAPP_INBOUND")
+        return {"recorded": False, "revoked": True, "reason": "asked us to stop on WhatsApp"}
+
+    if (getattr(lead, "consent_status", "") or "").upper() == "REVOKED":
+        db.add(WorkflowEvent(
+            lead_id=lead.id, event_type="WHATSAPP_INBOUND_AFTER_REVOKE", actor="LEAD",
+            channel="whatsapp",
+            payload={"from": (sender or "")[:24], "message_id": message_id,
+                     "text": text[:1000],
+                     "note": "consent stays revoked until the founder decides otherwise"},
+            occurred_at=now))
+        return {"recorded": False, "reason": "consent was revoked; a later message is for the founder"}
+
+    digits = identity.digits_only(sender or "")[-10:]
+    if not (len(digits) == 10 and digits[0] in "6789"):
+        return {"recorded": False, "reason": f"sender {sender!r} is not an Indian mobile number"}
+    # The number that actually wrote to us is the number that opted in.
+    lead.whatsapp_number = digits
+    return record(lead, db, source="WHATSAPP_INBOUND", evidence=text, message_id=message_id)
 
 
 

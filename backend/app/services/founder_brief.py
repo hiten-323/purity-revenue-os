@@ -200,9 +200,25 @@ def generate_brief(db: Session) -> dict:
         "q10_efficiency": q10,
         
         "data_quality": kpis["data_quality"],
-        "new_leads_this_week": kpis["leads_discovered"]
+        "new_leads_this_week": kpis["leads_discovered"],
+        "founder_calls_waiting": _founder_calls_waiting(db),
     }
     return brief
+
+
+def _founder_calls_waiting(db: Session) -> list[dict]:
+    """Businesses that asked, on an AI call, to hear from a person."""
+    from app.services.founder_call_pipeline import founder_call_queue
+
+    out = []
+    for item in founder_call_queue(db, limit=10):
+        p = item.payload or {}
+        b = p.get("founder_brief") or {}
+        out.append({"lead_id": item.lead_id, "business": b.get("business"),
+                    "phone": b.get("phone"), "reason": p.get("reason"),
+                    "callback": b.get("requested_callback"),
+                    "since": item.requested_at.strftime("%d %b %H:%M") if item.requested_at else ""})
+    return out
 
 def send_brief(brief: dict) -> dict:
     """Email the daily brief to Hiten. No-op if SMTP not configured."""
@@ -227,6 +243,18 @@ def send_brief(brief: dict) -> dict:
     ta = brief["top_action"]
     dq = brief["data_quality"]
 
+    waiting = brief.get("founder_calls_waiting") or []
+    waiting_block = ""
+    if waiting:
+        rows = "\n".join(
+            f"  • {w['business'] or 'lead ' + str(w['lead_id'])} — {w['phone'] or 'no phone'}"
+            f" — {w['reason']}" + (f" (callback: {w['callback']})" if w['callback'] else "")
+            + f" — since {w['since']}"
+            for w in waiting)
+        waiting_block = ("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                         f"WAITING FOR YOUR CALL ({len(waiting)})\n"
+                         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" + rows + "\n\n")
+
     text = f"""☕ GOOD MORNING HITEN — YOUR REVENUE OPERATING SYSTEM BRIEF ☕
 {brief["date"]} · Generated {brief["generated_at"]}
 
@@ -240,7 +268,7 @@ Expected 30-Day Cash:     {fmt(brief["cash_expected_30_days"])}
 Revenue At Risk:          {fmt(brief["revenue_at_risk_inr"])}
 Reorders Due:             {fmt(brief["reorders_due_inr"])}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{waiting_block}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FOUNDER'S 10 DAILY QUESTIONS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Q1. How much revenue in active pipeline?

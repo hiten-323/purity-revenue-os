@@ -3892,7 +3892,8 @@ def whatsapp_api_send(req: WhatsAppSendRequest, db: Session = Depends(get_db)):
                            message=msg, status="QUEUED", queued_at=datetime.utcnow())
     db.add(row); db.flush()
 
-    res = send_whatsapp(lead, msg, campaign_name=req.campaign_name, template_params=req.template_params)
+    res = send_whatsapp(lead, msg, campaign_name=req.campaign_name,
+                        template_params=req.template_params, db=db)
     row.whatsapp_response = (res.reason or res.response)[:300]
     if res.status == "sent":
         before = lead.status
@@ -3903,10 +3904,30 @@ def whatsapp_api_send(req: WhatsAppSendRequest, db: Session = Depends(get_db)):
               before_status=before, after_status="WHATSAPP_SENT",
               payload={"via": "aisensy_api", "outbound_id": row.id})
         _schedule_next_reminder(db, lead, "whatsapp")
+    elif res.status == "unknown":
+        # May have been delivered; "FAILED" would invite a resend.
+        row.status = "UNKNOWN"
     else:
         row.status = "FAILED"; row.failed_at = datetime.utcnow()
     db.commit()
     return {"status": res.status, "reason": res.reason, "outbound_id": row.id, "lead_id": lead.id}
+
+
+def _inbound_text(body: dict) -> str:
+    """The words of an inbound WhatsApp message, across the envelope shapes
+    providers use. "" when none is found -- which the consent writer treats as
+    "cannot tell", never as a yes."""
+    paths = (("text",), ("text", "body"), ("message", "text"), ("message", "text", "body"),
+             ("message", "body"), ("message", "message"), ("data", "message", "text"),
+             ("data", "text"), ("content",), ("body",))
+    for path in paths:
+        v = body
+        for key in path:
+            v = v.get(key) if isinstance(v, dict) else None
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    msg = body.get("message")
+    return msg.strip() if isinstance(msg, str) else ""
 
 
 @router.post("/whatsapp/webhook")
@@ -3916,8 +3937,9 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
 
     This is what the API buys us over wa.me: real delivery/read receipts and —
     the valuable part — automatic INBOUND detection. An inbound message is both a
-    reply (engagement we currently cannot see on WhatsApp at all) and an opt-in,
-    so we record consent from it. Configure this URL in the AiSensy dashboard.
+    reply (engagement we currently cannot see on WhatsApp at all) and, when its
+    words say so, an opt-in or an opt-out -- decided by
+    whatsapp_consent.capture_whatsapp_inbound. Configure this URL in AiSensy.
     """
     from app.models.models import OutboundWhatsApp, B2BLead
     from app.services.pipeline_tracker import track
@@ -3992,20 +4014,23 @@ async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
         if lead:
             before = lead.status
             lead.status = "REPLIED"
-            # They messaged us first, which is opt-in under Meta's rules. Record
-            # the provenance too: consent with no source is indistinguishable
-            # from consent nobody can account for, and this codebase already
-            # has addresses in that state that cannot now be explained.
-            lead.consent_status = "EXPLICIT"
-            lead.consent_source = "WHATSAPP_INBOUND"
-            lead.consent_timestamp = datetime.utcnow()
             lead.last_updated = datetime.utcnow()
+            # Consent -- granted, revoked, or neither -- is decided by the one
+            # consent writer, from the words they sent. This block used to set
+            # EXPLICIT for every inbound message without reading it, so "STOP"
+            # granted consent and re-granted it after a revocation.
+            from app.services import whatsapp_consent
+            text = _inbound_text(body)
+            consent = whatsapp_consent.capture_whatsapp_inbound(
+                lead, db, sender=sender, text=text, message_id=msg_id)
             track(db, "WHATSAPP_REPLIED", lead_id=lead.id, actor="LEAD", channel="whatsapp",
                   before_status=before, after_status="REPLIED",
-                  payload={"from": sender[:24], "via": "aisensy_webhook"})
+                  payload={"from": sender[:24], "via": "aisensy_webhook",
+                           "text": text[:500], "consent": consent})
             _cancel_stale_reminders(db)             # they replied — stop chasing
             db.commit()
-            return {"status": "ok", "recorded": "inbound_reply", "lead_id": lead.id}
+            return {"status": "ok", "recorded": "inbound_reply", "lead_id": lead.id,
+                    "consent": consent}
         return {"status": "ok", "recorded": "inbound_unmatched", "from": sender[:24]}
 
     return {"status": "ignored", "event": event or "unknown"}
@@ -6952,7 +6977,7 @@ def one_click_execute(req: OneClickExecuteRequest, db: Session = Depends(get_db)
             # Sixth instance in this codebase of two paths for one action.
             from app.services.whatsapp_sender import send_whatsapp, is_configured
             if is_configured():
-                r = send_whatsapp(lead, msg)
+                r = send_whatsapp(lead, msg, db=db)
                 if r.status == "sent":
                     detail = {"message": msg, "provider": "aisensy",
                               "provider_message_id": r.message_id,

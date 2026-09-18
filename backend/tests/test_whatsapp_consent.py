@@ -18,7 +18,7 @@ from datetime import datetime
 import pytest
 from sqlalchemy.orm import sessionmaker
 
-from app.models.models import B2BLead, Base, WorkflowEvent
+from app.models.models import B2BLead, Base, WorkflowEvent, WorkflowExecution, OutreachReminder
 from app.services import whatsapp_consent
 from app.services import reply_intelligence as ri
 from app.services.email_sender import WHATSAPP_ASK_SENTENCE, whatsapp_ask
@@ -51,6 +51,22 @@ def _events(db, lead, kind):
             .filter(WorkflowEvent.lead_id == lead.id,
                     WorkflowEvent.event_type == kind).all())
 
+
+
+def test_revoke_cancels_queued_whatsapp_work_and_reminder(db):
+    lead = _lead(db)
+    lead.consent_status = "EXPLICIT"
+    lead.consent_phone = lead.whatsapp_number
+    wx = WorkflowExecution(workflow_type="WHATSAPP_CONFIRM", lead_id=lead.id, status="PENDING")
+    reminder = OutreachReminder(lead_id=lead.id, channel="whatsapp", sequence_step=2,
+                                due_at=datetime.utcnow(), status="SCHEDULED")
+    db.add_all([wx, reminder]); db.commit()
+    result = whatsapp_consent.revoke(lead, db, evidence="Stop WhatsApp messages")
+    db.commit()
+    assert result["revoked"] is True
+    assert wx.status == "FAILED"
+    assert reminder.status == "CANCELLED"
+    assert consent_check(lead)[0] is False
 
 # ── the email route ───────────────────────────────────────────────────────────
 

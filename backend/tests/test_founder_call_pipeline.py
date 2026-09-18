@@ -67,6 +67,26 @@ def _lead(db, **kw):
 
 # ------------------------------------------------------- the one-call rule --
 
+def test_request_founder_call_creates_actionable_idempotent_work_item(db):
+    lead = _lead(db)
+    p.record_ai_outcome(lead, db, "HUMAN_HANDOFF", summary="Interested; wants founder to call")
+    p.request_founder_call(lead, db, note="Human handoff requested")
+    from app.models.models import WorkflowExecution, WorkflowEvent
+    items = db.query(WorkflowExecution).filter(
+        WorkflowExecution.lead_id == lead.id,
+        WorkflowExecution.workflow_type == "FOUNDER_CALL",
+        WorkflowExecution.status == "REQUESTED",
+    ).all()
+    assert len(items) == 1
+    assert items[0].requested_by == "AI"
+    assert items[0].payload["founder_brief"]["business"] == lead.company
+    events = db.query(WorkflowEvent).filter(
+        WorkflowEvent.lead_id == lead.id,
+        WorkflowEvent.event_type == "FOUNDER_CALL_REQUESTED",
+    ).all()
+    assert len(events) == 1
+
+
 def test_one_ai_call_per_lead(db, registry):
     lead = _lead(db)
     assert p.may_place_ai_call(lead)[0] is True
@@ -791,3 +811,100 @@ def test_preferring_whatsapp_is_not_consent_to_it(db, registry):
 
     assert (lead.consent_status or "UNKNOWN").upper() != "EXPLICIT"
     assert _consent_events(db, lead, "WHATSAPP_CONSENT_RECORDED") == []
+
+
+# ── #27: an ask for a person reaches a person ────────────────────────────────
+
+def _open_items(db, lead):
+    from app.models.models import WorkflowExecution
+    return (db.query(WorkflowExecution)
+            .filter(WorkflowExecution.lead_id == lead.id,
+                    WorkflowExecution.workflow_type == "FOUNDER_CALL",
+                    WorkflowExecution.status == "REQUESTED").all())
+
+
+@pytest.mark.parametrize("outcome", ["HUMAN_HANDOFF", "CALLBACK_REQUESTED", "MEETING_REQUESTED"])
+def test_an_ask_for_a_person_reaches_the_founder_queue_on_its_own(db, registry, outcome):
+    """Nothing called request_founder_call(), so these asks stopped at
+    AI_INTEREST_DETECTED and nobody was told. One AI call per lead means a
+    callback can only ever be kept by a human."""
+    lead = _lead(db, company=f"Asks {outcome}")
+    p.record_ai_outcome(lead, db, outcome, summary="wants to talk to someone",
+                        callback_window="after 6pm")
+    db.commit()          # the JSON payload used to fail exactly here
+    db.expire_all()
+
+    assert p.stage_of(lead) == p.FOUNDER_CALL_REQUESTED
+    items = _open_items(db, lead)
+    assert len(items) == 1
+    assert items[0].requested_by == "AI"
+    assert items[0].payload["reason"] == p.FOUNDER_CALL_ASKS[outcome]
+    assert "after 6pm" in items[0].payload["note"]
+    assert items[0].payload["founder_brief"]["business"] == lead.company
+
+
+def test_plain_interest_is_not_promoted_for_the_founder(db, registry):
+    """"Sounds interesting" is not a request to be called; the founder
+    promotes those by choice."""
+    lead = _lead(db, company="Just Interested")
+    p.record_ai_outcome(lead, db, "INTERESTED", summary="maybe later")
+    db.commit()
+    assert p.stage_of(lead) == p.AI_INTEREST_DETECTED
+    assert _open_items(db, lead) == []
+
+
+def test_the_brief_in_the_work_item_survives_a_round_trip(db, registry):
+    """founder_brief carries datetimes; the JSON column rejected them."""
+    lead = _lead(db, company="Dated Co")
+    p.record_ai_outcome(lead, db, "HUMAN_HANDOFF", summary="call me")
+    db.commit()
+    db.expire_all()
+    brief = _open_items(db, lead)[0].payload["founder_brief"]
+    assert isinstance(brief["stage_since"], str) and "T" in brief["stage_since"]
+
+
+def test_completing_the_call_closes_the_item_and_the_stage(db, registry):
+    from app.models.models import WorkflowEvent
+
+    lead = _lead(db, company="Called Back Co")
+    p.record_ai_outcome(lead, db, "CALLBACK_REQUESTED", summary="call after 6")
+    db.commit()
+    assert [i.lead_id for i in p.founder_call_queue(db)] == [lead.id]
+
+    p.complete_founder_call(lead, db, outcome="SAMPLE_AGREED", note="sending 2 jars")
+    db.commit()
+
+    assert p.stage_of(lead) == p.FOUNDER_CALL_COMPLETED
+    assert _open_items(db, lead) == []
+    assert p.founder_call_queue(db) == []
+    ev = (db.query(WorkflowEvent)
+          .filter(WorkflowEvent.lead_id == lead.id,
+                  WorkflowEvent.event_type == "FOUNDER_CALL_COMPLETED").one())
+    assert ev.payload["outcome"] == "SAMPLE_AGREED"
+
+
+def test_a_call_that_was_never_queued_cannot_be_completed(db, registry):
+    lead = _lead(db, company="Never Queued Co")
+    with pytest.raises(ValueError, match="not in the founder call queue"):
+        p.complete_founder_call(lead, db, outcome="SPOKE")
+
+
+def test_a_completed_call_needs_an_outcome(db, registry):
+    lead = _lead(db, company="No Outcome Co")
+    p.record_ai_outcome(lead, db, "HUMAN_HANDOFF", summary="x")
+    with pytest.raises(ValueError, match="needs an outcome"):
+        p.complete_founder_call(lead, db, outcome="  ")
+
+
+def test_the_founder_brief_lists_who_is_waiting(db, registry):
+    from app.services.founder_brief import _founder_calls_waiting
+
+    lead = _lead(db, company="Waiting Co", phone="9876543219")
+    p.record_ai_outcome(lead, db, "HUMAN_HANDOFF", summary="call me",
+                        callback_window="tomorrow 11am")
+    db.commit()
+    waiting = _founder_calls_waiting(db)
+    assert len(waiting) == 1
+    assert waiting[0]["business"] == "Waiting Co"
+    assert waiting[0]["phone"] == "9876543219"
+    assert waiting[0]["callback"] == "tomorrow 11am"
