@@ -119,7 +119,12 @@ def config_status() -> tuple[bool, str]:
         return False, ("No campaign named. Set WHATSAPP_TEMPLATE to the name "
                        "of a LIVE AiSensy API campaign. A campaign that is "
                        "not Live accepts nothing.")
-    return True, f"AiSensy campaign={campaign()!r}"
+    live = (os.getenv("WHATSAPP_CAMPAIGN_LIVE", "0") or "0").strip().lower()
+    if live not in ("1", "true", "yes", "on"):
+        return False, ("WhatsApp campaign live-state is not explicitly verified. "
+                       "Set WHATSAPP_CAMPAIGN_LIVE=1 only after confirming the "
+                       "configured AiSensy campaign is LIVE and approved.")
+    return True, f"AiSensy campaign={campaign()!r} (live verified)"
 
 
 def extract_message_id(response_text: str, headers: Any = None) -> str:
