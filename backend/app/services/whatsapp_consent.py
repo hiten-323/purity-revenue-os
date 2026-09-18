@@ -157,7 +157,7 @@ def capture_email_reply(lead, db, body: str, *, message_id: str = "") -> dict:
     if not request:
         return {"recorded": False, "reason": "no WhatsApp consent request"}
 
-    numbers = list(dict.fromkeys(re.findall(r"(?<!\\d)(?:(?:\\+91|0091)[\\s-]?)?([6-9]\\d{9})(?!\\d)", body or "")))
+    numbers = list(dict.fromkeys(re.findall(r"(?<!\d)(?:(?:\+91|0091)[\s-]?)?([6-9]\d{9})(?!\d)", body or "")))
     if len(numbers) > 1:
         return {"recorded": False, "reason": "multiple WhatsApp numbers are ambiguous"}
 
