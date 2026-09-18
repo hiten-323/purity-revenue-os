@@ -34,6 +34,8 @@ number does not transfer to whatever number lands on the record later.
 """
 from __future__ import annotations
 
+import re
+import hashlib
 from datetime import datetime
 
 # Recognised provenances. Each is a real conversation someone can be shown.
@@ -51,17 +53,17 @@ SOURCES = {
 CONSENT_GRANTED = "EXPLICIT"
 
 
-def destination(lead) -> str:
+def destination(lead, supplied_number: str = "") -> str:
     """The number consent would cover — the same resolution order
     whatsapp_sender.send_whatsapp uses to pick where a message goes. If the
     two disagreed, consent would be recorded against one number and the
     message sent to another."""
     return (
-        (getattr(lead, "whatsapp_number", None) or getattr(lead, "phone", "") or "")
+        (supplied_number or getattr(lead, "whatsapp_number", None) or getattr(lead, "phone", "") or "")
     ).strip()
 
 
-def record(lead, db, *, source: str, evidence: str, message_id: str = "") -> dict:
+def record(lead, db, *, source: str, evidence: str, message_id: str = "", create_next_action: bool = True) -> dict:
     """Record WhatsApp consent, or explain why it was not recorded.
 
     Returns a dict rather than raising on the ordinary refusals, because the
@@ -123,20 +125,175 @@ def record(lead, db, *, source: str, evidence: str, message_id: str = "") -> dic
         actor="SYSTEM", channel="whatsapp",
         payload={"source": source, "basis": SOURCES[source],
                  "evidence": evidence[:1000], "message_id": message_id,
-                 "consent_phone": number},
+                 "consent_phone": number,
+                 "evidence_sha256": hashlib.sha256(evidence.encode("utf-8")).hexdigest()},
         occurred_at=now))
 
-    # decision_engine's commitment system only sees a promise through a
-    # NEXT_ACTION_SET event — consent fields alone never reach it, so the
-    # trust and record-quality gates ahead of the commitment check would
-    # delay a business that just asked to be messaged. SEND_WHATSAPP is in
-    # its _OPEN_COMMITMENTS set.
+    # Call-outcome logging already creates the canonical next-action event.
+    if create_next_action:
+        db.add(WorkflowEvent(
+            lead_id=lead.id, event_type="NEXT_ACTION_SET", actor="SYSTEM",
+            channel="whatsapp",
+            payload={"action": "SEND_WHATSAPP",
+                     "detail": f"WhatsApp consent recorded — {SOURCES[source]}",
+                     "from_outcome": source, "blocked": None},
+            occurred_at=now))
+
+    return {"recorded": True, "source": source, "consent_phone": number}
+
+def revoke(lead, db, *, evidence: str, source: str = "WHATSAPP_INBOUND") -> dict:
+    """Revoke WhatsApp permission when the business explicitly asks us to stop."""
+    from app.models.models import WorkflowEvent
+    evidence = (evidence or "").strip()
+    if not evidence:
+        raise ValueError("WhatsApp revocation requires evidence")
+    now = datetime.utcnow()
+    lead.consent_status = "REVOKED"
+    lead.consent_source = source
+    lead.consent_timestamp = now
+    db.add(WorkflowEvent(
+        lead_id=lead.id, event_type="WHATSAPP_CONSENT_REVOKED",
+        actor="SYSTEM", channel="whatsapp",
+        payload={"source": source, "evidence": evidence[:1000],
+                 "consent_phone": getattr(lead, "consent_phone", None),
+                 "evidence_sha256": hashlib.sha256(evidence.encode("utf-8")).hexdigest()},
+        occurred_at=now))
     db.add(WorkflowEvent(
         lead_id=lead.id, event_type="NEXT_ACTION_SET", actor="SYSTEM",
         channel="whatsapp",
-        payload={"action": "SEND_WHATSAPP",
-                 "detail": f"WhatsApp consent recorded — {SOURCES[source]}",
-                 "from_outcome": source, "blocked": None},
-        occurred_at=now))
+        payload={"action": "STOP_WHATSAPP", "from_outcome": source,
+                 "blocked": True}, occurred_at=now))
+    return {"revoked": True, "consent_phone": getattr(lead, "consent_phone", None)}
 
-    return {"recorded": True, "source": source, "consent_phone": number}
+
+
+# ── Consent from a reply to the dedicated WhatsApp request ──────────────────
+#
+# The first version of this function granted consent to EVERY one of these,
+# verified against the code before it was replaced:
+#
+#     "Please remove me from your list."        "please" matched as a yes
+#     "Not interested, please don't contact"    same
+#     "No thanks. Sent from Outlook for ..."    "ok" inside "Outlook"
+#     "I'm not sure this is relevant"           "sure" inside "not sure"
+#     "We will look into it later."             "ok" inside "look"
+#     "No thanks. --  Rahul  9876543210"        the SIGNATURE number, which it
+#                                               also wrote over whatsapp_number
+#     an out-of-office auto-reply               no human check at all
+#
+# and bound the rest to lead.phone, which for most leads is a published
+# landline WhatsApp cannot reach. An opt-out becoming a WhatsApp opt-in is the
+# single worst outcome this module can produce.
+#
+# So the rules, in order, each failing toward "not recorded":
+#   1. We must have asked, by email (WHATSAPP_CONSENT_REQUESTED).
+#   2. Only the business's NEW words count. Quoted history and signature
+#      blocks are cut first: a signature number was never offered, and a
+#      quoted email is our text, not theirs.
+#   3. A machine reply is never a business agreeing to anything.
+#   4. Any refusal, opt-out or negation refuses. A missed opt-in costs a
+#      founder a follow-up; a false one messages someone who said no.
+#   5. A yes is a word, matched on word boundaries: "okay" is a yes, "Outlook"
+#      is not, and "please" on its own is not a yes at all.
+#   6. Exactly one number, from their new words, or an explicit yes to using
+#      the number already on file -- and never a landline.
+
+_QUOTE_OR_SIGNATURE_START = re.compile(
+    r"^\s*(?:"
+    r"on\b.{0,120}\bwrote:\s*$"                    # Gmail / Apple Mail
+    r"|-{2,}\s*original message\s*-{2,}"           # Outlook
+    r"|from:\s.+"                                  # forwarded / Outlook header block
+    r"|--\s*$"                                     # RFC 3676 signature delimiter
+    r"|sent from (?:my\s+)?\w+"                    # mobile client footers
+    r"|get outlook for\b"
+    r")",
+    re.IGNORECASE,
+)
+
+_NEGATION = re.compile(
+    r"\b(?:no|not|nope|don'?t|do not|never|stop|remove|unsubscribe|"
+    r"no thanks|not interested)\b",
+    re.IGNORECASE,
+)
+
+_AFFIRMATIVE = re.compile(
+    r"\b(?:yes|yeah|yep|yup|sure|ok|okay|go ahead|please do|"
+    r"use (?:this|my|that|the) number|you (?:can|may) (?:use|whatsapp)|whatsapp me)\b",
+    re.IGNORECASE,
+)
+
+_INDIAN_MOBILE = re.compile(r"(?<!\d)(?:(?:\+91|0091|91)[\s-]?)?([6-9]\d{4}[\s-]?\d{5})(?!\d)")
+
+_REFUSING_INTENTS = {"DO_NOT_CONTACT", "NOT_INTERESTED", "NO_REQUIREMENT"}
+
+
+def new_text(body: str) -> str:
+    """What the business actually wrote in this reply: everything before the
+    first quoted-history or signature marker, minus any '>' quoted lines."""
+    kept = []
+    for line in (body or "").splitlines():
+        if _QUOTE_OR_SIGNATURE_START.match(line):
+            break
+        if line.lstrip().startswith(">"):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def capture_email_reply(lead, db, body: str, *, message_id: str = "",
+                        subject: str = "", headers: dict | None = None) -> dict:
+    """Consent from a reply to the dedicated WhatsApp request, or the reason
+    there is none. Every refusal returns rather than raises; the caller is a
+    reply loop that must keep processing its batch."""
+    from app.models.models import WorkflowEvent
+    from app.services import identity
+    from app.services import reply_intelligence as ri
+
+    asked = (db.query(WorkflowEvent)
+             .filter(WorkflowEvent.lead_id == lead.id,
+                     WorkflowEvent.event_type == "WHATSAPP_CONSENT_REQUESTED",
+                     WorkflowEvent.channel == "email")
+             .order_by(WorkflowEvent.occurred_at.desc()).first())
+    if not asked:
+        return {"recorded": False, "reason": "no WhatsApp consent request"}
+
+    text = new_text(body)
+    if not text:
+        return {"recorded": False, "reason": "no new text from the business"}
+
+    sender = ri.classify_sender(subject or "", text, headers or {})
+    if sender.get("sender") != ri.HUMAN:
+        return {"recorded": False, "reason": f"machine reply ({sender.get('kind')})"}
+
+    refusing = {i["intent"] for i in ri.classify_intent(text)["intents"]} & _REFUSING_INTENTS
+    explicit_wa_stop = bool(re.search(r"\b(?:whatsapp|wa)\b.{0,40}\b(?:stop|remove|unsubscribe|dont|do not|don't)\b|\b(?:stop|remove|unsubscribe|dont|do not|don't)\b.{0,40}\b(?:whatsapp|wa)\b", text, re.IGNORECASE))
+    if explicit_wa_stop:
+        revoke(lead, db, evidence=text[:1000], source="EMAIL_REPLY_WHATSAPP_REQUEST")
+        return {"recorded": False, "revoked": True, "reason": "explicit WhatsApp opt-out"}
+    if refusing:
+        return {"recorded": False, "reason": f"reply refuses ({', '.join(sorted(refusing))})"}
+    if _NEGATION.search(text):
+        return {"recorded": False, "reason": "reply contains a negation — founder reads it"}
+
+    numbers = list(dict.fromkeys(re.sub(r"[\s-]", "", m) for m in _INDIAN_MOBILE.findall(text)))
+    if len(numbers) > 1:
+        return {"recorded": False, "reason": "multiple numbers in the reply are ambiguous"}
+    supplied = numbers[0] if numbers else ""
+
+    if not supplied and not _AFFIRMATIVE.search(text):
+        return {"recorded": False, "reason": "no number and no explicit yes"}
+
+    target = supplied or destination(lead)
+    if not target:
+        return {"recorded": False, "reason": "no WhatsApp number to bind"}
+    if identity.is_landline(target):
+        return {"recorded": False,
+                "reason": f"{target} is a landline — WhatsApp cannot reach it"}
+
+    if supplied:
+        # The business gave us this number in reply to a request for exactly
+        # that, so it is the one destination consent covers.
+        lead.whatsapp_number = supplied
+
+    return record(lead, db, source="EMAIL_REPLY_WHATSAPP_REQUEST",
+                  evidence=text[:1000], message_id=message_id)

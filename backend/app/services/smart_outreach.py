@@ -159,6 +159,19 @@ def _proven_email_touches(db: Session, lead_id: int) -> list[OutreachTouch]:
     )
 
 
+
+def _proven_whatsapp_touches(db: Session, lead_id: int, template_key: str | None = None) -> list[OutreachTouch]:
+    """Return proven WhatsApp sends for duplicate/idempotency protection."""
+    q = db.query(OutreachTouch).filter(
+        OutreachTouch.lead_id == lead_id,
+        OutreachTouch.channel == "whatsapp",
+        OutreachTouch.status.in_(PROVEN_SEND),
+    )
+    if template_key:
+        q = q.filter(OutreachTouch.template_key == template_key)
+    return q.order_by(OutreachTouch.occurred_at.desc()).all()
+
+
 def _contactable_first():
     """Order key: 0 for leads a channel could actually reach, 1 for the rest.
 
@@ -771,6 +784,12 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
             return {**decision, "status": "SKIPPED", "reason": "catalogue already sent"}
     if decision["action"] == "SEND_CALL_FOLLOWUP" and _proven_touch(db, lead.id, "SEND_CALL_FOLLOWUP"):
         return {**decision, "status": "SKIPPED", "reason": "call follow-up already sent"}
+
+    if decision["channel"] == "whatsapp":
+        wa_template_key = "call_followup" if decision["action"] == "SEND_CALL_FOLLOWUP" else "catalogue_request"
+        if _proven_whatsapp_touches(db, lead.id, wa_template_key):
+            return {**decision, "status": "SKIPPED",
+                    "reason": f"duplicate WhatsApp touch blocked ({wa_template_key})"}
 
     if decision["channel"] == "email":
         from app.services.email_sender import build_outreach_email, send_email, whatsapp_ask

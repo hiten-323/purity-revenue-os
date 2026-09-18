@@ -378,7 +378,7 @@ def build_draft(lead, memory: dict | None, sent_count: int, replied: bool,
                 cta = "May I share our institutional range for consideration?"
             elif div in ("hotel", "restaurant", "cafe", "horeca"):
                 why_line = f"I came across {company}{city_part} while researching hospitality and F&B venues in your region."
-                prop_line = "We wanted to explore whether Purity Beans could be relevant to your beverage requirements."
+                prop_line = "We wanted to explore whether Purity Beans could be relevant to your instant coffee requirements."
                 cta = "Would you be open to reviewing our range and trade pricing?"
             else:
                 why_line = f"I came across {company}{city_part} while researching businesses in your region."

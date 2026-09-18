@@ -73,7 +73,7 @@ OPT_OUT_SENTENCE = (
 # years later. reply_intelligence's WHATSAPP_OPT_IN pattern matches this
 # phrasing, and a test pins the round trip.
 WHATSAPP_ASK_SENTENCE = (
-    'If WhatsApp is easier, reply "WhatsApp" and I will send it there instead.'
+    'If WhatsApp is more convenient, I can share our catalogue and B2B pricing there. If you would like that, simply reply with your WhatsApp number — or let me know if we can use the number you provided.'
 )
 
 
@@ -418,6 +418,19 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
         email.sent_at = datetime.utcnow().isoformat()
         email.smtp_response = "250 OK - Accepted for delivery"
         print(f"SMTP sent successfully. MsgID: {msg_id}")
+        # Record the consent-request context only after SMTP accepts the message.
+        if not _is_self and getattr(email, "lead_id", None):
+            try:
+                from app.database.database import SessionLocal
+                from app.models.models import B2BLead, WorkflowEvent
+                _db = SessionLocal()
+                _lead = _db.query(B2BLead).filter(B2BLead.id == email.lead_id).first()
+                if _lead and whatsapp_ask(_lead):
+                    _db.add(WorkflowEvent(lead_id=_lead.id, event_type="WHATSAPP_CONSENT_REQUESTED", actor="SYSTEM", channel="email", payload={"message_id": msg_id, "request": WHATSAPP_ASK_SENTENCE}, occurred_at=datetime.utcnow()))
+                    _db.commit()
+                _db.close()
+            except Exception as _exc:
+                _log.warning("WhatsApp consent request audit failed: %s", _exc)
     except smtplib.SMTPAuthenticationError:
         email.status = "failed"
         email.error = "Zoho auth failed — use App Password from accounts.zoho.in, not your login password"
@@ -660,7 +673,7 @@ def get_personalized_intro(lead: B2BLead) -> str:
 _CATEGORY_PROFILE: dict[str, dict] = {
     "distributor": {
         "subject": "Distribution Partnership — Purity Beans Premium Coffee",
-        "why": "we're expanding our distribution network{loc} and are looking for established partners who move FMCG and beverage lines.",
+        "why": "we're expanding our distribution network{loc} and are looking for established partners with experience in the instant coffee category.",
         "angle": "Why distributors partner with Purity Beans",
         "bullets": ["Healthy trade margins on fast-moving freeze-dried SKUs",
                     "Selective regional territory and dealer support",
@@ -887,7 +900,7 @@ def generate_b2b_pitch_email(lead: B2BLead) -> tuple[str, str]:
             cta = "May I share our institutional range for consideration?"
         elif cat in ("hotel", "restaurant", "cafe", "horeca"):
             why_line = f"I came across {company}{city_part} while researching hospitality and F&B venues in your region."
-            prop_line = "We wanted to explore whether Purity Beans could be relevant to your beverage requirements."
+            prop_line = "We wanted to explore whether Purity Beans could be relevant to your instant coffee requirements."
             cta = "Would you be open to reviewing our range and trade pricing?"
         else:
             why_line = f"I came across {company}{city_part} while researching businesses in your region."
@@ -1383,6 +1396,22 @@ def reconcile_inbound_replies_via_imap(db) -> dict:
                     _log.debug('suppressed: %s: %s', type(_exc).__name__, _exc)
                     
             intent = classify_intent(body or msg.get("Subject", ""))
+            # A reply to the dedicated WhatsApp request can grant consent.
+            try:
+                from app.services.whatsapp_consent import capture_email_reply
+                consent_result = capture_email_reply(
+                    lead, db, body or "",
+                    message_id=msg.get("Message-ID", ""),
+                    subject=str(msg.get("Subject", "") or ""),
+                    # Headers are the reliable machine signal (Auto-Submitted,
+                    # X-Autoreply); body text alone misses auto-replies that
+                    # do not say "out of office".
+                    headers={k: v for k, v in msg.items()},
+                )
+                if consent_result.get("recorded"):
+                    print(f"WhatsApp consent captured for {lead.company}: {consent_result.get('consent_phone')}")
+            except Exception as _exc:
+                _log.warning("WhatsApp consent capture failed: %s", _exc)
             
             # Register interaction + pause sequence
             existing_inter = db.query(LeadInteraction).filter(

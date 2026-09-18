@@ -133,6 +133,17 @@ def test_consent_is_not_granted_when_there_is_no_number_to_bind_it_to(db):
     assert _events(db, lead, "WHATSAPP_CONSENT_RECORDED") == []
 
 
+def test_explicit_whatsapp_opt_out_revokes_existing_consent(db):
+    lead = _asked(db, whatsapp_number="+919876543210", consent_status="EXPLICIT",
+                  consent_source="FOUNDER_CALL", consent_phone="+919876543210")
+    result = whatsapp_consent.capture_email_reply(
+        lead, db, "Please don't WhatsApp me anymore.")
+    assert result["revoked"] is True
+    assert lead.consent_status == "REVOKED"
+    assert len(_events(db, lead, "WHATSAPP_CONSENT_REVOKED")) == 1
+    assert consent_check(lead)[0] is False
+
+
 # ── the writer itself ────────────────────────────────────────────────────────
 
 def test_an_unrecognised_source_is_refused(db):
@@ -217,3 +228,124 @@ def test_a_human_reply_matching_no_intent_is_founder_work_not_a_crash(body):
     assert r["next_action"] == "FOUNDER_REVIEW"
     assert r["needs_founder"] is True
     assert r["counts_as_engagement"] is True, "a human did reply"
+
+def test_email_reply_with_new_number_grants_consent_from_request_context(db):
+    lead = _lead(db, whatsapp_number=None, phone="+919876543210")
+    db.add(WorkflowEvent(lead_id=lead.id, event_type="WHATSAPP_CONSENT_REQUESTED", actor="SYSTEM", channel="email", payload={"request": WHATSAPP_ASK_SENTENCE}, occurred_at=datetime.utcnow()))
+    db.commit()
+    result = whatsapp_consent.capture_email_reply(lead, db, "My WhatsApp number is 9876543211")
+    assert result["recorded"] is True
+    assert lead.whatsapp_number == "9876543211"
+    assert lead.consent_phone == "9876543211"
+    assert lead.consent_status == "EXPLICIT"
+
+def test_email_reply_affirmative_uses_existing_number(db):
+    lead = _lead(db, whatsapp_number=None, phone="+919876543210")
+    db.add(WorkflowEvent(lead_id=lead.id, event_type="WHATSAPP_CONSENT_REQUESTED", actor="SYSTEM", channel="email", payload={"request": WHATSAPP_ASK_SENTENCE}, occurred_at=datetime.utcnow()))
+    db.commit()
+    result = whatsapp_consent.capture_email_reply(lead, db, "Yes, you can use the number you provided")
+    assert result["recorded"] is True
+    assert lead.consent_status == "EXPLICIT"
+    assert lead.consent_phone == "+919876543210"
+
+def test_email_reply_new_number_does_not_require_the_word_yes(db):
+    lead = _lead(db, whatsapp_number=None, phone="+919876543210")
+    db.add(WorkflowEvent(lead_id=lead.id, event_type="WHATSAPP_CONSENT_REQUESTED", actor="SYSTEM", channel="email", payload={"request": WHATSAPP_ASK_SENTENCE}, occurred_at=datetime.utcnow()))
+    db.commit()
+    result = whatsapp_consent.capture_email_reply(lead, db, "Use 9876543211 for WhatsApp")
+    assert result["recorded"] is True
+    assert lead.consent_phone == "9876543211"
+
+def test_email_reply_without_request_context_does_not_grant_even_with_number(db):
+    lead = _lead(db, whatsapp_number=None, phone="+919876543210")
+    result = whatsapp_consent.capture_email_reply(lead, db, "My WhatsApp is 9876543211")
+    assert result["recorded"] is False
+    assert (lead.consent_status or "UNKNOWN") != "EXPLICIT"
+
+# ── replies to the WhatsApp request that must NOT grant consent ──────────────
+#
+# Each of these was granted consent by the first version of
+# capture_email_reply, verified by running it before it was replaced. An
+# opt-out turning into a WhatsApp opt-in is the worst outcome this module can
+# produce, so every shape that did it is pinned here.
+
+def _asked(db, **kw):
+    lead = _lead(db, **kw)
+    db.add(WorkflowEvent(lead_id=lead.id, event_type="WHATSAPP_CONSENT_REQUESTED",
+                         actor="SYSTEM", channel="email",
+                         payload={"request": WHATSAPP_ASK_SENTENCE},
+                         occurred_at=datetime.utcnow()))
+    db.commit()
+    return lead
+
+
+@pytest.mark.parametrize("body,why", [
+    ("Please remove me from your list.", "an opt-out"),
+    ("Not interested, please don't contact us again.", "a refusal"),
+    ("No thanks.\n\nSent from Outlook for Android", "'ok' inside 'Outlook' is not a yes"),
+    ("I'm not sure this is relevant for us.", "'not sure' is not 'sure'"),
+    ("We will look into it later.", "'ok' inside 'look' is not a yes"),
+    ("No thanks.\n\n--\nRahul Mehta\nManager\n9876543211", "a signature number was never offered"),
+    ("Thanks for reaching out.", "acknowledgement names neither a number nor a yes"),
+])
+def test_a_reply_to_the_request_that_refuses_never_grants_consent(db, body, why):
+    lead = _asked(db, whatsapp_number=None, phone="+919876543210")
+
+    result = whatsapp_consent.capture_email_reply(lead, db, body)
+
+    assert result["recorded"] is False, why
+    assert (lead.consent_status or "UNKNOWN").upper() != "EXPLICIT", why
+    assert lead.whatsapp_number is None, "contact data must not be rewritten from a refusal"
+
+
+def test_an_auto_reply_is_not_a_business_agreeing(db):
+    lead = _asked(db, whatsapp_number=None, phone="+919876543210")
+
+    result = whatsapp_consent.capture_email_reply(
+        lead, db, "I am out of office until Monday. Please contact reception.",
+        subject="Automatic reply", headers={"Auto-Submitted": "auto-replied"})
+
+    assert result["recorded"] is False
+    assert "machine" in result["reason"]
+
+
+def test_a_number_in_quoted_history_was_never_offered(db):
+    """Their reply is a bare "thanks"; the number sits in the email thread
+    underneath it."""
+    lead = _asked(db, whatsapp_number=None, phone="+919876543210")
+    body = ("Thanks.\n\nOn Tue, 16 Sep 2026, Hiten wrote:\n"
+            "> Please reply with your WhatsApp number 9876543299")
+
+    assert whatsapp_consent.capture_email_reply(lead, db, body)["recorded"] is False
+    assert lead.whatsapp_number is None
+
+
+def test_consent_is_never_bound_to_a_landline(db):
+    """A yes to "may we use the number you provided" where that number is the
+    business's published desk line: WhatsApp cannot reach it, so there is
+    nothing to consent to."""
+    lead = _asked(db, whatsapp_number=None, phone="+91 172 234 5678")
+
+    result = whatsapp_consent.capture_email_reply(lead, db, "Yes, you can use that number.")
+
+    assert result["recorded"] is False
+    assert "landline" in result["reason"]
+
+
+def test_a_genuine_yes_binds_the_number_on_file_not_their_signature(db):
+    """Signature cut first: consent attaches to the number they agreed to,
+    and the signature number is ignored rather than written over the record."""
+    lead = _asked(db, whatsapp_number=None, phone="+919876543210")
+    body = "Yes please, go ahead.\n\n--\nRahul\n9876543211"
+
+    result = whatsapp_consent.capture_email_reply(lead, db, body)
+
+    assert result["recorded"] is True
+    assert lead.consent_phone == "+919876543210"
+    assert lead.whatsapp_number is None
+
+
+def test_new_text_drops_quotes_and_signatures():
+    body = ("Use 9812345678 please.\n> quoted line\n--\nsig 9999999999\n"
+            "On Mon wrote:\n> more")
+    assert whatsapp_consent.new_text(body) == "Use 9812345678 please."
