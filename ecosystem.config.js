@@ -97,8 +97,8 @@ module.exports = {
       autorestart: false,
       env: {
         PYTHONUNBUFFERED: "1",
-        AUTO_OUTREACH_ENABLED: "0",
-        SMART_OUTREACH_ENABLED: "0",
+        AUTO_OUTREACH_ENABLED: "1",
+        SMART_OUTREACH_ENABLED: "1",
         OUTREACH_INTERVAL_SECONDS: "900",
         OUTREACH_BATCH_SIZE: "20",
         SENDER_EMAIL: ENV.SENDER_EMAIL || "connect@purepantryprovisions.com",
