@@ -61,7 +61,7 @@ def destination(lead, supplied_number: str = "") -> str:
     ).strip()
 
 
-def record(lead, db, *, source: str, evidence: str, message_id: str = "") -> dict:
+def record(lead, db, *, source: str, evidence: str, message_id: str = "", create_next_action: bool = True) -> dict:
     """Record WhatsApp consent, or explain why it was not recorded.
 
     Returns a dict rather than raising on the ordinary refusals, because the
@@ -126,18 +126,15 @@ def record(lead, db, *, source: str, evidence: str, message_id: str = "") -> dic
                  "consent_phone": number},
         occurred_at=now))
 
-    # decision_engine's commitment system only sees a promise through a
-    # NEXT_ACTION_SET event — consent fields alone never reach it, so the
-    # trust and record-quality gates ahead of the commitment check would
-    # delay a business that just asked to be messaged. SEND_WHATSAPP is in
-    # its _OPEN_COMMITMENTS set.
-    db.add(WorkflowEvent(
-        lead_id=lead.id, event_type="NEXT_ACTION_SET", actor="SYSTEM",
-        channel="whatsapp",
-        payload={"action": "SEND_WHATSAPP",
-                 "detail": f"WhatsApp consent recorded — {SOURCES[source]}",
-                 "from_outcome": source, "blocked": None},
-        occurred_at=now))
+    # Call-outcome logging already creates the canonical next-action event.
+    if create_next_action:
+        db.add(WorkflowEvent(
+            lead_id=lead.id, event_type="NEXT_ACTION_SET", actor="SYSTEM",
+            channel="whatsapp",
+            payload={"action": "SEND_WHATSAPP",
+                     "detail": f"WhatsApp consent recorded — {SOURCES[source]}",
+                     "from_outcome": source, "blocked": None},
+            occurred_at=now))
 
     return {"recorded": True, "source": source, "consent_phone": number}
 
