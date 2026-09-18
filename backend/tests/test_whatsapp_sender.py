@@ -127,13 +127,14 @@ class WhatsAppSenderTests(unittest.TestCase):
         """
         from app.services import whatsapp_aisensy as transport
 
-        keys = ("AISENSY_ENABLED", "AISENSY_API_KEY", "WHATSAPP_TEMPLATE")
+        keys = ("AISENSY_ENABLED", "AISENSY_API_KEY", "WHATSAPP_TEMPLATE", "WHATSAPP_CAMPAIGN_LIVE")
         old_env = {k: os.environ.get(k) for k in keys}
         old_client = transport.httpx.Client
         try:
             os.environ["AISENSY_ENABLED"] = "1"
             os.environ["AISENSY_API_KEY"] = "test-key"
             os.environ["WHATSAPP_TEMPLATE"] = "test_campaign"
+            os.environ["WHATSAPP_CAMPAIGN_LIVE"] = "1"
             transport.httpx.Client = _FakeClient
 
             result = ws.send_whatsapp(self.lead, "hello")
