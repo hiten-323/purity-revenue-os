@@ -254,8 +254,27 @@ def send_template(phone: str, template: str, *, params: list[str] | None = None,
             reason=("AiSensy returned 2xx with no message id — the send was "
                     "accepted but cannot be matched to a delivery webhook"))
     except Exception as exc:  # noqa: BLE001 — unreachable is a status, not a crash
+        if _maybe_transmitted(exc):
+            # AiSensy may have accepted this and the answer was lost. Calling
+            # it "failed" invites a retry, and a retry is a second message to
+            # a customer. "unknown" is never retried automatically.
+            return SendResult(status="unknown",
+                              reason=(f"{type(exc).__name__}: {str(exc)[:120]} — the "
+                                      f"request may have reached AiSensy; check the "
+                                      f"AiSensy log before sending again"))
         return SendResult(status="failed",
                           reason=f"{type(exc).__name__}: {str(exc)[:120]}")
+
+
+def _maybe_transmitted(exc: BaseException) -> bool:
+    """Could the request have reached AiSensy before this error? A connect
+    failure means it never left; a timeout or broken read after the request
+    was written means it may have been accepted."""
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout,
+                        httpx.UnsupportedProtocol, httpx.InvalidURL)):
+        return False
+    return isinstance(exc, (httpx.TimeoutException, httpx.ReadError, httpx.WriteError,
+                            httpx.RemoteProtocolError, TimeoutError))
 
 
 def health() -> dict[str, Any]:

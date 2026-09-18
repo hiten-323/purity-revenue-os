@@ -3904,6 +3904,9 @@ def whatsapp_api_send(req: WhatsAppSendRequest, db: Session = Depends(get_db)):
               before_status=before, after_status="WHATSAPP_SENT",
               payload={"via": "aisensy_api", "outbound_id": row.id})
         _schedule_next_reminder(db, lead, "whatsapp")
+    elif res.status == "unknown":
+        # May have been delivered; "FAILED" would invite a resend.
+        row.status = "UNKNOWN"
     else:
         row.status = "FAILED"; row.failed_at = datetime.utcnow()
     db.commit()

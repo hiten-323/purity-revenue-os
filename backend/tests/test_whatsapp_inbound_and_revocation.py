@@ -16,8 +16,11 @@ no test at all:
     guard; AiSensy takes no idempotency key.
 
 No test here can reach AiSensy: AISENSY_ENABLED is unset, so the transport
-answers not_configured before building a request, and the one test that needs
-a "sent" result replaces the transport outright.
+answers not_configured before building a request. Tests that need it
+configured hand it a fake client that raises, or replace it outright.
+
+Also here (#33/#34): a request whose answer was lost may have been accepted,
+so it is "unknown", never "failed" -- and nothing retries an unknown send.
 """
 from __future__ import annotations
 
@@ -222,3 +225,73 @@ def test_the_webhook_still_refuses_an_unsigned_caller(webhook, db):
     assert r.status_code == 401
     db.refresh(lead)
     assert (lead.consent_status or "UNKNOWN") != "EXPLICIT"
+
+
+# ── #33/#34: a send that may have gone out is never retried automatically ────
+
+def _configured(monkeypatch):
+    monkeypatch.setenv("AISENSY_ENABLED", "1")
+    monkeypatch.setenv("AISENSY_API_KEY", "k")
+    monkeypatch.setenv("WHATSAPP_TEMPLATE", "Purity Outreach")
+    monkeypatch.setenv("WHATSAPP_CAMPAIGN_LIVE", "1")
+
+
+def _raising(exc):
+    class _C:
+        def post(self, *a, **k):
+            raise exc
+    return _C()
+
+
+def test_a_lost_answer_is_unknown_not_failed(monkeypatch):
+    """A read timeout means the request was written; AiSensy may have
+    accepted it. "failed" invites the retry that sends it twice."""
+    import httpx
+    from app.services import whatsapp_aisensy as transport
+
+    _configured(monkeypatch)
+    r = transport.send_template("9876543210", "Purity Outreach",
+                                client=_raising(httpx.ReadTimeout("slow")))
+    assert r.status == "unknown"
+    assert "may have reached" in r.reason
+
+
+def test_a_connection_that_never_opened_is_a_plain_failure(monkeypatch):
+    import httpx
+    from app.services import whatsapp_aisensy as transport
+
+    _configured(monkeypatch)
+    r = transport.send_template("9876543210", "Purity Outreach",
+                                client=_raising(httpx.ConnectError("refused")))
+    assert r.status == "failed"
+
+
+def test_an_unknown_send_blocks_the_immediate_retry(db, monkeypatch):
+    from app.services import whatsapp_aisensy as transport
+    from app.services.whatsapp_aisensy import SendResult
+
+    lead = _consented(db)
+    monkeypatch.setattr(transport, "send_template",
+                        lambda *a, **k: SendResult(status="unknown", reason="ReadTimeout"))
+    first = send_whatsapp(lead, "catalogue", db=db)
+    db.commit()
+    assert first.status == "unknown"
+    assert len(_events(db, lead, "WHATSAPP_SEND_UNCONFIRMED")) == 1
+
+    calls = []
+    monkeypatch.setattr(transport, "send_template",
+                        lambda *a, **k: calls.append(1) or SendResult(status="sent"))
+    again = send_whatsapp(lead, "catalogue", db=db)
+    assert again.status == "blocked" and "duplicate" in again.reason
+    assert calls == [], "the retry never reached the provider"
+
+
+def test_smart_outreach_does_not_retry_an_unknown_send(db):
+    from app.services import smart_outreach as so
+
+    lead = _consented(db)
+    db.add(so.OutreachTouch(lead_id=lead.id, channel="whatsapp", touch_type="SEND_CATALOGUE",
+                            template_key="catalogue_request", status="UNKNOWN"))
+    db.commit()
+    assert so._proven_whatsapp_touches(db, lead.id, "catalogue_request"), (
+        "an UNKNOWN touch must count as possibly sent")

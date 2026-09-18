@@ -13,9 +13,9 @@ prospects to call, so losing it costs more than the channel.
 
 So this module refuses to send to a lead without recorded consent. Cold
 first-touch stays on wa.me (the founder's own phone, manual send) via the
-WhatsApp Send Queue. This API path is for people who have opted in — in practice
-someone who REPLIED, which both proves consent and opens Meta's 24-hour
-customer-service window where free-form (non-template) messages are allowed.
+WhatsApp Send Queue. This API path is for people who have opted in, recorded by
+whatsapp_consent with the number it covers. Replying to an email is not that:
+a reply on one channel is not permission on another.
 
 CONFIG (dormant until set — nothing sends without these):
   AISENSY_API_KEY        API key from the AiSensy dashboard
@@ -52,7 +52,7 @@ SERVICE_WINDOW_HOURS = 24
 class WaResult:
     # `sent` means AiSensy accepted the request. It does NOT mean the recipient
     # received/read it; those facts must come from provider status callbacks.
-    status: str                      # sent | blocked | failed | not_configured
+    status: str                      # sent | blocked | failed | unknown | not_configured
     reason: str = ""
     message_id: str = ""
     response: str = ""
@@ -172,7 +172,7 @@ def recent_send(db, lead, minutes: int = DUPLICATE_WINDOW_MINUTES) -> bool:
     since = datetime.utcnow() - timedelta(minutes=minutes)
     return db.query(WorkflowEvent.id).filter(
         WorkflowEvent.lead_id == lead.id,
-        WorkflowEvent.event_type == "WHATSAPP_SENT",
+        WorkflowEvent.event_type.in_(("WHATSAPP_SENT", "WHATSAPP_SEND_UNCONFIRMED")),
         WorkflowEvent.occurred_at >= since,
     ).first() is not None
 
@@ -227,6 +227,15 @@ def send_whatsapp(lead, message: str, campaign_name: Optional[str] = None,
 
     result = transport.send_template(phone, template, params=params,
                                      timeout=timeout)
+    if result.status == "unknown" and db is not None:
+        # Possibly delivered. Recorded so the duplicate guard treats it as a
+        # send; the founder reconciles it against the AiSensy log.
+        from app.models.models import WorkflowEvent
+        db.add(WorkflowEvent(
+            lead_id=lead.id, event_type="WHATSAPP_SEND_UNCONFIRMED",
+            actor="SYSTEM", channel="whatsapp",
+            payload={"to": phone, "template": template, "reason": result.reason[:300]},
+            occurred_at=datetime.utcnow()))
     return WaResult(
         status=result.status,
         reason=result.reason,

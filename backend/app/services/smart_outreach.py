@@ -160,12 +160,19 @@ def _proven_email_touches(db: Session, lead_id: int) -> list[OutreachTouch]:
 
 
 
+# A send whose outcome is unknown (the request may have reached AiSensy and
+# the answer was lost) counts as sent for duplicate protection only: retrying
+# it automatically risks a second message to the same customer.
+MAYBE_SENT = ("UNKNOWN",)
+
+
 def _proven_whatsapp_touches(db: Session, lead_id: int, template_key: str | None = None) -> list[OutreachTouch]:
-    """Return proven WhatsApp sends for duplicate/idempotency protection."""
+    """Return proven -- or possibly delivered -- WhatsApp sends, for
+    duplicate/idempotency protection."""
     q = db.query(OutreachTouch).filter(
         OutreachTouch.lead_id == lead_id,
         OutreachTouch.channel == "whatsapp",
-        OutreachTouch.status.in_(PROVEN_SEND),
+        OutreachTouch.status.in_(PROVEN_SEND + MAYBE_SENT),
     )
     if template_key:
         q = q.filter(OutreachTouch.template_key == template_key)
