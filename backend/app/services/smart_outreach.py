@@ -773,7 +773,7 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
         return {**decision, "status": "SKIPPED", "reason": "call follow-up already sent"}
 
     if decision["channel"] == "email":
-        from app.services.email_sender import build_outreach_email, send_email
+        from app.services.email_sender import build_outreach_email, send_email, whatsapp_ask
 
         proven_n = len(_proven_email_touches(db, lead.id))
         seq = _sequence_state(db, lead)
@@ -796,6 +796,14 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
                 f"Hi {_name(lead)},\n\nAs requested, here is our catalogue:\n{url}\n\n"
                 "Happy to share commercial details next if useful.\n\nBest,\nHiten\nPure Pantry Provisions"
             )
+        else:
+            # Warm touches carry the WhatsApp ask; the catalogue email above
+            # does not. That one is fulfilling a request the buyer already
+            # made, and burying a second question in it is how the actual
+            # answer gets missed. whatsapp_ask returns "" unless there is a
+            # number to message and no consent on record yet.
+            body = body + whatsapp_ask(lead)
+
         if not lead.email:
             _record(db, lead, profile, "email", decision["action"], "BLOCKED", "missing_email")
             db.commit()
