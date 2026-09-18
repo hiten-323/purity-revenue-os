@@ -36,6 +36,34 @@ SENDER_EMAIL    = os.getenv("SENDER_EMAIL", "connect@purepantryprovisions.com")
 SENDER_PASSWORD = os.getenv("ZOHO_APP_PASSWORD", "")   # Zoho App Password (NOT your login password)
 SENDER_NAME     = os.getenv("SENDER_NAME", "Hiten Jain | Pure Pantry Provisions")
 
+# ── The way out of this mailing list ─────────────────────────────────────────
+#
+# Cold B2B mail with no stated way out has two costs, and the compliance one is
+# the smaller: a recipient who cannot find an opt-out uses the spam button
+# instead, and that reputation is attached to the same domain and Zoho account
+# the store's own mail goes through.
+#
+# The word is not free text. "unsubscribe" is a token
+# reply_intelligence.DO_NOT_CONTACT matches, which sets next_action
+# SUPPRESS_ACCOUNT, which decision_engine reads as suppression for the whole
+# account -- so this sentence asks for the one reply the pipeline already
+# honours. test_email_optout pins that round trip, because asking for a word
+# nothing acts on would be a promise the system quietly breaks.
+#
+# mailto rather than a one-click https link: the unsubscribe URL would have to
+# live on dashboard.p3online.in, which is not publicly reachable and should not
+# be opened up to serve this. A mailto List-Unsubscribe is valid on its own;
+# List-Unsubscribe-Post (one-click) is deliberately not claimed, because it
+# requires an endpoint that would honour a POST and there is none.
+OPT_OUT_SENTENCE = (
+    'If you would rather not hear from us, reply "unsubscribe" and we will '
+    "close your file."
+)
+OPT_OUT_TEXT = "\n\n" + OPT_OUT_SENTENCE
+OPT_OUT_HTML = (
+    '<p style="color:#888;font-size:12px;margin-top:18px">' + OPT_OUT_SENTENCE + "</p>"
+)
+
 
 def _gate_failure(email: "OutreachEmail", reason: str, exc: Exception | None = None) -> "OutreachEmail":
     if exc is None:
@@ -317,12 +345,32 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
     msg_id = email.message_id or make_msgid(domain="purepantryprovisions.com")
     email.message_id = msg_id
 
+    # Opt-out, applied HERE rather than in the templates. There are nine
+    # subject/body templates across four modules and three callers that build an
+    # OutreachEmail directly; adding a footer to each is the "N call sites"
+    # pattern that has already caused three bugs in this file. Every send passes
+    # through this function, so this is the only place it cannot be missed.
+    #
+    # Mail addressed to the founder's own inbox (draft previews, verification
+    # sends) is exempt: it is not outbound to a prospect, and an opt-out line on
+    # a preview would end up quoted inside the real email later.
+    if not _is_self and OPT_OUT_SENTENCE not in (email.body_text or ""):
+        email.body_text = (email.body_text or "").rstrip() + OPT_OUT_TEXT
+        if email.body_html:
+            email.body_html = (
+                email.body_html.replace("</body>", OPT_OUT_HTML + "</body>")
+                if "</body>" in email.body_html
+                else email.body_html + OPT_OUT_HTML
+            )
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = email.subject
     msg["From"]    = f"{SENDER_NAME} <{SENDER_EMAIL}>"
     msg["To"]      = f"{email.to_name} <{email.to_email}>" if email.to_name else email.to_email
     msg["Reply-To"] = SENDER_EMAIL
     msg["Message-ID"] = msg_id
+    if not _is_self:
+        msg["List-Unsubscribe"] = f"<mailto:{SENDER_EMAIL}?subject=unsubscribe>"
 
     msg.attach(MIMEText(email.body_text, "plain", "utf-8"))
     msg.attach(MIMEText(email.body_html or _text_to_html(email.body_text), "html", "utf-8"))
