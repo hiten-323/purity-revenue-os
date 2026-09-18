@@ -345,6 +345,42 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
     msg_id = email.message_id or make_msgid(domain="purepantryprovisions.com")
     email.message_id = msg_id
 
+    # If the lead has no WhatsApp destination/consent yet, ask through the
+    # email channel. The exact request is recorded after a successful send so
+    # an inbound reply can prove the context in which a WhatsApp number was
+    # supplied. Never infer consent from a discovered WhatsApp-capable number.
+    whatsapp_request_added = False
+    if not _is_self and getattr(email, "lead_id", None):
+        try:
+            from app.database.database import SessionLocal
+            from app.models.models import B2BLead
+            _db = SessionLocal()
+            try:
+                _lead = _db.query(B2BLead).filter(B2BLead.id == email.lead_id).first()
+                if (_lead and not (getattr(_lead, "whatsapp_number", None) or "").strip()
+                        and (getattr(_lead, "consent_status", None) or "UNKNOWN").upper()
+                        not in {"EXPLICIT", "OPTED_IN"}):
+                    email.body_text = (email.body_text or "").rstrip() + WHATSAPP_CONSENT_REQUEST_TEXT
+                    if email.body_html:
+                        _wa_html = (
+                            "<p><strong>Prefer WhatsApp?</strong> If you would like "
+                            "Pure Pantry Provisions to send you our catalogue and B2B "
+                            "pricing on WhatsApp, please reply with the WhatsApp "
+                            "number you would like us to use.</p>"
+                        )
+                        email.body_html = (
+                            email.body_html.replace("</body>", _wa_html + "</body>")
+                            if "</body>" in email.body_html
+                            else email.body_html + _wa_html
+                        )
+                    whatsapp_request_added = True
+            finally:
+                _db.close()
+        except Exception:
+            # Consent acquisition is additive; a database lookup failure must
+            # never turn an otherwise governed email send into an unsafe send.
+            whatsapp_request_added = False
+
     # Opt-out, applied HERE rather than in the templates. There are nine
     # subject/body templates across four modules and three callers that build an
     # OutreachEmail directly; adding a footer to each is the "N call sites"
@@ -386,6 +422,23 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
         email.sent_at = datetime.utcnow().isoformat()
         email.smtp_response = "250 OK - Accepted for delivery"
         print(f"SMTP sent successfully. MsgID: {msg_id}")
+        if whatsapp_request_added:
+            try:
+                from app.database.database import SessionLocal
+                from app.models.models import B2BLead
+                from app.services.whatsapp_consent import record_email_whatsapp_request
+                _db = SessionLocal()
+                try:
+                    _lead = _db.query(B2BLead).filter(B2BLead.id == email.lead_id).first()
+                    if _lead:
+                        record_email_whatsapp_request(_lead, _db, message_id=msg_id)
+                        _db.commit()
+                finally:
+                    _db.close()
+            except Exception as _exc:
+                # Do not claim consent was requested in the audit trail if the
+                # request event could not be persisted.
+                print(f"WhatsApp consent-request audit failed: {_exc}")
     except smtplib.SMTPAuthenticationError:
         email.status = "failed"
         email.error = "Zoho auth failed — use App Password from accounts.zoho.in, not your login password"
@@ -512,6 +565,15 @@ from app.services.crm_tracker import CRMTrackerService
 # contradicting Purica, which ran the other way. It was dead code, referenced
 # nowhere, which is exactly why it survived: a stale price list nothing renders
 # is invisible until someone wires it back in and quotes it to a customer.
+
+# A prospect may choose WhatsApp without ever having a WhatsApp number in
+# enrichment. This line is appended only when an outbound email is actually
+# sent, and its request event is recorded only after provider acceptance.
+WHATSAPP_CONSENT_REQUEST_TEXT = (
+    "\n\nPrefer WhatsApp? If you would like Pure Pantry Provisions to send you "
+    "our catalogue and B2B pricing on WhatsApp, please reply with the WhatsApp "
+    "number you would like us to use.\n"
+)
 
 # ── Segment-specific one-liners (no unverified claims) ───────────────────────
 _SEGMENT_CONTEXT = {
@@ -1351,6 +1413,24 @@ def reconcile_inbound_replies_via_imap(db) -> dict:
                     _log.debug('suppressed: %s: %s', type(_exc).__name__, _exc)
                     
             intent = classify_intent(body or msg.get("Subject", ""))
+            
+            # A WhatsApp number in a reply becomes consent only when Revenue OS
+            # previously asked for a WhatsApp number in an outbound email.
+            # This prevents enrichment data or an unrelated reply from becoming
+            # an inferred WhatsApp opt-in.
+            try:
+                from app.services.whatsapp_consent import capture_email_reply
+                consent_capture = capture_email_reply(
+                    lead, db, body or msg.get("Subject", ""),
+                    message_id=msg.get("Message-ID", ""),
+                )
+                if consent_capture.get("captured"):
+                    print(
+                        f"WhatsApp consent captured for {lead.company}: "
+                        f"{consent_capture['whatsapp_number']}"
+                    )
+            except Exception as _exc:
+                consent_capture = {"captured": False, "reason": str(_exc)}
             
             # Register interaction + pause sequence
             existing_inter = db.query(LeadInteraction).filter(
