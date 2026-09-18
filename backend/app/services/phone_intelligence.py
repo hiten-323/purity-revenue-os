@@ -398,24 +398,39 @@ def log_call(lead, db, outcome: str, notes: str = "",
         applied.append("phone cleared — not this business")
 
     elif outcome == "WHATSAPP_CONSENT":
-        # The outcome that unlocks AiSensy. Meta requires opt-in before any
-        # business-initiated WhatsApp, and a buyer saying "yes, send it on
-        # WhatsApp" to the founder IS that opt-in — it just has to be written
-        # to the field the consent gate actually reads.
-        #
-        # EXPLICIT and this exact source shape are what whatsapp_sender's
-        # consent_check treats as permission; writing anything else here would
-        # record consent that the sender still refuses to act on.
+        # Explicit consent is recorded only for the destination the buyer
+        # actually agreed to. If a different WhatsApp number was supplied on
+        # the call, bind the consent to that number; otherwise it covers the
+        # number that was called. A discovered/verified number alone is never
+        # permission.
+        mentioned = facts.get("phones_mentioned") or []
+        current_phone = (getattr(lead, "phone", "") or "").strip()
+        if len(mentioned) > 1:
+            raise ValueError(
+                "WHATSAPP_CONSENT note contains multiple phone numbers; "
+                "record one WhatsApp destination explicitly before granting consent"
+            )
+        wa_number = (mentioned[0] if mentioned else
+                     (getattr(lead, "whatsapp_number", None) or current_phone)).strip()
+        if not wa_number:
+            raise ValueError("WHATSAPP_CONSENT requires a WhatsApp number or the called phone")
+        if mentioned and mentioned[0] != current_phone:
+            lead.whatsapp_number = mentioned[0]
+            applied.append(f"whatsapp_number = {mentioned[0]} (lead supplied on call)")
+
         lead.consent_status = "EXPLICIT"
         lead.consent_source = "FOUNDER_CALL"
         lead.consent_timestamp = _now()
+        lead.consent_phone = wa_number
         db.add(WorkflowEvent(
             lead_id=lead.id, event_type="CONSENT_GIVEN", actor="FOUNDER",
             channel="phone",
             payload={"consent_status": "EXPLICIT", "source": "FOUNDER_CALL",
-                     "heard_on_call": True, "notes": (notes or "")[:300]},
+                     "heard_on_call": True, "consent_phone": wa_number,
+                     "number_supplied_on_call": bool(mentioned),
+                     "notes": (notes or "")[:300]},
             occurred_at=_now()))
-        applied.append("consent -> EXPLICIT (WhatsApp now permitted)")
+        applied.append(f"consent -> EXPLICIT (WhatsApp permitted for {wa_number})")
 
     elif outcome == "EMAIL_COLLECTED":
         # The address is applied above by the shared extraction path. If the
