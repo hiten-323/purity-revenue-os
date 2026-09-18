@@ -217,3 +217,36 @@ def test_a_human_reply_matching_no_intent_is_founder_work_not_a_crash(body):
     assert r["next_action"] == "FOUNDER_REVIEW"
     assert r["needs_founder"] is True
     assert r["counts_as_engagement"] is True, "a human did reply"
+
+def test_email_reply_with_new_number_grants_consent_from_request_context(db):
+    lead = _lead(db, whatsapp_number=None, phone="+919876543210")
+    db.add(WorkflowEvent(lead_id=lead.id, event_type="WHATSAPP_CONSENT_REQUESTED", actor="SYSTEM", channel="email", payload={"request": WHATSAPP_ASK_SENTENCE}, occurred_at=datetime.utcnow()))
+    db.commit()
+    result = whatsapp_consent.capture_email_reply(lead, db, "My WhatsApp number is 9876543211")
+    assert result["recorded"] is True
+    assert lead.whatsapp_number == "9876543211"
+    assert lead.consent_phone == "9876543211"
+    assert lead.consent_status == "EXPLICIT"
+
+def test_email_reply_affirmative_uses_existing_number(db):
+    lead = _lead(db, whatsapp_number=None, phone="+919876543210")
+    db.add(WorkflowEvent(lead_id=lead.id, event_type="WHATSAPP_CONSENT_REQUESTED", actor="SYSTEM", channel="email", payload={"request": WHATSAPP_ASK_SENTENCE}, occurred_at=datetime.utcnow()))
+    db.commit()
+    result = whatsapp_consent.capture_email_reply(lead, db, "Yes, you can use the number you provided")
+    assert result["recorded"] is True
+    assert lead.consent_status == "EXPLICIT"
+    assert lead.consent_phone == "+919876543210"
+
+def test_email_reply_new_number_does_not_require_the_word_yes(db):
+    lead = _lead(db, whatsapp_number=None, phone="+919876543210")
+    db.add(WorkflowEvent(lead_id=lead.id, event_type="WHATSAPP_CONSENT_REQUESTED", actor="SYSTEM", channel="email", payload={"request": WHATSAPP_ASK_SENTENCE}, occurred_at=datetime.utcnow()))
+    db.commit()
+    result = whatsapp_consent.capture_email_reply(lead, db, "Use 9876543211 for WhatsApp")
+    assert result["recorded"] is True
+    assert lead.consent_phone == "9876543211"
+
+def test_email_reply_without_request_context_does_not_grant_even_with_number(db):
+    lead = _lead(db, whatsapp_number=None, phone="+919876543210")
+    result = whatsapp_consent.capture_email_reply(lead, db, "My WhatsApp is 9876543211")
+    assert result["recorded"] is False
+    assert (lead.consent_status or "UNKNOWN") != "EXPLICIT"
