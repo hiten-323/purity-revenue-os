@@ -73,7 +73,7 @@ OPT_OUT_SENTENCE = (
 # years later. reply_intelligence's WHATSAPP_OPT_IN pattern matches this
 # phrasing, and a test pins the round trip.
 WHATSAPP_ASK_SENTENCE = (
-    'If WhatsApp is easier, reply "WhatsApp" and I will send it there instead.'
+    'If WhatsApp is more convenient, I can share our catalogue and B2B pricing there. If you would like that, simply reply with your WhatsApp number — or let me know if we can use the number you provided.'
 )
 
 
