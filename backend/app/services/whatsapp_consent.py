@@ -139,6 +139,30 @@ def record(lead, db, *, source: str, evidence: str, message_id: str = "", create
 
     return {"recorded": True, "source": source, "consent_phone": number}
 
+def revoke(lead, db, *, evidence: str, source: str = "WHATSAPP_INBOUND") -> dict:
+    """Revoke WhatsApp permission when the business explicitly asks us to stop."""
+    from app.models.models import WorkflowEvent
+    evidence = (evidence or "").strip()
+    if not evidence:
+        raise ValueError("WhatsApp revocation requires evidence")
+    now = datetime.utcnow()
+    lead.consent_status = "REVOKED"
+    lead.consent_source = source
+    lead.consent_timestamp = now
+    db.add(WorkflowEvent(
+        lead_id=lead.id, event_type="WHATSAPP_CONSENT_REVOKED",
+        actor="SYSTEM", channel="whatsapp",
+        payload={"source": source, "evidence": evidence[:1000],
+                 "consent_phone": getattr(lead, "consent_phone", None)},
+        occurred_at=now))
+    db.add(WorkflowEvent(
+        lead_id=lead.id, event_type="NEXT_ACTION_SET", actor="SYSTEM",
+        channel="whatsapp",
+        payload={"action": "STOP_WHATSAPP", "from_outcome": source,
+                 "blocked": True}, occurred_at=now))
+    return {"revoked": True, "consent_phone": getattr(lead, "consent_phone", None)}
+
+
 
 # ── Consent from a reply to the dedicated WhatsApp request ──────────────────
 #
@@ -239,6 +263,10 @@ def capture_email_reply(lead, db, body: str, *, message_id: str = "",
         return {"recorded": False, "reason": f"machine reply ({sender.get('kind')})"}
 
     refusing = {i["intent"] for i in ri.classify_intent(text)["intents"]} & _REFUSING_INTENTS
+    explicit_wa_stop = bool(re.search(r"\\b(?:whatsapp|wa)\\b.{0,40}\\b(?:stop|remove|unsubscribe|dont|do not|don't)\\b|\\b(?:stop|remove|unsubscribe|dont|do not|don't)\\b.{0,40}\\b(?:whatsapp|wa)\\b", text, re.IGNORECASE))
+    if explicit_wa_stop:
+        revoke(lead, db, evidence=text[:1000], source="EMAIL_REPLY_WHATSAPP_REQUEST")
+        return {"recorded": False, "revoked": True, "reason": "explicit WhatsApp opt-out"}
     if refusing:
         return {"recorded": False, "reason": f"reply refuses ({', '.join(sorted(refusing))})"}
     if _NEGATION.search(text):
