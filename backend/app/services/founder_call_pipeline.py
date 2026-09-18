@@ -535,7 +535,10 @@ def request_founder_call(lead, db, *, note: str = "") -> str:
     """Promote an interested lead into the founder queue and create an actionable founder-call work item. This does not place/dial the call."""
     from app.models.models import WorkflowEvent, WorkflowExecution
 
-    stage = advance(lead, db, FOUNDER_CALL_REQUESTED, note=note)
+    if stage_of(lead) == FOUNDER_CALL_REQUESTED:
+        stage = FOUNDER_CALL_REQUESTED
+    else:
+        stage = advance(lead, db, FOUNDER_CALL_REQUESTED, note=note)
     existing = (db.query(WorkflowExecution)
                   .filter(WorkflowExecution.lead_id == lead.id,
                           WorkflowExecution.workflow_type == "FOUNDER_CALL",
