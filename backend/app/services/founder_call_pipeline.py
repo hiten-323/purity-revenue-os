@@ -532,8 +532,31 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
 
 
 def request_founder_call(lead, db, *, note: str = "") -> str:
-    """Promote an interested lead into the founder queue."""
-    return advance(lead, db, FOUNDER_CALL_REQUESTED, note=note)
+    """Promote an interested lead into the founder queue and create an actionable founder-call work item. This does not place/dial the call."""
+    from app.models.models import WorkflowEvent, WorkflowExecution
+
+    stage = advance(lead, db, FOUNDER_CALL_REQUESTED, note=note)
+    existing = (db.query(WorkflowExecution)
+                  .filter(WorkflowExecution.lead_id == lead.id,
+                          WorkflowExecution.workflow_type == "FOUNDER_CALL",
+                          WorkflowExecution.status == "REQUESTED")
+                  .first())
+    if existing is None:
+        db.add(WorkflowExecution(
+            workflow_type="FOUNDER_CALL", lead_id=lead.id, status="REQUESTED",
+            requested_by="AI",
+            payload={"reason": "AI requested human handoff",
+                     "note": (note or "")[:500],
+                     "founder_brief": founder_brief(lead)},
+        ))
+        db.add(WorkflowEvent(
+            lead_id=lead.id, event_type="FOUNDER_CALL_REQUESTED",
+            actor="AI", channel="call",
+            payload={"reason": "AI requested human handoff",
+                     "note": (note or "")[:500]},
+            occurred_at=datetime.utcnow(),
+        ))
+    return stage
 
 
 def founder_queue(db, limit: int = 50):
