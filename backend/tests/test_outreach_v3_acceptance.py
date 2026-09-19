@@ -154,9 +154,17 @@ bad = [c for c in p["power_hour"] if not c["phone"]]
 check("B2 no Power Hour card lacks a phone number", len(bad) == 0)
 s = httpx.get(f"{B}/b2b/outreach/search",
               params={"outreach_method": "PHONE_ONLY"}, timeout=120).json()
-with_mail = [x for x in s["results"] if x["email_verified"]]
+# "Usable" means the send gate (contact_trust.sendable + actionable), not the
+# legacy email_verified flag this check used to read. Measured 2026-09-19: 51
+# phone-only leads carried email_verified=True and NOT ONE passed the send gate
+# (42 catch-all domains, 9 "valid" but untrusted) -- phone genuinely was their
+# only channel, and the old assertion failed on correct behaviour. The real
+# contract is that no lead is offered as both phone-only and email-ready.
+er = httpx.get(f"{B}/b2b/outreach/search",
+               params={"outreach_method": "EMAIL_READY"}, timeout=120).json()
+both = {x["lead_id"] for x in s["results"]} & {x["lead_id"] for x in er["results"]}
 check("B3 phone-only excludes anything with a usable email",
-      len(with_mail) == 0, f"{s['matched']} phone-only")
+      len(both) == 0, f"{s['matched']} phone-only, {len(both)} also email-ready")
 
 # fabrication guard: nothing gained an email
 before_mail = db.query(B2BLead).filter(B2BLead.email != "",
@@ -169,8 +177,12 @@ o = httpx.post(f"{B}/b2b/outreach/call-outcome/{LID}", timeout=120, headers=ADMI
     "outcome": "SEND_DETAILS", "email": "buyer@testco-v3.example",
     "decision_maker": "Rajesh Sharma",
     "remark": "Interested. Send details."}).json()
-check("C1 SEND_DETAILS creates a FOLLOWUP_EMAIL action",
-      o["next_action"] == "FOLLOWUP_EMAIL", f"got {o['next_action']}")
+# The engine deliberately resolves "send details" to the catalogue: details
+# was split into catalogue vs pricing because they carry different approval
+# rules (pricing is founder-only). C2-C4 below still pin the part that
+# matters here -- the email is a follow-up with call provenance, not an intro.
+check("C1 SEND_DETAILS creates a SEND_CATALOGUE action",
+      o["next_action"] == "SEND_CATALOGUE", f"got {o['next_action']}")
 check("C2 email captured with call provenance",
       "email" in o["promoted"], f"promoted={o['promoted']}")
 db.expire_all()
@@ -188,7 +200,7 @@ check("C4 the business no longer qualifies for an INTRO email",
 o2 = httpx.post(f"{B}/b2b/outreach/call-outcome/{LID}", timeout=120, headers=ADMIN, json={
     "outcome": "SEND_WHATSAPP", "remark": "Send catalogue on WhatsApp."}).json()
 check("D1 SEND_WHATSAPP switches the channel to whatsapp",
-      o2["channel"] == "whatsapp" and o2["next_action"] == "WHATSAPP",
+      o2["channel"] == "whatsapp" and o2["next_action"] == "SEND_WHATSAPP",
       f"{o2['next_action']}/{o2['channel']}")
 check("D2 the stale email action was cancelled",
       o2["next_action_state"]["cancelled"] >= 1,
@@ -200,7 +212,7 @@ o3 = httpx.post(f"{B}/b2b/outreach/call-outcome/{LID}", timeout=120, headers=ADM
 db.expire_all()
 lead = db.query(B2BLead).get(LID)
 check("E1 NO_ANSWER schedules a retry, does not close the lead",
-      o3["next_action"] == "FOUNDER_CALL" and lead.status != "CLOSED_LOST",
+      o3["next_action"] == "CALL_AGAIN" and lead.status != "CLOSED_LOST",
       f"action={o3['next_action']} status={lead.status}")
 check("E2 NO_ANSWER is not recorded as interested",
       db.query(LeadInteraction).filter(

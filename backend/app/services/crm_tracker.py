@@ -10,6 +10,12 @@ from sqlalchemy import func
 from app.models.models import B2BLead
 from datetime import datetime
 
+# The only action types generate_actions creates -- and therefore the only
+# ones it may delete. test_generate_actions_preserves_call_commitments pins
+# that this set matches what the generator actually writes.
+GENERATED_ACTION_TYPES = ("CALL_LEAD", "FOLLOWUP_SAMPLE", "SEND_PROPOSAL",
+                          "DISPATCH_SAMPLE", "REORDER_ALERT")
+
 class CRMTrackerService:
     @staticmethod
     def recalculate_lead_score_and_action(lead: B2BLead) -> None:
@@ -1387,11 +1393,30 @@ class CRMTrackerService:
         from app.models.models import ActionQueue, B2BLead
         from datetime import datetime, timedelta
 
-        # Clear existing PENDING actions in queue
-        db.query(ActionQueue).filter(ActionQueue.status == "PENDING").delete()
+        # Clear only the PENDING rows THIS generator made. It used to delete
+        # every PENDING row, and action_queue is shared: outreach_search's
+        # set_next_action writes the founder's call commitments there too
+        # (a requested sample, a quote, a callback). Any caller of
+        # /b2b/actions/recalculate would have silently erased every buyer
+        # request logged since the last run and replaced them with five
+        # generic reminders. The dashboard stopped calling it on mount for
+        # performance, which is the only reason it has not happened yet.
+        db.query(ActionQueue).filter(
+            ActionQueue.status == "PENDING",
+            ActionQueue.action_type.in_(GENERATED_ACTION_TYPES),
+        ).delete(synchronize_session=False)
+
+        # A lead that already owes or is owed something specific keeps that
+        # one action. Adding a generic reminder on top would give it two
+        # PENDING actions -- the "exactly one next action" rule set_next_action
+        # enforces -- with the vaguer one competing for the founder's time.
+        committed = {lid for (lid,) in db.query(ActionQueue.lead_id).filter(
+            ActionQueue.status == "PENDING").all()}
 
         # Find active leads
-        active_leads = db.query(B2BLead).filter(B2BLead.status.notin_(["COLD", "DORMANT", "ARCHIVED"])).all()
+        active_leads = [l for l in db.query(B2BLead).filter(
+            B2BLead.status.notin_(["COLD", "DORMANT", "ARCHIVED"])).all()
+            if l.id not in committed]
         
         actions_to_score = []
         for lead in active_leads:
