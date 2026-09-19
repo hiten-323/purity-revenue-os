@@ -78,12 +78,15 @@ def methods_for(lead, ev: dict) -> set[str]:
 
 
 def ai_call_status() -> dict:
-    import os
-    key = (os.getenv("VAPI_API_KEY") or os.getenv("SARVAM_API_KEY") or "").strip()
-    if not key:
-        return {"available": False, "reason": "AI calling is not configured "
-                "(no VAPI/Sarvam key) — Founder Call is available instead"}
-    return {"available": True, "reason": "configured"}
+    """Report the actual configured voice path, not a retired provider."""
+    from app.services import voice_router
+
+    ok, detail = voice_router.config_status()
+    if not ok:
+        return {"available": False, "reason": detail}
+    if voice_router.kill_switch_engaged():
+        return {"available": False, "reason": "AI calling kill switch is engaged"}
+    return {"available": True, "reason": detail}
 
 
 @dataclass(frozen=True)
