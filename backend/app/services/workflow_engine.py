@@ -155,9 +155,9 @@ class WorkflowEngine:
     @staticmethod
     def _run_ai_call(db: Session, lead, payload: dict) -> dict:
         from app.services.calling_agent import CallingAgentService
-        result = CallingAgentService.trigger_vapi_call(db, lead)
+        result = CallingAgentService.trigger_ai_call(db, lead)
         track(db, "AI_CALL_INITIATED", lead_id=lead.id, actor="AI", channel="call",
-              payload={"provider": "vapi", "result": str(result)[:200]})
+              payload={"provider": "nuraveda", "result": str(result)[:200]})
         return {"call": str(result)[:200]}
 
     @staticmethod
