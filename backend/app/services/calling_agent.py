@@ -253,7 +253,7 @@ class CallingAgentService:
         for lead in stagnant_leads:
             if lead.last_call_date and lead.last_call_date > cutoff:
                 continue
-            success, reason = CallingAgentService.trigger_vapi_call(db, lead)
+            success, reason = CallingAgentService.trigger_ai_call(db, lead)
             triggered.append({
                 "lead_id": lead.id,
                 "company": lead.company,
