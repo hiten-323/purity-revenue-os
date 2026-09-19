@@ -68,14 +68,14 @@ I have successfully designed, built, and verified the interactive Sales Operatin
 1. **Start the FastAPI Backend**:
    Navigate to the backend folder and start the API server:
    ```bash
-   cd jules_session/backend
+   cd purity-revenue-os/backend
    python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
    ```
 
 2. **Start the Next.js Frontend**:
    Navigate to the frontend folder and run the dev server:
    ```bash
-   cd jules_session/frontend
+   cd purity-revenue-os/frontend
    pnpm dev
    ```
    Open **[http://localhost:3000/dashboard](http://localhost:3000/dashboard)** in your browser to view the premium dashboard.
