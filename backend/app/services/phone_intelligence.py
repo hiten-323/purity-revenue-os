@@ -225,6 +225,12 @@ OUTCOMES = {
     "INTERESTED": "wants to proceed",
     "NOT_INTERESTED": "declined",
     "EXISTING_CONTRACT": "locked in with a supplier",
+    # A real conversation that fits none of the above; the founder's note
+    # carries what happened. It used to alias to NO_ANSWER, which filed a
+    # conversation as a failed dial: the scoreboard dropped it from
+    # "conversations", and the lead got a generic retry instead of the
+    # follow-up the note describes.
+    "OTHER": "a conversation that fits no other outcome — see the note",
 }
 
 # Spellings the founder will actually type, and one retired name. Normalising
@@ -265,7 +271,6 @@ _OUTCOME_ALIASES = {
     # do_not_call. That flag is applied by apply_call_outcome; here it only
     # needs to resolve to the outcome that stops outreach.
     "DO_NOT_CONTACT": "NOT_INTERESTED",
-    "OTHER": "NO_ANSWER",
 }
 
 
@@ -313,6 +318,8 @@ _COMMITMENT: dict[str, tuple[str | None, str, bool]] = {
                              "has a supplier — call back {when} with a side-by-side "
                              "comparison, not a switch pitch", False),
     "EMAIL_COLLECTED":      (None, "", False),
+    # Founder-only: only the founder knows what the note means.
+    "OTHER":                ("FOUNDER_CALL", "follow up on the conversation — see your note", True),
 }
 
 # Actions nobody but the founder may execute. Money is founder-only: an

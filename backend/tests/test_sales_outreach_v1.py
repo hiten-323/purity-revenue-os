@@ -31,9 +31,11 @@ def mklead(n, **kw):
 # the earlier test called this a 12-item registry while actually testing only
 # 12 selected outcomes. Pin the real contract explicitly so a future addition
 # cannot silently change the vocabulary.
+# OTHER added deliberately 2026-09-19: it used to alias to NO_ANSWER, filing a
+# real conversation as a failed dial (see phone_intelligence.OUTCOMES).
 CANON = ["NO_ANSWER","CALLBACK","GATEKEEPER","WRONG_NUMBER","DECISION_MAKER_FOUND",
          "EMAIL_COLLECTED","WHATSAPP_CONSENT","CATALOGUE_REQUESTED","SAMPLE_REQUESTED",
-         "PRICING_REQUESTED","INTERESTED","NOT_INTERESTED","EXISTING_CONTRACT"]
+         "PRICING_REQUESTED","INTERESTED","NOT_INTERESTED","EXISTING_CONTRACT","OTHER"]
 missing = [o for o in CANON if o not in pi.OUTCOMES]
 ck(not missing, f"canonical outcomes missing: {missing}")
 ck(set(pi.OUTCOMES) == set(CANON),

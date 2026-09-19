@@ -249,7 +249,7 @@ OUTCOMES: dict[str, Outcome] = {
         "Permanently suppressed until the founder changes it by hand.",
         terminal=True),
     "OTHER": Outcome(
-        "Other", "CALL_AGAIN", "phone", 3,
+        "Other", "FOUNDER_CALL", "phone", 3,
         "Founder judgement — the remark carries the detail."),
 }
 

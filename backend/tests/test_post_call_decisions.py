@@ -295,3 +295,22 @@ def test_call_funnel_does_not_count_a_busy_line_as_a_conversation(db):
     f = {row["stage"]: row["count"] for row in call_funnel(db)["funnel"]}
     assert f["calls made"] == 4
     assert f["conversations"] == 1, "only INTERESTED was a conversation"
+
+
+# ─── "Other" is a conversation, not a failed dial ────────────────────────────
+
+def test_other_gets_a_founder_follow_up_not_a_retry(db):
+    lead = _lead(db)
+    r = osr.apply_call_outcome(db, lead, "OTHER",
+                               {"remark": "Owner wants to taste it against his current brand"})
+    assert r["next_action"] == "FOUNDER_CALL"
+    (a,) = _pending(db, lead.id)
+    assert a.action_type == "FOUNDER_CALL"
+
+
+def test_other_counts_as_a_conversation_on_the_scoreboard(db):
+    from app.services.phone_intelligence import call_funnel
+    lead = _lead(db)
+    osr.apply_call_outcome(db, lead, "OTHER", {"remark": "long chat, see note"})
+    f = {row["stage"]: row["count"] for row in call_funnel(db)["funnel"]}
+    assert f["conversations"] == 1
