@@ -122,10 +122,14 @@ CEREBRAS_API_KEY=
 SHOPIFY_TOKEN=
 SHOPIFY_WEBHOOK_SECRET=
 API_ADMIN_SECRET=
-VAPI_WEBHOOK_SECRET=
 GOOGLE_MAPS_API_KEY=
 AISENSY_API_KEY=
 WHATSAPP_WEBHOOK_SECRET=
+VOICE_PROVIDER=nuraveda
+NURAVEDA_ENABLED=0
+NURAVEDA_URL=
+NURAVEDA_TOOL_SECRET=
+AI_CALLING_KILL_SWITCH=1
 ```
 
 ecosystem.config.js reads every secret from that file at load time and warns
@@ -142,7 +146,7 @@ or `Authorization: Bearer <API_ADMIN_SECRET>`. The service returns `503` until
 the secret is configured; reads remain public. Provider webhooks use their
 dedicated secrets and also fail closed when unset.
 
-Health check: `GET /api/v1/health` (returns `503` when the database or required
+Health check: `GET /health` (returns `503` when the database or required
 Redis dependency is unavailable).
 
 ## Data
