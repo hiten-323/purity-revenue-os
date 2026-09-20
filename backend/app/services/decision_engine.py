@@ -842,6 +842,19 @@ def _gather_facts(lead, db) -> dict:
     f["trust"] = {"level": tp.normalise(lead.email_trust),
                   "confidence": getattr(lead, "email_confidence", None),
                   "may_send": ok, "why": why, "may_draft": tp.may_draft(lead)}
+    # AI calling is a parallel delivery capability, independent of email trust.
+    import os as _os
+    f["ai_call"] = {"enabled": (_os.getenv("AI_CALLING_ENABLED", "0") == "1"),
+                    "eligible": False, "why": "AI_CALLING_ENABLED=0"}
+    if f["ai_call"]["enabled"]:
+        try:
+            from app.services.calling_agent import CallingAgentService
+            call_ok, call_why = CallingAgentService.check_eligibility(db, lead)
+            f["ai_call"] = {"enabled": True, "eligible": bool(call_ok), "why": call_why}
+        except Exception as e:
+            f["ai_call"] = {"enabled": True, "eligible": False,
+                            "why": f"calling gate unavailable ({e.__class__.__name__})"}
+
     f["sequence"] = se.state(lead, db)
 
     acct = ag.account_for(lead, db)
@@ -986,12 +999,17 @@ def evaluate_next_action(lead, db) -> dict:
                          80, blockers, f,
                          audit + ["refusing to send without the quality gate"])
 
-    # 3. May this address be used at all?
-    if not f["trust"]["may_send"]:
+    # 3. May an outbound delivery channel be used?
+    # Email trust and AI calling are independent capabilities.
+    if not f["trust"]["may_send"] and not f["ai_call"]["eligible"]:
         blockers.append("not_sendable")
         act = "DRAFT_ONLY" if f["trust"]["may_draft"] else "ENRICH"
         return _decision(act, f["trust"]["why"], 90, blockers, f,
-                         audit + ["trust engine is the sole authority here"])
+                         audit + ["neither email nor AI-call delivery is eligible"])
+    if f["ai_call"]["eligible"]:
+        audit.append(f"ai_call=eligible ({f['ai_call']['why']})")
+    else:
+        audit.append(f"ai_call=not eligible ({f['ai_call']['why']})")
 
     # 4. Would this over-contact the company?
     if not f["account"]["may_contact_new"]:
@@ -1013,7 +1031,9 @@ def evaluate_next_action(lead, db) -> dict:
 
     # 6. Provider/guard LAST, so a temporary throttle reads as "wait" rather
     #    than contaminating the lead's own eligibility.
-    if not f["delivery"]["allowed"]:
+    # Delivery guard is email-provider-specific; an eligible AI call must
+    # not be blocked because SMTP is unavailable.
+    if not f["delivery"]["allowed"] and not f["ai_call"]["eligible"]:
         blockers.append("delivery_blocked")
         return _decision("WAIT", f"delivery guard: {f['delivery']['reason']}",
                          90, blockers, f,
