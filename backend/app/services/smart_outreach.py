@@ -863,33 +863,26 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
             return {**decision, "status": "SKIPPED",
                     "reason": f"duplicate WhatsApp touch blocked ({wa_template_key})"}
 
-    # Mandatory multi-channel execution. Each channel retains its own
-    # safety/duplicate/provider gate. A failure in one channel must not cause
-    # the other eligible channel to be silently skipped.
-    if decision.get("action") == "MULTI_CHANNEL_OUTREACH":
-        results = []
+    # Mandatory multi-channel execution: execute every eligible channel.
+    multi_results = []
+    is_multi = decision.get("action") == "MULTI_CHANNEL_OUTREACH"
+    if is_multi and "ai_call" in decision.get("channels", []):
+        from app.services.calling_agent import CallingAgentService
+        ok, reason = CallingAgentService.trigger_vapi_call(db, lead)
+        status = "SENT" if ok else ("BLOCKED" if reason else "FAILED")
+        _record(db, lead, profile, "ai_call", "AI_CALL", status,
+                "qualification_call", reason=reason)
+        multi_results.append({"channel": "ai_call", "status": status, "reason": reason})
 
-        if "ai_call" in decision.get("channels", []):
-            from app.services.calling_agent import CallingAgentService
-            ok, reason = CallingAgentService.trigger_vapi_call(db, lead)
-            status = "SENT" if ok else ("BLOCKED" if reason else "FAILED")
-            _record(db, lead, profile, "ai_call", "AI_CALL", status,
-                    "qualification_call", reason=reason)
-            results.append({"channel": "ai_call", "status": status, "reason": reason})
-
-        if "email" in decision.get("channels", []):
-            # Fall through to the existing email implementation below.
-            # Execute it by temporarily narrowing the channel while preserving
-            # the parent multi-channel decision for the returned audit record.
-            email_decision = {**decision, "channel": "email",
-                              "action": decision.get("email_action", "WARM_FIRST_TOUCH")}
-            email_result = execute_one(db, _EmailOnlyLeadProxy(lead, email_decision))
-            results.append({"channel": "email", **email_result})
-
+    if is_multi and "email" in decision.get("channels", []):
+        # Reuse the proven email execution path below; do not duplicate it.
+        decision = {**decision, "channel": "email",
+                    "action": decision.get("email_action", "WARM_FIRST_TOUCH")}
+    elif is_multi:
         db.commit()
-        statuses = [r.get("status") for r in results]
-        overall = "SENT" if statuses and all(s == "SENT" for s in statuses) else "PARTIAL"
-        return {**decision, "status": overall, "results": results}
+        statuses = [r.get("status") for r in multi_results]
+        return {**decision, "status": "SENT" if statuses and all(s == "SENT" for s in statuses) else "PARTIAL",
+                "results": multi_results}
 
     if decision["channel"] == "ai_call":
         from app.services.calling_agent import CallingAgentService
@@ -965,6 +958,15 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
             message_id=result.message_id,
         )
         db.commit()
+        if is_multi:
+            multi_results.append({"channel": "email", "status": status,
+                                  "error": result.error, "message_id": result.message_id})
+            db.commit()
+            statuses = [r.get("status") for r in multi_results]
+            return {**decision, "action": "MULTI_CHANNEL_OUTREACH",
+                    "channel": "+".join(decision.get("channels", [])),
+                    "status": "SENT" if statuses and all(s == "SENT" for s in statuses) else "PARTIAL",
+                    "results": multi_results}
         return {**decision, "status": status, "error": result.error, "message_id": result.message_id}
 
     if decision["channel"] == "whatsapp":
