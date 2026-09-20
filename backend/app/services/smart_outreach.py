@@ -524,6 +524,33 @@ def _negative(history: list[Any]) -> bool:
     return _mentions(text, *SUPPRESSION_EVENTS)
 
 
+
+def _ai_calling_enabled() -> bool:
+    """Secondary kill-switch for AI calling inside unified Smart Outreach."""
+    import os
+    return (os.getenv("AI_CALLING_ENABLED", "0") or "0").strip() == "1"
+
+
+def _ai_call_eligible(db: Session, lead: B2BLead) -> tuple[bool, str]:
+    """Use the centralized calling authority for every automated AI call."""
+    if not _ai_calling_enabled():
+        return False, "AI_CALLING_ENABLED=0"
+    try:
+        from app.services.calling_agent import CallingAgentService
+        return CallingAgentService.check_eligibility(db, lead)
+    except Exception as exc:
+        return False, f"calling eligibility unavailable ({exc.__class__.__name__})"
+
+
+def _select_outbound_channel(db: Session, lead: B2BLead, profile: OutreachProfile) -> tuple[str | None, str]:
+    """Select exactly one automated outbound channel for this cycle."""
+    call_ok, call_reason = _ai_call_eligible(db, lead)
+    if call_ok:
+        return "ai_call", "AI call eligible; selected as the single outbound touch"
+    if getattr(lead, "email", None):
+        return "email", f"AI call unavailable ({call_reason}); email fallback selected"
+    return None, f"no outbound channel available ({call_reason})"
+
 def plan_touch(db: Session, lead: B2BLead, profile: OutreachProfile | None = None) -> dict:
     """
     Chooses the SHAPE of an adaptive touch — which message, on which channel.
@@ -670,12 +697,27 @@ def plan_touch(db: Session, lead: B2BLead, profile: OutreachProfile | None = Non
         "breakup": "WARM_FOLLOW_UP",
     }.get(touch, "WARM_FIRST_TOUCH" if not seq.get("touches") else "WARM_FOLLOW_UP")
 
+    channel, channel_reason = _select_outbound_channel(db, lead, profile)
+    if channel == "ai_call":
+        return {
+            "action": "AI_CALL",
+            "channel": "ai_call",
+            "reason": channel_reason,
+            "execute": True,
+        }
+    if channel == "email":
+        return {
+            "action": variant,
+            "channel": "email",
+            "reason": f"{channel_reason}; touch '{touch or 'intro'}' per sequence_engine"
+                      f" (#{(seq.get('touches') or 0) + 1})",
+            "execute": True,
+        }
     return {
-        "action": variant,
-        "channel": "email",
-        "reason": f"touch '{touch or 'intro'}' per sequence_engine"
-                  f" (#{(seq.get('touches') or 0) + 1})",
-        "execute": True,
+        "action": "NURTURE",
+        "channel": None,
+        "reason": channel_reason,
+        "execute": False,
     }
 
 
@@ -797,6 +839,17 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
         if _proven_whatsapp_touches(db, lead.id, wa_template_key):
             return {**decision, "status": "SKIPPED",
                     "reason": f"duplicate WhatsApp touch blocked ({wa_template_key})"}
+
+    if decision["channel"] == "ai_call":
+        from app.services.calling_agent import CallingAgentService
+        ok, reason = CallingAgentService.trigger_vapi_call(db, lead)
+        status = "SENT" if ok else ("BLOCKED" if reason else "FAILED")
+        _record(
+            db, lead, profile, "ai_call", "AI_CALL", status, "qualification_call",
+            reason=reason,
+        )
+        db.commit()
+        return {**decision, "status": status, "reason": reason}
 
     if decision["channel"] == "email":
         from app.services.email_sender import build_outreach_email, send_email, whatsapp_ask
