@@ -1006,15 +1006,22 @@ def select_candidates(db: Session, limit: int = 20) -> list[B2BLead]:
     leads looking for work. This decides who is CONSIDERED; evaluate_next_action
     still decides who may be contacted, per lead, in the caller.
     """
+    import os
+    channel_filter = (
+        ((B2BLead.email.isnot(None)) & (B2BLead.email != ""))
+        | ((B2BLead.whatsapp_number.isnot(None)) & (B2BLead.whatsapp_number != ""))
+    )
+    # Phone-only leads enter the candidate pool only when AI calling is
+    # explicitly enabled. Email/WhatsApp-only behaviour is unchanged.
+    if _ai_calling_enabled():
+        channel_filter = channel_filter | ((B2BLead.phone.isnot(None)) & (B2BLead.phone != ""))
+
     return (
         db.query(B2BLead)
         .filter(B2BLead.contact_status.notin_(["OPTED_OUT", "DO_NOT_CONTACT", "BOUNCED"]))
         .filter(B2BLead.status.notin_(["DO_NOT_CONTACT", "CLOSED_LOST", "DISQUALIFIED",
                                        "ORDER_WON"]))
-        .filter(
-            ((B2BLead.email.isnot(None)) & (B2BLead.email != ""))
-            | ((B2BLead.whatsapp_number.isnot(None)) & (B2BLead.whatsapp_number != ""))
-        )
+        .filter(channel_filter)
         .order_by(_contactable_first(), B2BLead.coffee_buying_score.desc().nullslast(),
                   B2BLead.score.desc(), B2BLead.id.asc())
         .limit(max(limit, limit * SCAN_FACTOR))
