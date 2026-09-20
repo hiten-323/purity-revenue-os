@@ -542,25 +542,41 @@ def _ai_call_eligible(db: Session, lead: B2BLead) -> tuple[bool, str]:
         return False, f"calling eligibility unavailable ({exc.__class__.__name__})"
 
 
-def _select_outbound_channel(db: Session, lead: B2BLead, profile: OutreachProfile) -> tuple[str | None, str]:
-    """Select the mandatory channel policy for Smart/Auto Outreach.
+def _select_outbound_channel(db: Session, lead: B2BLead, profile: OutreachProfile) -> tuple[list[str], str]:
+    """Return ALL eligible outbound channels for a discovered lead.
 
-    Policy: if a usable phone/landline exists, AI calling is mandatory.
-    Email is only used when no usable phone/landline exists. AI-call
-    eligibility remains a hard safety gate; a blocked call is never bypassed
-    by silently emailing a lead that has a phone number.
+    Policy: Smart/Auto Outreach is dual-channel by design. Discovery creates an
+    outreach obligation; it does not choose a preferred channel. Every eligible
+    channel is attempted: AI calling and email when both are available, or the
+    available channel when the other is genuinely unavailable.
+
+    Safety gates remain authoritative: DND/consent/trust/provider/call-cap and
+    duplicate guards can block an individual channel. A blocked channel is
+    never bypassed by weakening its gate.
     """
-    phone = (getattr(lead, "phone", None) or "").strip()
-    if phone:
-        call_ok, call_reason = _ai_call_eligible(db, lead)
-        if call_ok:
-            return "ai_call", "phone/landline available; AI calling is mandatory"
-        return None, f"phone/landline available but AI calling is blocked: {call_reason}"
+    channels: list[str] = []
 
+    call_ok, call_reason = _ai_call_eligible(db, lead)
+    if call_ok:
+        channels.append("ai_call")
+
+    email_ok = False
+    email_reason = "no email"
     if getattr(lead, "email", None):
-        return "email", "no phone/landline available; email permitted"
+        try:
+            from app.services import trust_promoter as tp
+            email_ok, email_reason = tp.may_send(lead)
+        except Exception as exc:
+            email_reason = f"email trust unavailable ({exc.__class__.__name__})"
 
-    return None, "no phone/landline or email available"
+    if email_ok:
+        channels.append("email")
+
+    if len(channels) == 2:
+        return channels, "discovered lead: BOTH mandatory channels eligible (AI call + email)"
+    if channels:
+        return channels, f"discovered lead: mandatory outreach via {channels[0]}; other channel blocked/unavailable"
+    return [], f"discovered lead: no safe outbound channel (AI={call_reason}; email={email_reason})"
 
 def plan_touch(db: Session, lead: B2BLead, profile: OutreachProfile | None = None) -> dict:
     """
@@ -708,27 +724,21 @@ def plan_touch(db: Session, lead: B2BLead, profile: OutreachProfile | None = Non
         "breakup": "WARM_FOLLOW_UP",
     }.get(touch, "WARM_FIRST_TOUCH" if not seq.get("touches") else "WARM_FOLLOW_UP")
 
-    channel, channel_reason = _select_outbound_channel(db, lead, profile)
-    if channel == "ai_call":
+    channels, channel_reason = _select_outbound_channel(db, lead, profile)
+    if channels:
         return {
-            "action": "AI_CALL",
-            "channel": "ai_call",
-            "reason": channel_reason,
-            "execute": True,
-        }
-    if channel == "email":
-        return {
-            "action": variant,
-            "channel": "email",
+            "action": "MULTI_CHANNEL_OUTREACH",
+            "channel": "+".join(channels),
+            "channels": channels,
+            "email_action": variant,
             "reason": f"{channel_reason}; touch '{touch or 'intro'}' per sequence_engine"
                       f" (#{(seq.get('touches') or 0) + 1})",
             "execute": True,
         }
-    # A lead with a phone/landline must never fall back to email when the
-    # calling gate is blocked. Hold for calling rather than bypassing policy.
     return {
         "action": "WAIT" if getattr(lead, "phone", None) else "NURTURE",
         "channel": None,
+        "channels": [],
         "reason": channel_reason,
         "execute": False,
     }
@@ -852,6 +862,34 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
         if _proven_whatsapp_touches(db, lead.id, wa_template_key):
             return {**decision, "status": "SKIPPED",
                     "reason": f"duplicate WhatsApp touch blocked ({wa_template_key})"}
+
+    # Mandatory multi-channel execution. Each channel retains its own
+    # safety/duplicate/provider gate. A failure in one channel must not cause
+    # the other eligible channel to be silently skipped.
+    if decision.get("action") == "MULTI_CHANNEL_OUTREACH":
+        results = []
+
+        if "ai_call" in decision.get("channels", []):
+            from app.services.calling_agent import CallingAgentService
+            ok, reason = CallingAgentService.trigger_vapi_call(db, lead)
+            status = "SENT" if ok else ("BLOCKED" if reason else "FAILED")
+            _record(db, lead, profile, "ai_call", "AI_CALL", status,
+                    "qualification_call", reason=reason)
+            results.append({"channel": "ai_call", "status": status, "reason": reason})
+
+        if "email" in decision.get("channels", []):
+            # Fall through to the existing email implementation below.
+            # Execute it by temporarily narrowing the channel while preserving
+            # the parent multi-channel decision for the returned audit record.
+            email_decision = {**decision, "channel": "email",
+                              "action": decision.get("email_action", "WARM_FIRST_TOUCH")}
+            email_result = execute_one(db, _EmailOnlyLeadProxy(lead, email_decision))
+            results.append({"channel": "email", **email_result})
+
+        db.commit()
+        statuses = [r.get("status") for r in results]
+        overall = "SENT" if statuses and all(s == "SENT" for s in statuses) else "PARTIAL"
+        return {**decision, "status": overall, "results": results}
 
     if decision["channel"] == "ai_call":
         from app.services.calling_agent import CallingAgentService
