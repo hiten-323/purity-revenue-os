@@ -839,10 +839,12 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
     if not decision["execute"]:
         return {**decision, "status": "SKIPPED"}
 
-    # Hard duplicate guard: never two proven first touches.
-    if decision["action"] == "WARM_FIRST_TOUCH" and _proven_email_touches(db, lead.id):
+    # Hard duplicate guard: never two proven first touches, including when
+    # the parent action is MULTI_CHANNEL_OUTREACH.
+    effective_action = decision.get("email_action") if decision.get("action") == "MULTI_CHANNEL_OUTREACH" else decision["action"]
+    if effective_action == "WARM_FIRST_TOUCH" and _proven_email_touches(db, lead.id):
         return {**decision, "status": "SKIPPED", "reason": "duplicate first touch blocked"}
-    if decision["action"] == "SEND_CATALOGUE":
+    if effective_action == "SEND_CATALOGUE":
         prior = (
             db.query(OutreachTouch)
             .filter(
@@ -854,11 +856,11 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
         )
         if prior:
             return {**decision, "status": "SKIPPED", "reason": "catalogue already sent"}
-    if decision["action"] == "SEND_CALL_FOLLOWUP" and _proven_touch(db, lead.id, "SEND_CALL_FOLLOWUP"):
+    if effective_action == "SEND_CALL_FOLLOWUP" and _proven_touch(db, lead.id, "SEND_CALL_FOLLOWUP"):
         return {**decision, "status": "SKIPPED", "reason": "call follow-up already sent"}
 
     if decision["channel"] == "whatsapp":
-        wa_template_key = "call_followup" if decision["action"] == "SEND_CALL_FOLLOWUP" else "catalogue_request"
+        wa_template_key = "call_followup" if effective_action == "SEND_CALL_FOLLOWUP" else "catalogue_request"
         if _proven_whatsapp_touches(db, lead.id, wa_template_key):
             return {**decision, "status": "SKIPPED",
                     "reason": f"duplicate WhatsApp touch blocked ({wa_template_key})"}
