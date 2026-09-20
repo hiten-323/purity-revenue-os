@@ -1,42 +1,67 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+
+import { SESSION_COOKIE, sessionIsValid } from "@/lib/session";
 
 /**
- * Attach the API admin secret to proxied /api requests, on the server.
+ * Two jobs, in this order: let nobody in without a session, then add the
+ * backend's admin secret to requests from whoever got in.
  *
- * WHY THIS EXISTS
- * ---------------
- * Every state-changing /api/v1 route is now gated by app/api/auth.py, wired as
- * middleware in the backend's main.py. It fails closed: no secret means 503,
- * a wrong or missing header means 401. The dashboard calls those routes from
- * the browser via the rewrite in next.config.ts, so without this every button
- * in the UI returns 401.
+ * WHY THE GATE
+ * ------------
+ * dashboard.p3online.in is public through the Cloudflare tunnel. This file
+ * previously said so itself -- that it "does not authenticate the user",
+ * that "anyone who can load the dashboard gets the secret applied on their
+ * behalf", and that the real perimeter belonged at the edge. That perimeter
+ * was never configured. Measured 2026-09-19: GET /api/v1/b2b/leads answered
+ * 200 to an unauthenticated request from the open internet, exposing the
+ * whole lead book and every admin route behind it.
  *
- * WHY IT IS NOT A NEXT_PUBLIC_ VARIABLE
- * -------------------------------------
- * That prefix inlines a value into the browser bundle. The secret would then
- * be readable by anyone who opens devtools on dashboard.p3online.in, which is
- * publicly reachable through the Cloudflare tunnel. Middleware runs on the
- * server, so the header is added after the request leaves the browser and the
- * value is never shipped to it.
+ * Cloudflare Access remains the better answer and is unchanged by this: put
+ * it in front and this gate simply never sees an anonymous request. It needs
+ * an API token this machine does not have, and setting one up means signing
+ * into the Cloudflare account, so the control is implemented here instead of
+ * being left as a recommendation.
  *
- * WHAT THIS DOES NOT DO
- * ---------------------
- * It does not authenticate the user. Anyone who can load the dashboard gets
- * the secret applied on their behalf, so the dashboard remains an open proxy
- * to the same routes.
- *
- * Checked rather than assumed: cloudflared's ingress also lists
- * api.p3online.in -> :8003, but that hostname is NXDOMAIN, so the backend is
- * not directly reachable today. dashboard.p3online.in does resolve and is
- * public. So the secret is defence in depth -- it closes direct API access the
- * moment that DNS record is ever created -- and NOT the perimeter.
- *
- * The perimeter is a real identity check in front of dashboard.p3online.in
- * (Cloudflare Access, or equivalent), configured at the edge rather than here.
+ * FAIL CLOSED
+ * -----------
+ * Missing configuration blocks rather than allows. A dashboard that is
+ * briefly unreachable is an inconvenience; one that is briefly public is the
+ * incident this exists to end. The login page names the missing variable so
+ * the cause is never a mystery.
  */
-export function middleware(request: NextRequest) {
-  const secret = process.env.API_ADMIN_SECRET ?? "";
+const PUBLIC_PATHS = ["/login", "/api/auth/login", "/api/auth/logout"];
 
+export async function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+
+  if (PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
+    return NextResponse.next();
+  }
+
+  const sessionSecret = process.env.DASHBOARD_SESSION_SECRET ?? "";
+  const authed = await sessionIsValid(
+    request.cookies.get(SESSION_COOKIE)?.value,
+    sessionSecret,
+  );
+
+  if (!authed) {
+    // An API client gets a status it can act on; a browser gets the form.
+    if (pathname.startsWith("/api/")) {
+      return NextResponse.json(
+        { detail: "dashboard session required" },
+        { status: 401 },
+      );
+    }
+    const login = request.nextUrl.clone();
+    login.pathname = "/login";
+    login.search = pathname === "/" ? "" : `?next=${encodeURIComponent(pathname)}`;
+    return NextResponse.redirect(login);
+  }
+
+  if (!pathname.startsWith("/api/")) return NextResponse.next();
+
+  const secret = process.env.API_ADMIN_SECRET ?? "";
   if (!secret) {
     // Loud rather than silent. Without this the dashboard fails with an
     // opaque 401 from the backend and the cause looks like a backend problem
@@ -55,7 +80,9 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  // Only the proxied API surface. Pages and static assets are untouched, so
-  // this adds no work to ordinary navigation.
-  matcher: "/api/:path*",
+  // Everything except Next's own static output and the icons, which carry no
+  // business data and are fetched before any session exists.
+  matcher: [
+    "/((?!_next/static|_next/image|favicon.ico|icon.png|apple-icon.png).*)",
+  ],
 };
