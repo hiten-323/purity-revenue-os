@@ -724,8 +724,10 @@ def plan_touch(db: Session, lead: B2BLead, profile: OutreachProfile | None = Non
                       f" (#{(seq.get('touches') or 0) + 1})",
             "execute": True,
         }
+    # A lead with a phone/landline must never fall back to email when the
+    # calling gate is blocked. Hold for calling rather than bypassing policy.
     return {
-        "action": "NURTURE",
+        "action": "WAIT" if getattr(lead, "phone", None) else "NURTURE",
         "channel": None,
         "reason": channel_reason,
         "execute": False,
