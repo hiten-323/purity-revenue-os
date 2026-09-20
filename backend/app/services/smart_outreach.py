@@ -543,13 +543,24 @@ def _ai_call_eligible(db: Session, lead: B2BLead) -> tuple[bool, str]:
 
 
 def _select_outbound_channel(db: Session, lead: B2BLead, profile: OutreachProfile) -> tuple[str | None, str]:
-    """Select exactly one automated outbound channel for this cycle."""
-    call_ok, call_reason = _ai_call_eligible(db, lead)
-    if call_ok:
-        return "ai_call", "AI call eligible; selected as the single outbound touch"
+    """Select the mandatory channel policy for Smart/Auto Outreach.
+
+    Policy: if a usable phone/landline exists, AI calling is mandatory.
+    Email is only used when no usable phone/landline exists. AI-call
+    eligibility remains a hard safety gate; a blocked call is never bypassed
+    by silently emailing a lead that has a phone number.
+    """
+    phone = (getattr(lead, "phone", None) or "").strip()
+    if phone:
+        call_ok, call_reason = _ai_call_eligible(db, lead)
+        if call_ok:
+            return "ai_call", "phone/landline available; AI calling is mandatory"
+        return None, f"phone/landline available but AI calling is blocked: {call_reason}"
+
     if getattr(lead, "email", None):
-        return "email", f"AI call unavailable ({call_reason}); email fallback selected"
-    return None, f"no outbound channel available ({call_reason})"
+        return "email", "no phone/landline available; email permitted"
+
+    return None, "no phone/landline or email available"
 
 def plan_touch(db: Session, lead: B2BLead, profile: OutreachProfile | None = None) -> dict:
     """
