@@ -225,6 +225,12 @@ OUTCOMES = {
     "INTERESTED": "wants to proceed",
     "NOT_INTERESTED": "declined",
     "EXISTING_CONTRACT": "locked in with a supplier",
+    # A real conversation that fits none of the above; the founder's note
+    # carries what happened. It used to alias to NO_ANSWER, which filed a
+    # conversation as a failed dial: the scoreboard dropped it from
+    # "conversations", and the lead got a generic retry instead of the
+    # follow-up the note describes.
+    "OTHER": "a conversation that fits no other outcome — see the note",
 }
 
 # Spellings the founder will actually type, and one retired name. Normalising
@@ -265,7 +271,6 @@ _OUTCOME_ALIASES = {
     # do_not_call. That flag is applied by apply_call_outcome; here it only
     # needs to resolve to the outcome that stops outreach.
     "DO_NOT_CONTACT": "NOT_INTERESTED",
-    "OTHER": "NO_ANSWER",
 }
 
 
@@ -299,8 +304,22 @@ _COMMITMENT: dict[str, tuple[str | None, str, bool]] = {
     "NO_ANSWER":            ("CALL_AGAIN", "no answer — try again", False),
     "NOT_INTERESTED":       ("NONE", "closed — no follow-up", False),
     "WRONG_NUMBER":         ("NONE", "number cleared — not this business", False),
-    "EXISTING_CONTRACT":    ("NONE", "locked with a supplier — recycle later", False),
+    # Was ("NONE", "locked with a supplier — recycle later"). Nothing ever did
+    # the recycling: NONE queues no action, the lead's status stays
+    # DISCOVERED, and it fell back into the anonymous pool as if the call had
+    # never happened -- breaking this table's own rule above ("every outcome
+    # leaves exactly one next action") on the single most common objection in
+    # B2B buying. It is also not what the founder's playbook says: the
+    # EXISTING_SUPPLIER entry in outreach_search.OUTCOMES reads "Not a
+    # rejection. Ask what they pay and what they would change; offer a
+    # comparison rather than a switch." A scheduled callback is that
+    # recycle, actually scheduled; the delay comes from that registry entry.
+    "EXISTING_CONTRACT":    ("SCHEDULE_CALLBACK",
+                             "has a supplier — call back {when} with a side-by-side "
+                             "comparison, not a switch pitch", False),
     "EMAIL_COLLECTED":      (None, "", False),
+    # Founder-only: only the founder knows what the note means.
+    "OTHER":                ("FOUNDER_CALL", "follow up on the conversation — see your note", True),
 }
 
 # Actions nobody but the founder may execute. Money is founder-only: an
@@ -352,13 +371,13 @@ def log_call(lead, db, outcome: str, notes: str = "",
     facts = extract(notes)
     applied = []
 
-    db.add(WorkflowEvent(
+    call_payload = {"outcome": outcome, "meaning": OUTCOMES[outcome],
+                    "notes": (notes or "")[:1500], "duration_min": duration_min,
+                    "extracted": facts, "phone": lead.phone}
+    call_event = WorkflowEvent(
         lead_id=lead.id, event_type="FOUNDER_CALL", actor="FOUNDER",
-        channel="phone",
-        payload={"outcome": outcome, "meaning": OUTCOMES[outcome],
-                 "notes": (notes or "")[:1500], "duration_min": duration_min,
-                 "extracted": facts, "phone": lead.phone},
-        occurred_at=_now()))
+        channel="phone", payload=call_payload, occurred_at=_now())
+    db.add(call_event)
 
     # An address the buyer gave the founder on a call.
     got_email = facts.get("email")
@@ -394,7 +413,16 @@ def log_call(lead, db, outcome: str, notes: str = "",
             occurred_at=_now()))
         applied.append("marked declined")
     elif outcome == "WRONG_NUMBER":
-        lead.phone = ""
+        # Shared with outreach_search.apply_call_outcome, so both doors clear
+        # the same fields -- including a whatsapp_number holding the same
+        # digits, which Power Hour would otherwise dial again -- and both
+        # record the cleared value, which contact_enricher checks before it
+        # writes a number back.
+        from app.services.outreach_search import clear_wrong_number
+        cleared = clear_wrong_number(lead)
+        if cleared:
+            # Reassigned, not mutated: SQLAlchemy only sees a new JSON value.
+            call_event.payload = {**call_payload, "cleared_numbers": cleared}
         applied.append("phone cleared — not this business")
 
     elif outcome == "WHATSAPP_CONSENT":
@@ -609,15 +637,26 @@ def call_funnel(db, days: int = 14) -> dict:
         WorkflowEvent.occurred_at >= since).all()
 
     calls = [e for e in evs if e.event_type == "FOUNDER_CALL"]
+
+    def _canon(e):
+        # The Power Hour door records its own dialect (BUSY, WRONG_PERSON,
+        # OTHER...); log_call records canonical names. Comparing the raw
+        # payload against canonical names counted a BUSY line, a referral
+        # and an unclassified call as "conversations" -- inflating the one
+        # scoreboard this docstring says decides where effort goes.
+        raw = (e.payload or {}).get("outcome") or ""
+        try:
+            return normalise_outcome(raw)
+        except ValueError:
+            return raw
+
     reached = [e for e in calls
-               if (e.payload or {}).get("outcome") not in
-               ("NO_ANSWER", "WRONG_NUMBER", "GATEKEEPER")]
+               if _canon(e) not in ("NO_ANSWER", "WRONG_NUMBER", "GATEKEEPER")]
     got_person = [e for e in calls
                   if (e.payload or {}).get("extracted", {}).get("contact_name")]
     got_email = [e for e in calls
                  if (e.payload or {}).get("extracted", {}).get("email")]
-    samples = [e for e in calls
-               if (e.payload or {}).get("outcome") == "SAMPLE_REQUESTED"]
+    samples = [e for e in calls if _canon(e) == "SAMPLE_REQUESTED"]
     catalogues = [e for e in evs if e.event_type == "NEXT_ACTION_SET"
                   and (e.payload or {}).get("action") == "SEND_CATALOGUE"]
     meetings = [e for e in evs if e.event_type == "MEETING_HELD"]

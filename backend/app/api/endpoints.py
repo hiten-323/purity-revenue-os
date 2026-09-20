@@ -1912,7 +1912,20 @@ def get_b2b_actions(db: Session = Depends(get_db)):
             "FOLLOWUP_SAMPLE": f"Follow Up on Sample with {lead.company}",
             "SEND_PROPOSAL": f"Send/Negotiate Proposal for {lead.company}",
             "DISPATCH_SAMPLE": f"Dispatch Sample Kit to {lead.company}",
-            "REORDER_ALERT": f"Reorder Call for {lead.company}"
+            "REORDER_ALERT": f"Reorder Call for {lead.company}",
+            # What a founder call committed to (phone_intelligence._COMMITMENT).
+            # These were all rendered as "Action for <company>", so a buyer's
+            # explicit request -- a sample, a quote, the catalogue -- sat in
+            # the queue looking exactly like a generic reminder.
+            "FOUNDER_CALL": f"Call {lead.company} — buying conversation you promised",
+            "SCHEDULE_CALLBACK": f"Call {lead.company} back — they asked for this time",
+            "CALL_DECISION_MAKER": f"Call the decision maker at {lead.company}",
+            "CALL_AGAIN": f"Retry {lead.company} — last call did not reach the buyer",
+            "SEND_CATALOGUE": f"Send {lead.company} the catalogue — they asked on the call",
+            "SEND_SAMPLE": f"Dispatch the sample {lead.company} asked for",
+            "FOUNDER_PRICING": f"Quote {lead.company} — pricing is founder-only",
+            "SEND_WHATSAPP": f"WhatsApp {lead.company} — they chose this channel",
+            "FOUNDER_REVIEW": f"Review {lead.company} — the call could not be auto-routed",
         }
         title = action_titles.get(act.action_type, f"Action for {lead.company}")
         
@@ -3032,11 +3045,17 @@ def _find_emails_sync(req: FindEmailsRequest, db):
 
         # Persist everything discovered back to the lead record
         changed = False
+        from app.services.outreach_search import founder_marked_wrong
         if found.get("discovered_website") and not lead.website:
             lead.website = found["discovered_website"]; changed = True
-        if found.get("phone") and not lead.phone:
+        # A number the founder was told on a call is wrong must not come back
+        # through enrichment -- an empty field reads as "missing", and the
+        # directory that supplied it the first time will supply it again.
+        if (found.get("phone") and not lead.phone
+                and not founder_marked_wrong(db, lead.id, found["phone"])):
             lead.phone = found["phone"]; changed = True
-        if found.get("whatsapp") and not lead.whatsapp_number:
+        if (found.get("whatsapp") and not lead.whatsapp_number
+                and not founder_marked_wrong(db, lead.id, found["whatsapp"])):
             from app.services.contact_enricher import is_landline
             if not is_landline(found["whatsapp"]):   # WhatsApp cannot reach an STD line
                 lead.whatsapp_number = found["whatsapp"]; changed = True
@@ -3231,10 +3250,13 @@ def _enrich_contacts_sync(lead_ids: list[int], db):
         enriched = enrich_lead_contact(lead.company, lead.city or "", lead.phone or "",
                                     website=lead.website or "")
         changed = False
-        if enriched["confirmed_phone"] and enriched["confirmed_phone"] != lead.phone:
+        from app.services.outreach_search import founder_marked_wrong
+        if (enriched["confirmed_phone"] and enriched["confirmed_phone"] != lead.phone
+                and not founder_marked_wrong(db, lead.id, enriched["confirmed_phone"])):
             lead.phone = enriched["confirmed_phone"]
             changed = True
-        if enriched["whatsapp_number"] and not lead.whatsapp_number:
+        if (enriched["whatsapp_number"] and not lead.whatsapp_number
+                and not founder_marked_wrong(db, lead.id, enriched["whatsapp_number"])):
             from app.services.contact_enricher import is_landline
             if not is_landline(enriched["whatsapp_number"]):
                 lead.whatsapp_number = enriched["whatsapp_number"]
@@ -3296,8 +3318,11 @@ def _silent_verify_and_enrich(lead_ids: list[int]):
             try:
                 enriched = enrich_lead_contact(lead.company, lead.city or "", lead.phone or "",
                                     website=lead.website or "")
+                from app.services.outreach_search import founder_marked_wrong
                 if (enriched["confirmed_phone"] and enriched["confidence"] in ("HIGH", "MEDIUM")
-                        and not _is_placeholder_phone(enriched["confirmed_phone"])):
+                        and not _is_placeholder_phone(enriched["confirmed_phone"])
+                        # Never write back a number a founder call rejected.
+                        and not founder_marked_wrong(_db, lead.id, enriched["confirmed_phone"])):
                     # A first-party number outranks a search result. Enrichment
                     # may fill an EMPTY phone and may confirm one that agrees,
                     # but it may not replace one a publisher gave us — that is
@@ -3350,7 +3375,7 @@ def _silent_verify_and_enrich(lead_ids: list[int]):
                     if not lead.whatsapp_number:
                         _wa = enriched["whatsapp_number"] or (
                             "" if is_landline(lead.phone) else lead.phone)
-                        if _wa:
+                        if _wa and not founder_marked_wrong(_db, lead.id, _wa):
                             lead.whatsapp_number = _wa
                 # PURGED means the founder (or a data-quality sweep) deliberately
                 # removed an address as unconfirmed. Without this check the loop
@@ -9757,7 +9782,8 @@ def phone_program(state: Optional[str] = None, city: Optional[str] = None,
     dominate the founder hour.
     """
     from app.models.models import B2BLead
-    from app.services.outreach_search import methods_for, rank_calls
+    from app.services.outreach_search import (
+        methods_for, rank_calls, pending_calls, _suppressed, _has_phone)
 
     q = db.query(B2BLead).filter(B2BLead.status != "DISQUALIFIED")
     if state:
@@ -9769,7 +9795,17 @@ def phone_program(state: Optional[str] = None, city: Optional[str] = None,
 
     eligible = [l for l in leads if "PHONE_ONLY" in methods_for(l, ev.get(l.id, {}))]
     verified = [l for l in eligible if getattr(l, "phone_verified", False)]
-    ranked = rank_calls(eligible, ev, limit=limit)
+
+    # Calls the founder already owes. A commitment is honoured whatever the
+    # lead's email status: a buyer who said "interested, call me" and also
+    # happens to have a sendable address is NOT phone-only, so under the old
+    # rule the promised call could never appear in the call list at all.
+    pending = pending_calls(db, [l.id for l in leads]) if leads else {}
+    eligible_ids = {l.id for l in eligible}
+    committed = [l for l in leads if l.id in pending and l.id not in eligible_ids
+                 and not _suppressed(l) and _has_phone(l)]
+    ranked = rank_calls(eligible + committed, ev, limit=limit, pending=pending)
+    due_now = sum(1 for r in ranked if r.get("callback_due"))
 
     margin = sum((l.estimated_value or 0) * 0.31 for l in eligible)
     return {
@@ -9783,6 +9819,11 @@ def phone_program(state: Optional[str] = None, city: Optional[str] = None,
         "modelled_annual_margin": round(margin),
         "modelled_note": "MODELLED from category averages - not a forecast",
         "founder_minutes_estimate": len(ranked) * 6,
+        # Promises due today come first in power_hour; these counts let the
+        # dashboard say so instead of hiding them in a ranked list.
+        "callbacks_due_today": due_now,
+        "callbacks_scheduled_later": sum(
+            1 for p in pending.values() if p["due"] and p["due"] > datetime.utcnow()),
         "power_hour": ranked,
     }
 
@@ -9823,10 +9864,17 @@ def record_call_outcome(lead_id: int, req: CallOutcomeRequest,
 
 @router.get("/b2b/outreach/call-outcomes")
 def list_call_outcomes():
-    """The outcome buttons for Power Hour, with what each one triggers."""
-    from app.services.outreach_search import OUTCOMES
+    """The outcome buttons for Power Hour, with what each one triggers.
+
+    next_action is read from the engine that actually decides it, not from the
+    registry's own field. The two had drifted on 15 of 19 buttons -- the
+    console told the founder SEND_DETAILS triggers FOLLOWUP_EMAIL while the
+    engine queued SEND_CATALOGUE -- and the founder picks a button by what it
+    says it will do. test_registry_matches_engine keeps the field honest too.
+    """
+    from app.services.outreach_search import OUTCOMES, engine_action_for
     return {"outcomes": [
-        {"key": k, "label": o.label, "next_action": o.next_action,
+        {"key": k, "label": o.label, "next_action": engine_action_for(k),
          "channel": o.channel, "due_in_days": o.delay_days,
          "terminal": o.terminal, "guidance": o.note, "capture": list(o.needs)}
         for k, o in OUTCOMES.items()]}

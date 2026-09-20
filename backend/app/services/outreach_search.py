@@ -3,8 +3,9 @@ Outreach search + phone-only conversion engine (V3).
 
 See module body for method classification, call outcomes, and ranking.
 
-Fail-closed decision authority is installed at the bottom of this file so both
-the API and the worker process get it without depending on FastAPI startup.
+apply_call_outcome below is the ONE implementation for every process. It used
+to be replaced at API startup by a copy in call_outcome_failclosed.py, so the
+API and every other process could silently diverge; that patch is removed.
 """
 from __future__ import annotations
 
@@ -27,6 +28,56 @@ def _has_phone(l) -> bool:
                 or (getattr(l, "whatsapp_number", "") or "").strip())
 
 
+def _tail10(value) -> str:
+    import re
+    return re.sub(r"\D", "", str(value or ""))[-10:]
+
+
+def clear_wrong_number(lead) -> list[str]:
+    """Remove a number the founder was just told is wrong, from EVERY field
+    that holds it. Returns what was removed.
+
+    Clearing only `phone` is not enough: rank_calls dials
+    `phone or whatsapp_number`, and _has_phone checks both, so a wrong number
+    that was also stored as the WhatsApp number kept the lead in Power Hour
+    and got dialled again. A DIFFERENT whatsapp_number is left alone -- the
+    founder said this number is wrong, not that every number is.
+    """
+    wrong = _tail10(getattr(lead, "phone", ""))
+    removed = []
+    if wrong:
+        removed.append(lead.phone)
+        lead.phone = ""
+    wa = getattr(lead, "whatsapp_number", "") or ""
+    if wa and (not wrong or _tail10(wa) == wrong):
+        # No phone at all means the founder must have dialled the WhatsApp
+        # number (rank_calls' fallback), so that is the one that was wrong.
+        removed.append(wa)
+        lead.whatsapp_number = ""
+    return removed
+
+
+def founder_marked_wrong(db, lead_id: int, number) -> bool:
+    """True if a founder call already reported this exact number as wrong for
+    this lead. Enrichment must not write it back: cleaning a row is useless if
+    the next enrichment pass restores it (the lesson of every earlier
+    fabricated-contact cleanup on this project)."""
+    from app.models.models import WorkflowEvent
+    target = _tail10(number)
+    if not target or db is None:
+        return False
+    evs = db.query(WorkflowEvent).filter(
+        WorkflowEvent.lead_id == lead_id,
+        WorkflowEvent.event_type == "FOUNDER_CALL").all()
+    for e in evs:
+        p = e.payload or {}
+        if p.get("outcome") != "WRONG_NUMBER":
+            continue
+        if any(_tail10(n) == target for n in (p.get("cleared_numbers") or [])):
+            return True
+    return False
+
+
 def _has_email(l) -> bool:
     return bool((getattr(l, "email", "") or "").strip())
 
@@ -36,9 +87,20 @@ def _email_usable(l) -> bool:
     return sendable(l)[0] and actionable(l)[0]
 
 
+# CLOSED_LOST is set in exactly three places, and all three mean the buyer
+# declined: a founder call logged NOT_INTERESTED (here, and in the retired
+# failclosed copy), or an email reply classified NOT_INTERESTED -- which also
+# marks the contact OPTED_OUT, "asked not to be contacted again". Without it in
+# this set, every one of those leads stayed eligible for Power Hour, and after
+# 14 quiet days rank_calls even scored them UP ("quiet 14 days"): the founder's
+# most expensive hour spent re-dialling someone who already said no, and in the
+# email case, someone who asked not to be contacted at all.
+SUPPRESSED_STATUSES = ("DISQUALIFIED", "DO_NOT_CONTACT", "CLOSED_LOST")
+
+
 def _suppressed(l) -> bool:
     return (bool(getattr(l, "do_not_call", False))
-            or (l.status or "") in ("DISQUALIFIED", "DO_NOT_CONTACT"))
+            or (l.status or "") in SUPPRESSED_STATUSES)
 
 
 def methods_for(lead, ev: dict) -> set[str]:
@@ -86,6 +148,20 @@ def ai_call_status() -> dict:
     return {"available": True, "reason": "configured"}
 
 
+def engine_action_for(key: str) -> str | None:
+    """The action the decision engine actually queues for a Power Hour button.
+
+    OUTCOMES below is presentation (labels, guidance, delays); what an
+    outcome MEANS belongs to phone_intelligence. This is the read side of that
+    split, so nothing that displays "what this button does" can drift from
+    what it does.
+    """
+    from app.services.phone_intelligence import normalise_outcome, _COMMITMENT
+    c = _COMMITMENT.get(normalise_outcome(key))
+    action = c[0] if c else None
+    return None if action in (None, "NONE", "WAIT") else action
+
+
 @dataclass(frozen=True)
 class Outcome:
     label: str
@@ -99,28 +175,28 @@ class Outcome:
 
 OUTCOMES: dict[str, Outcome] = {
     "NO_ANSWER": Outcome(
-        "No answer", "FOUNDER_CALL", "phone", 1,
+        "No answer", "CALL_AGAIN", "phone", 1,
         "Retry at a different time of day. No answer is not a refusal, and must "
         "never be recorded as one."),
     "BUSY": Outcome(
-        "Busy / asked to call back", "FOUNDER_CALL", "phone", 0.5,
+        "Busy / asked to call back", "CALL_AGAIN", "phone", 0.5,
         "Retry; if a callback time was given it is stored and used instead.",
         needs=("preferred_contact_time",)),
     "WRONG_NUMBER": Outcome(
-        "Wrong number", "VERIFY_CONTACT", "research", 0,
+        "Wrong number", None, "research", 0,
         "The number is wrong, so it is unusable — find a correct one rather than "
         "dialling it again."),
     "GATEKEEPER": Outcome(
-        "Reception / gatekeeper", "FOUNDER_CALL", "phone", 1,
+        "Reception / gatekeeper", "CALL_AGAIN", "phone", 1,
         "Do not pitch a gatekeeper. Get the decision maker's name, designation "
         "and the best time, then call back.",
         needs=("decision_maker", "designation", "preferred_contact_time")),
     "WRONG_PERSON": Outcome(
-        "Referred to someone else", "FOUNDER_CALL", "phone", 0.5,
+        "Referred to someone else", "CALL_AGAIN", "phone", 0.5,
         "A referral is progress, not a restart. Record who was named and call them.",
         needs=("decision_maker", "designation")),
     "DECISION_MAKER_FOUND": Outcome(
-        "Reached the decision maker", "FOUNDER_CALL", "phone", 0.5,
+        "Reached the decision maker", "CALL_DECISION_MAKER", "phone", 0.5,
         "Right person reached — the next call is the qualifying conversation.",
         needs=("decision_maker",)),
     "INTERESTED": Outcome(
@@ -128,40 +204,40 @@ OUTCOMES: dict[str, Outcome] = {
         "Establish what they actually buy and who decides before pitching further.",
         needs=("decision_maker",)),
     "SEND_DETAILS": Outcome(
-        "Asked for details", "FOLLOWUP_EMAIL", "email", 0,
+        "Asked for details", "SEND_CATALOGUE", "email", 0,
         "They asked, so this is a follow-up that references the call — never an "
         "introduction.",
         needs=("email",)),
     "SEND_WHATSAPP": Outcome(
-        "Asked for WhatsApp", "WHATSAPP", "whatsapp", 0,
+        "Asked for WhatsApp", "SEND_WHATSAPP", "whatsapp", 0,
         "The prospect chose the channel. That is consent for this exchange, and "
         "the message opens on the call, not cold."),
     "SEND_CATALOGUE": Outcome(
         "Asked for the catalogue", "SEND_CATALOGUE", "whatsapp", 0,
         "Send the catalogue on the channel they asked for."),
     "SEND_PRICING": Outcome(
-        "Asked for pricing", "SEND_PRICING", "email", 0,
+        "Asked for pricing", "FOUNDER_PRICING", "email", 0,
         "Quote against their volumes. MRP is published; the buying price follows "
         "volume."),
     "SAMPLE_REQUESTED": Outcome(
-        "Sample requested", "DISPATCH_SAMPLE", "physical", 0,
+        "Sample requested", "SEND_SAMPLE", "physical", 0,
         "Dispatch is a physical act — it is only ever marked done by the founder "
         "confirming it actually went."),
     "MEETING_REQUESTED": Outcome(
-        "Meeting requested", "MEETING_BRIEF", "meeting", 0,
+        "Meeting requested", "FOUNDER_CALL", "meeting", 0,
         "Prepare the brief: who, what they buy now, objections, the ask.",
         needs=("next_followup_date",)),
     "CALL_LATER": Outcome(
-        "Call later", "FOUNDER_CALL", "phone", 7,
+        "Call later", "SCHEDULE_CALLBACK", "phone", 7,
         "Their timing wins. Nothing generic fires in the meantime.",
         needs=("next_followup_date",)),
     "EXISTING_SUPPLIER": Outcome(
-        "Already has a supplier", "FOUNDER_CALL", "phone", 3,
+        "Already has a supplier", "SCHEDULE_CALLBACK", "phone", 3,
         "Not a rejection. Ask what they pay and what they would change; offer a "
         "comparison rather than a switch.",
         needs=("current_supplier",)),
     "PRICE_OBJECTION": Outcome(
-        "Price objection", "FOUNDER_CALL", "phone", 2,
+        "Price objection", "FOUNDER_PRICING", "phone", 2,
         "Establish pack, current price and volume before any discount. Discounts "
         "outside policy need founder approval.",
         needs=("current_supplier",)),
@@ -273,11 +349,22 @@ def apply_call_outcome(db, lead, outcome_key: str, captured: dict | None = None)
     elif key == "MEETING_REQUESTED":
         lead.status = "MEETING_BOOKED"
 
+    # A wrong number is unusable, so it leaves the record. phone_intelligence's
+    # log_call (the other door into this same decision) always cleared it, and
+    # decide_after_call's own reason says "number cleared" -- but this door
+    # never did, so a number the founder had just been told was wrong stayed
+    # on the lead, stayed in Power Hour, and came back scored UP after 14
+    # quiet days. The cleared value is kept in the event (never silently
+    # discarded) so contact_enricher can refuse to write it back.
+    cleared = clear_wrong_number(lead) if key == "WRONG_NUMBER" else []
+
+    payload = {"outcome": key, "captured": {k: v for k, v in cap.items() if v},
+               "promoted": promoted}
+    if cleared:
+        payload["cleared_numbers"] = cleared
     db.add(WorkflowEvent(
         lead_id=lead.id, event_type="FOUNDER_CALL", actor="FOUNDER", channel="phone",
-        payload={"outcome": key, "captured": {k: v for k, v in cap.items() if v},
-                 "promoted": promoted},
-        occurred_at=datetime.utcnow()))
+        payload=payload, occurred_at=datetime.utcnow()))
     db.commit()
 
     try:
@@ -307,13 +394,107 @@ def apply_call_outcome(db, lead, outcome_key: str, captured: dict | None = None)
     }
 
 
-def rank_calls(leads, ev_by_lead: dict, limit: int = 15) -> list[dict]:
+# ── Call commitments: the calls the founder already owes someone ─────────────
+#
+# Every phone outcome except a verdict queues one of these (see
+# phone_intelligence._COMMITMENT). rank_calls used to ignore the queue
+# entirely, so a lead with a promised callback due today scored exactly like a
+# stranger -- lower, in fact, because having just been called it lost the
+# "never contacted" bonus. After a no-answer, a gatekeeper, a referral, or
+# "call me Thursday", the lead sank under 1,500 untouched ones and the promised
+# call never happened. That is the most expensive leak in a phone-led funnel:
+# the conversations that were already started.
+#
+# Ordered by how much is at stake if the call is missed. Every tier sits above
+# anything a never-contacted lead can score, so a due promise is always made
+# before a cold dial, whatever the cold lead's modelled value.
+CALL_COMMITMENTS = {
+    "FOUNDER_CALL":        (230, "buying conversation you promised"),
+    "SCHEDULE_CALLBACK":   (220, "callback they asked for"),
+    "CALL_DECISION_MAKER": (210, "call the decision maker you were referred to"),
+    "CALL_AGAIN":          (200, "retry — last attempt did not reach the buyer"),
+}
+
+# A number that never answers must not own the top of Power Hour forever.
+# After this many unanswered attempts IN A ROW, the retry keeps its place in
+# the queue (nothing is dropped) but loses the promise boost and competes as an
+# ordinary lead. GATEKEEPER / WRONG_PERSON also queue CALL_AGAIN, but they are
+# progress (someone answered), so they do not count toward this.
+MAX_BOOSTED_UNANSWERED = 3
+_UNANSWERED = ("NO_ANSWER", "BUSY")
+
+
+def pending_calls(db, lead_ids=None) -> dict:
+    """{lead_id: {"action", "due", "label", "unanswered_streak"}} for every
+    PENDING call commitment. One query for the queue, one for call history."""
+    from app.models.models import ActionQueue, WorkflowEvent
+
+    q = db.query(ActionQueue).filter(
+        ActionQueue.status == "PENDING",
+        ActionQueue.action_type.in_(tuple(CALL_COMMITMENTS)))
+    if lead_ids is not None:
+        q = q.filter(ActionQueue.lead_id.in_(list(lead_ids)))
+    rows = q.all()
+    if not rows:
+        return {}
+
+    out = {}
+    for a in rows:
+        # set_next_action keeps one PENDING row per lead; if an older writer
+        # left two, the earliest-due one is the promise to keep first.
+        cur = out.get(a.lead_id)
+        if cur is None or (a.due_date or datetime.min) < (cur["due"] or datetime.min):
+            out[a.lead_id] = {"action": a.action_type, "due": a.due_date,
+                              "label": CALL_COMMITMENTS[a.action_type][1],
+                              "unanswered_streak": 0}
+
+    retry_ids = [lid for lid, p in out.items() if p["action"] == "CALL_AGAIN"]
+    if retry_ids:
+        evs = db.query(WorkflowEvent).filter(
+            WorkflowEvent.lead_id.in_(retry_ids),
+            WorkflowEvent.event_type == "FOUNDER_CALL",
+        ).order_by(WorkflowEvent.occurred_at.desc()).all()
+        seen_answered = set()
+        for e in evs:
+            lid = e.lead_id
+            if lid in seen_answered:
+                continue
+            if ((e.payload or {}).get("outcome") or "").upper() in _UNANSWERED:
+                out[lid]["unanswered_streak"] += 1
+            else:
+                seen_answered.add(lid)
+    return out
+
+
+def rank_calls(leads, ev_by_lead: dict, limit: int = 15,
+               pending: dict | None = None, now: datetime | None = None) -> list[dict]:
+    """Who the founder should dial today, best first.
+
+    `pending` (from pending_calls) is what turns this from a cold list into a
+    pipeline: a due commitment goes to the top, and one that is NOT due yet is
+    held back -- ringing someone the day after they said "call me Thursday"
+    breaks the one promise that made the next call welcome.
+    """
+    pending = pending or {}
+    now = now or datetime.utcnow()
     out = []
     for l in leads:
         if _suppressed(l) or not _has_phone(l):
             continue
         ev = ev_by_lead.get(l.id, {})
         score, why = 0.0, []
+        commit = pending.get(l.id)
+        callback_due = False
+        if commit:
+            if commit["due"] and commit["due"] > now:
+                continue                      # their timing wins
+            if commit["unanswered_streak"] >= MAX_BOOSTED_UNANSWERED:
+                why.append(f"{commit['unanswered_streak']} unanswered attempts — "
+                           f"no longer prioritised")
+            else:
+                score += CALL_COMMITMENTS[commit["action"]][0]
+                why.append(f"DUE: {commit['label']}")
+                callback_due = True
         if ev.get("replied"):
             score += 40; why.append("has replied before")
         if getattr(l, "decision_maker", None):
@@ -335,7 +516,9 @@ def rank_calls(leads, ev_by_lead: dict, limit: int = 15) -> list[dict]:
                     "category": l.division, "phone": l.phone or l.whatsapp_number,
                     "score": round(score, 1), "why": why,
                     "last_contact_days": d,
-                    "decision_maker": getattr(l, "decision_maker", None)})
+                    "decision_maker": getattr(l, "decision_maker", None),
+                    "callback_due": callback_due,
+                    "commitment": commit["action"] if commit else None})
     out.sort(key=lambda x: -x["score"])
     return out[:limit]
 
