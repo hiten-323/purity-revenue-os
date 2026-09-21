@@ -232,53 +232,25 @@ def _best_channel(db: Session, category: str) -> str:
 
 
 def run_automatic_cycle(db: Session, limit: int = 20) -> dict:
-    """Sync memory, execute due outreach, fulfil explicit catalogue requests, then learn.
+    """Run the canonical multi-channel cycle and then learn from its outcomes.
 
-    Catalogue and warm sends go through execute_one / plan_touch so
-    email fallback and touch idempotency stay in one place.
+    This wrapper deliberately delegates execution to smart_outreach.run_cycle.
+    Older code here executed only one preferred channel, which contradicted the
+    mandatory independent email + AI-call policy. The canonical cycle now owns
+    both-channel execution and safety gates.
     """
     ensure_schema()
     memory = sync_inbound_memory(db)
-    # The same selector run_cycle uses, rather than a second one. This function
-    # used to take the top `limit` by B2BLead.score, and score is 0 on nearly
-    # every row — so it re-examined the identical 20 leads every cycle, none of
-    # which had a usable channel, and sent nothing for as long as it ran while
-    # logging a healthy pass. See smart_outreach.select_candidates.
-    leads = select_candidates(db, limit)
-    results = []
-    for lead in leads:
-        try:
-            profile = classify_lead(db, lead)
-            decision = plan_touch(db, lead, profile)
-            if decision.get("execute") and decision.get("action") in (
-                "WARM_FIRST_TOUCH",
-                "WARM_FOLLOW_UP",
-            ):
-                preferred = _best_channel(db, profile.category)
-                if preferred == "whatsapp":
-                    from app.services.whatsapp_sender import consent_check
 
-                    allowed, _ = consent_check(lead)
-                    if not allowed:
-                        preferred = "email"
-                profile.preferred_channel = preferred
-                db.flush()
-            # SEND_CATALOGUE, warm touches, and skips all go through execute_one
-            results.append({"lead_id": lead.id, "company": lead.company, **execute_one(db, lead)})
-        except Exception as exc:
-            db.rollback()
-            results.append(
-                {
-                    "lead_id": lead.id,
-                    "company": lead.company,
-                    "status": "FAILED",
-                    "error": str(exc)[:300],
-                }
-            )
+    from app.services.smart_outreach import run_cycle
+    execution = run_cycle(db, limit=limit)
+
     learning = learn_from_lifecycle(db)
     return {
         "memory": memory,
-        "processed": len(results),
-        "results": results,
+        "processed": execution.get("processed", 0),
+        "results": execution.get("results", []),
+        "execution": execution,
         "learning": learning,
     }
+
