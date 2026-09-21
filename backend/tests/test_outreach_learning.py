@@ -55,6 +55,11 @@ def test_learning_separates_email_and_call_evidence():
                 actor="AI", after_status="AI_INTEREST_DETECTED",
                 occurred_at=datetime.utcnow(),
             ))
+            db.add(WorkflowEvent(
+                lead_id=lead.id, event_type="AI_CALL_DETAILS", channel="phone",
+                actor="AI", payload={"outcome": "INTERESTED"},
+                occurred_at=datetime.utcnow(),
+            ))
 
     db.commit()
     result = rebuild_learning(db, min_sample=5)
