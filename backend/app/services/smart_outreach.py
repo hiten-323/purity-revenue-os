@@ -1031,14 +1031,60 @@ def run_cycle(db: Session, limit: int = 20) -> dict:
     for lead, want_phone, want_email in planned:
         row = {"lead_id": lead.id, "company": lead.company}
         try:
-            if want_phone:
-                from app.services.calling_agent import CallingAgentService
-                ok, reason = CallingAgentService.trigger_vapi_call(db, lead)
-                row["call"] = {"placed": bool(ok), "reason": reason}
-                row["status"] = "CALL_PLACED" if ok else "CALL_BLOCKED"
-            if want_email:
-                email_result = execute_one(db, lead)
-                row.update(email_result)
+            # Learning may change ORDER only. It can never remove an eligible
+            # channel. Both remain mandatory when both permissions pass.
+            learning = None
+            try:
+                from app.services.outreach_learning import recommendations_for_lead
+                learning = recommendations_for_lead(db, lead)
+                row["learning"] = learning
+            except Exception as learn_exc:
+                row["learning"] = {
+                    "evidence_mature": False,
+                    "reason": f"learning unavailable: {learn_exc.__class__.__name__}",
+                    "channel_order": ["call", "email"],
+                }
+
+            order = row["learning"].get("channel_order") or ["call", "email"]
+            ordered = []
+            for channel in order:
+                if channel == "call" and want_phone:
+                    ordered.append("call")
+                if channel == "email" and want_email:
+                    ordered.append("email")
+
+            # Safety fallback: preserve every independently eligible channel.
+            for channel, wanted in (("call", want_phone), ("email", want_email)):
+                if wanted and channel not in ordered:
+                    ordered.append(channel)
+
+            for channel in ordered:
+                if channel == "call":
+                    from app.services.calling_agent import CallingAgentService
+                    ok, reason = CallingAgentService.trigger_vapi_call(db, lead)
+                    row["call"] = {"placed": bool(ok), "reason": reason}
+                    row["status"] = "CALL_PLACED" if ok else "CALL_BLOCKED"
+
+                    # The call authority owns the actual dial. This row is an
+                    # observation ledger only: it lets the learning layer see
+                    # every attempt without becoming another permission gate.
+                    profile = classify_lead(db, lead)
+                    call_status = "CALL_PLACED" if ok else "CALL_BLOCKED"
+                    _record(
+                        db, lead, profile, "ai_call", "AI_CALL_ATTEMPT",
+                        call_status, "qualification_call",
+                        reason=reason,
+                    )
+                    db.commit()
+
+                elif channel == "email":
+                    email_result = execute_one(db, lead)
+                    row["email"] = email_result
+                    # Do not overwrite a call status with an email result.
+                    if "status" not in row:
+                        row["status"] = email_result.get("status", "UNKNOWN")
+
+            row["channels_attempted"] = ordered
         except Exception as exc:
             db.rollback()
             try:
