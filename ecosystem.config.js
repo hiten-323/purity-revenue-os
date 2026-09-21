@@ -32,10 +32,50 @@ const PYTHON = process.env.PYTHON_BIN || "python";
 const CLOUDFLARED = process.env.CLOUDFLARED_BIN || "cloudflared";
 const BACKEND_DIR = path.join(ROOT, "backend");
 const FRONTEND_DIR = path.join(ROOT, "frontend");
-const NURAVEDA_DIR = path.resolve(ROOT, "..", "ai-voice-agent");
 
-module.exports = {
-  apps: [
+// Deterministic voice-sidecar cwd. Prefer NURAVEDA_DIR from the environment
+// (or backend/.env), then a sibling checkout, then an in-repo mirror. Refuse
+// to invent a path that does not exist -- a silent wrong cwd is how LiveKit
+// agents start "online" while dialling into silence.
+function resolveNuravedaDir() {
+  const candidates = [
+    process.env.NURAVEDA_DIR,
+    ENV.NURAVEDA_DIR,
+    path.resolve(ROOT, "..", "ai-voice-agent"),
+    path.resolve(ROOT, "..", "ai-voice-agent-purity"),
+    path.join(ROOT, "ai-voice-agent"),
+  ].filter(Boolean);
+  for (const c of candidates) {
+    const abs = path.resolve(c);
+    if (fs.existsSync(path.join(abs, "src", "server.js"))) return abs;
+    if (fs.existsSync(path.join(abs, "src", "livekit-agent.js"))) return abs;
+  }
+  return null;
+}
+
+const NURAVEDA_DIR = resolveNuravedaDir();
+
+function mustExist(label, filePath) {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`[ecosystem] ${label} missing at ${filePath}`);
+  }
+  return filePath;
+}
+
+mustExist("backend run_server.py", path.join(BACKEND_DIR, "run_server.py"));
+mustExist("backend worker.py", path.join(BACKEND_DIR, "worker.py"));
+mustExist("backend smart_outreach_worker.py", path.join(BACKEND_DIR, "smart_outreach_worker.py"));
+if (NURAVEDA_DIR) {
+  mustExist("nuraveda server", path.join(NURAVEDA_DIR, "src", "server.js"));
+  mustExist("nuraveda livekit agent", path.join(NURAVEDA_DIR, "src", "livekit-agent.js"));
+} else {
+  console.warn(
+    "[ecosystem] NURAVEDA_DIR not found -- omitting nuraveda-voice apps. " +
+      "Set NURAVEDA_DIR to enable LiveKit. Purity API/worker still start."
+  );
+}
+
+const apps = [
     {
       name: "purity-api",
       script: PYTHON,
@@ -135,6 +175,10 @@ module.exports = {
       restart_delay: 5000,
       max_restarts: 20,
     },
+];
+
+if (NURAVEDA_DIR) {
+  apps.push(
     {
       name: "nuraveda-voice",
       script: "src/server.js",
@@ -145,6 +189,7 @@ module.exports = {
       min_uptime: 5000,
       env: {
         NODE_ENV: "production",
+        LIVEKIT_INIT_TIMEOUT_MS: process.env.LIVEKIT_INIT_TIMEOUT_MS || ENV.LIVEKIT_INIT_TIMEOUT_MS || "60000",
       },
     },
     {
@@ -158,7 +203,10 @@ module.exports = {
       min_uptime: 5000,
       env: {
         NODE_ENV: "production",
+        LIVEKIT_INIT_TIMEOUT_MS: process.env.LIVEKIT_INIT_TIMEOUT_MS || ENV.LIVEKIT_INIT_TIMEOUT_MS || "60000",
       },
-    },
-  ],
-};
+    }
+  );
+}
+
+module.exports = { apps };
