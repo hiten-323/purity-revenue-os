@@ -231,9 +231,13 @@ CALLABLE_SEGMENTS = tuple(sorted(CALLABLE_CATEGORIES))
 # choosing it over "disclose only if asked": it is one clause of the lawful
 # basis in this module's docstring, and script_discloses() refuses to dial
 # without it.
+# Spoken Hindi on purpose: default NURAVEDA_LANG / profile defaultLanguage is
+# hi-IN. An English disclosure with a Hindi TTS voice produced the 2026-09-21
+# "female voice speaking English" failure. Markers "AI" and "Purity" still
+# satisfy script_discloses() (case-insensitive).
 OPENING_DISCLOSURE = (
-    "Hi, this is an AI assistant calling on behalf of Purity Beans. "
-    "Do you have a quick minute?"
+    "Namaste, main Purity Beans ki taraf se AI assistant baat kar rahi hoon. "
+    "Kya aapke paas ek chhota sa minute hai?"
 )
 
 # Words that sit in contact_name but are not a person's name. Greeting a
@@ -333,7 +337,12 @@ def opening_for(lead) -> str:
     may_place_ai_call runs script_discloses() on this exact string.
     """
     name = _first_name(lead)
-    return OPENING_DISCLOSURE.replace("Hi,", f"Hi {name},", 1) if name else OPENING_DISCLOSURE
+    if not name:
+        return OPENING_DISCLOSURE
+    # Prefer the Hindi greeting; keep a Hi, fallback for any English rewrite.
+    if OPENING_DISCLOSURE.startswith("Namaste,"):
+        return OPENING_DISCLOSURE.replace("Namaste,", f"Namaste {name} ji,", 1)
+    return OPENING_DISCLOSURE.replace("Hi,", f"Hi {name},", 1)
 
 # What the AI may NOT say, sent with every dispatch.
 #

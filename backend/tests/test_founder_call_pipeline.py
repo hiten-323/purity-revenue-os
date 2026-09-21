@@ -598,12 +598,12 @@ def test_constraints_are_dispatched_with_every_qualification_call():
 # ── the natural opening, still disclosed ─────────────────────────────────────
 
 @pytest.mark.parametrize("contact_name,expected", [
-    ("Raj Sharma", "Hi Raj, this is an AI assistant calling on behalf of Purity Beans."),
-    ("", "Hi, this is an AI assistant calling on behalf of Purity Beans."),
-    ("Manager", "Hi, this is an AI assistant"),            # a role, not a name
-    ("Mr. Gurpreet Singh", "Hi Gurpreet, this is"),        # salutation skipped
-    ("Sales Team", "Hi, this is"),
-    ("A1 Traders", "Hi, this is"),                         # not a person
+    ("Raj Sharma", "Namaste Raj ji, main Purity Beans ki taraf se AI assistant baat kar rahi hoon."),
+    ("", "Namaste, main Purity Beans ki taraf se AI assistant baat kar rahi hoon."),
+    ("Manager", "Namaste, main Purity Beans"),            # a role, not a name
+    ("Mr. Gurpreet Singh", "Namaste Gurpreet ji, main"),  # salutation skipped
+    ("Sales Team", "Namaste, main"),
+    ("A1 Traders", "Namaste, main"),                         # not a person
 ])
 def test_the_opening_greets_a_real_name_or_none(db, contact_name, expected):
     lead = _lead(db, contact_name=contact_name, company=f"Opening {contact_name or 'blank'}")
@@ -619,7 +619,7 @@ def test_every_opening_passes_the_disclosure_gate(db, registry):
         line = p.opening_for(lead)
         assert p.script_discloses(line)[0] is True, line
         assert "Purity Beans" in line
-        assert "quick minute" in line
+        assert "minute" in line.lower()
     assert p.may_place_ai_call(_lead(db, contact_name="Raj", company="Gate call"))[0] is True
 
 
