@@ -1,11 +1,12 @@
 {
   "id": "purity-coffee-b2b",
-  "name": "Purity Beans — B2B coffee qualification",
+  "name": "Purity Beans -- B2B coffee qualification",
   "description": "One disclosed AI call to a business that published its number, to find out whether they buy coffee commercially and whether they want the founder to call. It does not sell, quote, or close.",
-
-  "languages": ["hi-IN", "en-IN"],
+  "languages": [
+    "hi-IN",
+    "en-IN"
+  ],
   "defaultLanguage": "hi-IN",
-
   "_script_note": [
     "The opening line and the questions are NOT defined here.",
     "They live in purity-revenue-os founder_call_pipeline.py as",
@@ -17,16 +18,30 @@
     "AI disclosure. A profile that carried its own opening line could quietly",
     "drop that disclosure while every test still passed."
   ],
-
   "_disclosure_note": [
     "The opening must identify the caller as AI and name the business.",
     "founder_call_pipeline.script_discloses() enforces both and refuses to",
     "dispatch otherwise."
   ],
-
   "_scope_note": [
     "Qualification only. Interest routes to a human via the founder queue;",
     "the AI never negotiates price or takes an order. A wrong email is a",
-    "wrong email — a wrong call is a real phone ringing in a real shop."
-  ]
+    "wrong email -- a wrong call is a real phone ringing in a real shop."
+  ],
+  "voice_quality": {
+    "goal": "natural Indian business-call delivery: warm, clear, concise, responsive",
+    "language_strategy": "hi-IN/en-IN code-switching; mirror the caller's language",
+    "response_style": "short conversational turns; avoid monologues and list-reading",
+    "pace": "conversational, not drawn-out; provider should optimize time-to-first-audio",
+    "clarity": "clear articulation, simple vocabulary, repeat more slowly only when asked",
+    "turn_taking": "low endpointing delay with barge-in/interruption handling enabled",
+    "tts": "prefer a streaming Indian-language TTS with natural prosody; provider-level voice/speed settings remain authoritative",
+    "qa_required": [
+      "human-naturalness",
+      "first-audio-latency",
+      "turn-gap",
+      "speech-clarity",
+      "interruption-recovery"
+    ]
+  }
 }
