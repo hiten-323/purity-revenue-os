@@ -108,7 +108,9 @@ def rebuild_learning(db: Session, *, since_days: int = 90, min_sample: int = 5) 
         if e.event_type == "FOUNDER_CALL_PIPELINE" and e.after_status == "AI_NO_ANSWER":
             grouped[(category, "ai_call")]["no_answer"] += 1
         if e.event_type == "FOUNDER_CALL_PIPELINE" and e.after_status == "AI_INTEREST_DETECTED":
-            grouped[(category, "ai_call")]["positive"] += 1
+            # A stage transition proves a meaningful conversation occurred.
+            # Commercial positivity is taken from the richer AI_CALL_DETAILS
+            # outcome below, so one call cannot be counted twice.
             grouped[(category, "ai_call")]["conversations"] += 1
         if e.event_type == "FOUNDER_CALL_PIPELINE" and e.after_status in CALL_NEGATIVE:
             grouped[(category, "ai_call")]["negative"] += 1
