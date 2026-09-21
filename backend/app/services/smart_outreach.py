@@ -201,6 +201,7 @@ def _contactable_first():
     return case(
         (B2BLead.email_trust.in_(tuple(MAY_SEND)), 0),
         (B2BLead.consent_status.in_(tuple(CONSENT_OK)), 0),
+        ((B2BLead.phone.isnot(None)) & (B2BLead.phone != ""), 0),
         else_=1,
     )
 
@@ -961,6 +962,7 @@ def select_candidates(db: Session, limit: int = 20) -> list[B2BLead]:
         .filter(
             ((B2BLead.email.isnot(None)) & (B2BLead.email != ""))
             | ((B2BLead.whatsapp_number.isnot(None)) & (B2BLead.whatsapp_number != ""))
+            | ((B2BLead.phone.isnot(None)) & (B2BLead.phone != ""))
         )
         .order_by(_contactable_first(), B2BLead.coffee_buying_score.desc().nullslast(),
                   B2BLead.score.desc(), B2BLead.id.asc())
@@ -995,28 +997,48 @@ def run_cycle(db: Session, limit: int = 20) -> dict:
     """
     candidates = select_candidates(db, limit)
 
-    leads, skipped_ineligible = [], 0
+    from app.services import outreach_orchestrator as orch
+
+    skipped_ineligible = 0
+    planned = []
     for lead in candidates:
-        if len(leads) >= limit:
+        if len(planned) >= limit:
             break
-        # The single authority decides eligibility; this only asks it early
-        # instead of after fetching and executing.
+        # Channel-independent plan. evaluate_next_action is the EMAIL
+        # authority, not a global stop: DRAFT_ONLY on an untrusted address
+        # must not suppress an otherwise eligible phone call.
         try:
-            from app.services.decision_engine import evaluate_next_action
-            verdict = evaluate_next_action(lead, db)
+            plan = orch.plan_channels(lead, db)
         except Exception:
-            # A gate that cannot answer is not permission — skip, do not send.
             skipped_ineligible += 1
             continue
-        if verdict["action"] not in SEND_ELIGIBLE_ACTIONS:
+        channels = list(plan.get("channels") or [])
+        want_phone = orch.PHONE in channels
+        want_email = False
+        if orch.EMAIL in channels:
+            try:
+                from app.services.decision_engine import evaluate_next_action
+                verdict = evaluate_next_action(lead, db)
+                want_email = verdict["action"] in SEND_ELIGIBLE_ACTIONS
+            except Exception:
+                want_email = False
+        if not want_phone and not want_email:
             skipped_ineligible += 1
             continue
-        leads.append(lead)
+        planned.append((lead, want_phone, want_email))
 
     results = []
-    for lead in leads:
+    for lead, want_phone, want_email in planned:
+        row = {"lead_id": lead.id, "company": lead.company}
         try:
-            results.append({"lead_id": lead.id, "company": lead.company, **execute_one(db, lead)})
+            if want_phone:
+                from app.services.calling_agent import CallingAgentService
+                ok, reason = CallingAgentService.trigger_vapi_call(db, lead)
+                row["call"] = {"placed": bool(ok), "reason": reason}
+                row["status"] = "CALL_PLACED" if ok else "CALL_BLOCKED"
+            if want_email:
+                email_result = execute_one(db, lead)
+                row.update(email_result)
         except Exception as exc:
             db.rollback()
             try:
@@ -1025,7 +1047,9 @@ def run_cycle(db: Session, limit: int = 20) -> dict:
                 db.commit()
             except Exception:
                 db.rollback()
-            results.append({"lead_id": lead.id, "company": lead.company, "status": "FAILED", "error": str(exc)[:300]})
+            row["status"] = "FAILED"
+            row["error"] = str(exc)[:300]
+        results.append(row)
     # Truthful funnel, not one number.
     #
     # "processed 20" concealed that 16 of those slots went to leads with no
@@ -1040,10 +1064,12 @@ def run_cycle(db: Session, limit: int = 20) -> dict:
     by_status = Counter(str(r.get("status") or "UNKNOWN") for r in results)
     return {
         "scanned": len(candidates),          # had a channel and passed the DB filter
-        "eligible": len(leads),              # the authority returned a send action
-        "selected": len(results),            # actually handed to execute_one
+        "eligible": len(planned),            # email SEND-eligible and/or call-eligible
+        "selected": len(results),            # actually handed to an executor
         "sent": by_status.get("SENT", 0),
-        "blocked": by_status.get("BLOCKED", 0) + by_status.get("FAILED", 0),
+        "calls_placed": by_status.get("CALL_PLACED", 0),
+        "blocked": by_status.get("BLOCKED", 0) + by_status.get("FAILED", 0)
+                   + by_status.get("CALL_BLOCKED", 0),
         "deferred": by_status.get("SKIPPED", 0),
         "skipped_ineligible": skipped_ineligible,
         "by_status": dict(by_status),

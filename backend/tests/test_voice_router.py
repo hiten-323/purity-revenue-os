@@ -15,6 +15,15 @@ import pytest
 from app.services import voice_router as vr
 
 
+@pytest.fixture(autouse=True)
+def _arm_calling(monkeypatch):
+    """place_call is the execution choke point; tests that exercise a dial
+    path must arm it. Tests that assert the default-off behaviour delenv."""
+    monkeypatch.setenv("AI_CALLING_ENABLED", "1")
+    monkeypatch.delenv("AI_CALLING_KILL_SWITCH", raising=False)
+
+
+
 class Lead:
     def __init__(self, **kw):
         self.id = kw.get("id", 7)
@@ -116,9 +125,20 @@ def test_kill_switch_blocks_every_dial(monkeypatch):
     assert "kill_switch" in result.error.lower()
 
 
-def test_kill_switch_off_by_default(monkeypatch):
-    monkeypatch.delenv("AI_CALLING_KILL_SWITCH", raising=False)
-    assert vr.kill_switch_engaged() is False
+def test_calling_switched_off_blocks_every_dial(monkeypatch):
+    monkeypatch.setenv("VOICE_PROVIDER", "nuraveda")
+    monkeypatch.setenv("NURAVEDA_ENABLED", "1")
+    monkeypatch.setenv("NURAVEDA_TOOL_SECRET", "x")
+    monkeypatch.setenv("AI_CALLING_ENABLED", "0")
+
+    result = vr.place_call(Lead())
+    assert result.placed is False
+    assert "AI_CALLING_ENABLED" in result.error
+
+
+def test_calling_off_by_default(monkeypatch):
+    monkeypatch.delenv("AI_CALLING_ENABLED", raising=False)
+    assert vr.calling_switched_on() is False
 
 
 def test_router_holds_no_consent_opinion():

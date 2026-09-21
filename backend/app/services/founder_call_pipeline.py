@@ -45,6 +45,36 @@ is gone -- which is why they live in code rather than in a policy document.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import re
+
+
+def normalize_company(company_name: str) -> str:
+    """The one company-name key used for duplicate protection.
+
+    Lived in calling_agent and was only applied in that module's second gate,
+    so a lead that entered through may_place_ai_call never saw it. One
+    definition, used by the one calling authority.
+    """
+    if not company_name:
+        return ""
+    name = company_name.lower().strip()
+    suffixes = [
+        r"\bpvt\b", r"\bltd\b", r"\bprivate\b", r"\blimited\b",
+        r"\bcorp\b", r"\bcorporation\b", r"\bllc\b", r"\bco\b",
+        r"\bcompany\b", r"\binc\b", r"\bincorporated\b",
+    ]
+    for suffix in suffixes:
+        name = re.sub(suffix, "", name)
+    name = re.sub(r"[^\w\s]", "", name)
+    return " ".join(name.split())
+
+
+_OPT_OUT_CONSENT = frozenset({"OPT_OUT", "REFUSED", "UNSUBSCRIBED"})
+_OPT_OUT_CONTACT = frozenset({"OPTED_OUT", "DO_NOT_CONTACT"})
+# Duplicate-company protection ignores these statuses — they are not an
+# active conversation with another row at the same business.
+_INACTIVE_FOR_DUP = frozenset({"COLD", "ARCHIVED", "CLOSED_LOST", "DISQUALIFIED"})
+
 
 # ---------------------------------------------------------------- states ----
 
@@ -446,14 +476,32 @@ def may_place_ai_call(lead) -> tuple[bool, str]:
     permitted. Reasons are returned, never raised, so a batch reports instead
     of aborting.
 
-    Note what is deliberately absent: a consent_status check. This call is the
-    thing that would produce consent, so requiring it first is circular. Every
-    other clause of the basis is checked instead.
+    Note what is deliberately absent: a requirement of recorded CALL consent.
+    This call is the thing that would produce it, so requiring it first is
+    circular. Opt-out is the opposite of that and IS checked: a recorded
+    refusal is not "missing consent", it is a stop.
+
+    Arming (AI_CALLING_ENABLED) and the emergency kill switch live on
+    voice_router.place_call — the one function every dial already passes
+    through — and on the planner's phone gate. They are process-wide, not
+    per-lead, so they are not this function's job.
     """
     from app.services import preference_registry
 
     if getattr(lead, "do_not_call", False):
         return False, "do_not_call is set on this lead"
+
+    consent = (getattr(lead, "consent_status", "") or "").upper()
+    if consent in _OPT_OUT_CONSENT:
+        return False, f"consent_status={consent} — permanently suppressed"
+
+    contact = (getattr(lead, "contact_status", "") or "").upper()
+    if contact in _OPT_OUT_CONTACT:
+        return False, f"contact_status={contact} — permanently suppressed"
+
+    locked = getattr(lead, "lead_locked_until", None)
+    if locked and locked > datetime.utcnow():
+        return False, "lead_locked"
 
     stage = stage_of(lead)
     if stage != ELIGIBLE:
@@ -465,9 +513,17 @@ def may_place_ai_call(lead) -> tuple[bool, str]:
         return False, ("ai_call_count is already %d; limit is %d"
                        % (placed, MAX_AI_COLD_CALLS_PER_LEAD))
 
+    last_call = getattr(lead, "last_call_date", None)
+    if last_call and last_call > datetime.utcnow() - timedelta(days=14):
+        return False, "cooldown_active: a call was placed in the last 14 days"
+
     phone = (getattr(lead, "phone", "") or "").strip()
     if not phone:
         return False, "no phone on record"
+
+    digits = re.sub(r"\D", "", phone)
+    if len(digits) < 8:
+        return False, f"phone is not a dialable number: {phone}"
 
     # A phone that exists is not the same question as a phone that is real.
     # These two detectors already existed (contact_enricher's fabrication
@@ -493,14 +549,24 @@ def may_place_ai_call(lead) -> tuple[bool, str]:
     if _session is not None and is_shared_across_many_leads(phone, _session, getattr(lead, "id", None)):
         return False, f"phone is on record for {identity.SHARED_PHONE_THRESHOLD}+ other leads — not a dialable number for this one: {phone}"
 
+    if _session is not None:
+        dup_why = _duplicate_company_active(lead, _session)
+        if dup_why:
+            return False, dup_why
+
     allowed, why = preference_registry.check(phone)
     if not allowed:
         return False, "preference registry: %s" % why
 
-    segment = (getattr(lead, "segment", "") or "").strip().lower()
-    if segment not in CALLABLE_SEGMENTS:
+    # Whichever column a caller filled, the answer is the same set.
+    # Blank in BOTH is an incomplete record, not a business type.
+    category = (
+        (getattr(lead, "segment", "") or "").strip().lower()
+        or (getattr(lead, "division", "") or "").strip().lower()
+    )
+    if category not in CALLABLE_SEGMENTS:
         return False, ("segment %s is not callable; allowed: %s"
-                       % (segment or "(none)", ", ".join(CALLABLE_SEGMENTS)))
+                       % (category or "(none)", ", ".join(CALLABLE_SEGMENTS)))
 
     # The per-lead line, not the template: that is what this lead will hear.
     ok, why = script_discloses(opening_for(lead))
@@ -510,8 +576,36 @@ def may_place_ai_call(lead) -> tuple[bool, str]:
     from app.observability import ALLOWED, decision
     decision("phone.cold_call_gate", ALLOWED,
              "eligible for one disclosed AI qualification call", lead=lead,
-             company=getattr(lead, "company", ""), segment=segment)
+             company=getattr(lead, "company", ""), segment=category)
     return True, "eligible for one disclosed AI qualification call"
+
+
+def _duplicate_company_active(lead, session) -> str:
+    """Refuse if another non-terminal row is already in play at this company.
+
+    Computes the key in Python: company_normalized is not populated on every
+    row, and a SQL-only match against that column would silently miss a
+    duplicate whose column was never filled. Read-only — a permission gate
+    that writes company_normalized was a side effect hiding in a check.
+    """
+    from app.models.models import B2BLead
+
+    norm = normalize_company(getattr(lead, "company", "") or "")
+    if not norm:
+        return ""
+    rid = getattr(lead, "id", None)
+    rows = session.query(B2BLead.id, B2BLead.company, B2BLead.company_normalized,
+                         B2BLead.status)
+    if rid is not None:
+        rows = rows.filter(B2BLead.id != rid)
+    for oid, company, stored, status in rows:
+        st = (status or "").upper()
+        if st in _INACTIVE_FOR_DUP:
+            continue
+        other = (stored or "").strip() or normalize_company(company or "")
+        if other and other == norm:
+            return f"duplicate_company_active ({company})"
+    return ""
 
 
 def calls_placed_today(db) -> int:

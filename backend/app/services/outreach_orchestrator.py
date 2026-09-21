@@ -3,22 +3,29 @@ Which channel can actually reach this business, and what should happen next.
 
 The policy
 ----------
-Every qualified prospect enters a multi-channel programme. Channels are
-attempted in sequence -- not all at once, not blindly -- until a reply, a
-suppression, or the end of the programme. A channel is skipped when it cannot
-lawfully or technically reach that particular business.
+Every qualified prospect is evaluated independently on each channel:
 
-    Day 0   email       introduction
-    Day 2   whatsapp    short, contextual
-    Day 4   phone       one disclosed AI qualification call
-    Day 6   email       different angle
-    Day 8   whatsapp    follow-up
-    Day 12  email       close the loop politely
+    IF the lead is eligible for an AI call  -> CALL
+    IF the lead is eligible for email       -> EMAIL
+    IF both                                 -> BOTH
+    IF neither                              -> NO OUTBOUND
+
+WhatsApp is isolated unless AISENSY_ENABLED=1. It is not a substitute for
+email or phone, and it is not chosen as a "best channel".
+
+This used to be a calendar sequence (email day 0, WhatsApp day 2, phone
+day 4). That is "pick one next", which is how a cafe with a phone and an
+untrusted email waited four days for a call that was already allowed, and
+how DRAFT_ONLY on email could be misread as a reason not to call at all.
+
+Follow-up emails (a different angle, a polite close) still wait. The first
+contact does not.
 
 LinkedIn is deliberately absent from the sequence. There is no adapter, and
 automating connection requests violates LinkedIn's user agreement; a channel
 that cannot be run without breaking terms is not a channel this system offers.
 It is reported as ineligible with that reason rather than silently dropped.
+
 
 This module PROPOSES. It does not send.
 --------------------------------------
@@ -42,6 +49,8 @@ place in the system to restate their rules. So it holds none of its own.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import os
+
 
 EMAIL = "email"
 WHATSAPP = "whatsapp"
@@ -49,16 +58,22 @@ PHONE = "phone"
 LINKEDIN = "linkedin"
 CHANNELS = (EMAIL, WHATSAPP, PHONE, LINKEDIN)
 
-# (day offset, channel, angle) -- the angle names WHY this touch differs, so a
-# second email is a different argument rather than the same pitch resent.
+# First-contact channels, attempted together when both are eligible.
+# WhatsApp is not in this set: AISENSY_ENABLED=0 keeps it isolated, and even
+# when that flag is on, WhatsApp still requires recorded opt-in — it is never
+# a cold first touch.
+DAY0_CHANNELS = (EMAIL, PHONE)
+
+# Follow-up emails after the day-0 pair. Distinct angles so a second email is
+# a different argument rather than the same pitch resent. WhatsApp is absent
+# on purpose — isolation is the default.
 SEQUENCE = (
     (0, EMAIL, "introduction"),
-    (2, WHATSAPP, "short_contextual"),
-    (4, PHONE, "ai_qualification"),
+    (0, PHONE, "ai_qualification"),
     (6, EMAIL, "different_angle"),
-    (8, WHATSAPP, "follow_up"),
     (12, EMAIL, "polite_close"),
 )
+
 
 # Engagement stops the sequence. These are LeadInteraction.outcome values that
 # mean the BUSINESS actually spoke to us -- taken from the values the table
@@ -81,40 +96,25 @@ SUPPRESSING_OUTCOMES = ("DO_NOT_CONTACT", "NOT_INTERESTED")
 
 # ------------------------------------------------------------ eligibility --
 
+def _flag(name: str, default: str = "0") -> bool:
+    return (os.getenv(name, default) or default).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _email_ok(lead, db):
     from app.services.trust_promoter import may_send
     return may_send(lead)
 
 
 def _whatsapp_ok(lead, db):
-    """Needs a number and an opt-in. Verification is no longer askable.
+    """Needs the process-wide arm, a number, and an opt-in.
 
-    This gate used to require whatsapp_verified is True, on the principle
-    that a mobile number is not a WhatsApp contact: the network is right and
-    the account may simply not exist, so messages queue and never arrive.
-
-    That principle is still true. What changed is that nobody can check any
-    more. whatsapp_verified was set by Evolution's /chat/whatsappNumbers,
-    which is a WhatsApp-Web (Baileys) capability. The transport is AiSensy on
-    Meta's official platform now, and Meta deliberately exposes no
-    "is this number on WhatsApp" endpoint -- enumerating its users is exactly
-    what it will not allow. Baileys could answer it and is refused by name for
-    reasons that have not changed.
-
-    So the gate is narrowed rather than dropped, and the distinction is the
-    one that was always stated: NULL is not False.
-
-        True   verified, once, when the capability existed  -> allowed
-        NULL   nobody ever asked, and nobody can now        -> allowed
-        False  WhatsApp was asked and said no               -> refused
-
-    Keeping NULL prohibitive would refuse all 1,307 leads permanently, which
-    is not caution, it is a channel that can never open. The residual harm is
-    small and bounded: a template sent to a number with no WhatsApp account is
-    rejected by Meta rather than delivered, and a rejection generates no block
-    and no report -- and blocks and reports are what actually move the quality
-    rating this number's order flows depend on.
+    WhatsApp stays isolated unless AISENSY_ENABLED=1. That is an isolation
+    switch, not a restatement of Meta's opt-in vocabulary — consent_check
+    still owns permission after the flag is on.
     """
+    if not _flag("AISENSY_ENABLED"):
+        return False, "AISENSY_ENABLED is not set to 1 — WhatsApp isolated"
+
     from app.services.whatsapp_sender import consent_check
     from app.services.identity import SHARED_PHONE_THRESHOLD
     from app.services.founder_call_pipeline import is_shared_across_many_leads
@@ -138,23 +138,23 @@ def _whatsapp_ok(lead, db):
 
 
 def _phone_ok(lead, db):
-    """Permission AND capability. They are different questions.
+    """Permission, then arming, then capability. Three different questions.
 
     may_place_ai_call answers "is this business allowed to receive the one
-    cold qualification call" -- DND scrub, segment, per-lead and per-day caps.
-    It says nothing about whether a call can actually be placed.
+    cold qualification call" -- DND scrub, fabricated/shared numbers,
+    duplicate company, opt-out, segment, per-lead one-shot.
+    It says nothing about whether calling is switched on for anyone, or
+    whether a call can actually be placed.
 
-    A dry run over 150 candidates proposed phone for 145 of them, because
-    email and WhatsApp are ineligible and the sequence falls through to the
-    next channel. Every one of those proposals was unexecutable: no voice
-    provider is configured. Proposing a touch that cannot happen fills the
-    founder queue with work nobody can do and makes the system report
-    readiness it does not have.
+    Arming (AI_CALLING_ENABLED / kill switch) is asked of voice_router, the
+    one module every dial already passes through. Capability is asked of
+    the same module's config_status.
 
-    So capability is asked of voice_router, which owns provider selection and
-    refuses an unknown provider rather than guessing. Imported, not restated.
-    An import failure is a refusal: a channel whose provider cannot be
-    established has not been established.
+    Order is permission first so a dry run against a disarmed process still
+    reports *why* a lead is not callable (DND, fabricated, ...) rather than
+    collapsing every row into "flag is off". A permitted lead on a disarmed
+    process is then refused with the flag named, which is the actionable
+    reason for that row.
     """
     from app.services.founder_call_pipeline import may_place_ai_call
 
@@ -164,6 +164,16 @@ def _phone_ok(lead, db):
 
     try:
         from app.services import voice_router
+    except Exception as exc:  # noqa: BLE001
+        return False, (f"voice provider unavailable ({exc.__class__.__name__}); "
+                       f"refusing to propose a call that cannot be placed")
+
+    if voice_router.kill_switch_engaged():
+        return False, "AI_CALLING_KILL_SWITCH is engaged — no outbound AI calls"
+    if not voice_router.calling_switched_on():
+        return False, "AI_CALLING_ENABLED is not set to 1 — no outbound AI calls"
+
+    try:
         ready, detail = voice_router.config_status()
     except Exception as exc:  # noqa: BLE001
         # Import failure and a raising status check are the same fact: the
@@ -278,60 +288,102 @@ def _touches_done(lead, db) -> set:
 
 
 def next_touch(lead, db, *, started: datetime = None) -> dict:
-    """The single next action, or an explanation of why there is none.
+    """Compatibility wrapper around plan_channels.
 
-    Never returns a touch on an ineligible channel and never returns one after
-    a stop. Executing what comes back is somebody else's job.
+    Callers that still expect a single `channel` get one. When both email
+    and phone are due, `channel` is "both" and `channels` lists them. New
+    code should read plan_channels() directly.
     """
-    from app.observability import REFUSED, STOP, WAIT, decision
+    return plan_channels(lead, db, started=started)
+
+
+def plan_channels(lead, db, *, started: datetime = None) -> dict:
+    """IF CALL ELIGIBLE → CALL. IF EMAIL ELIGIBLE → EMAIL. If both → BOTH.
+
+    Email trust failure (DRAFT_ONLY) is email-only. It is not a human-
+    conversation exception and it does not suppress an otherwise eligible
+    phone call. evaluate_next_action remains the email send authority;
+    this function only asks trust_promoter.may_send whether the address
+    may be used, and founder_call_pipeline.may_place_ai_call whether the
+    number may be dialled.
+
+    WhatsApp is not proposed here. Isolation is the default.
+    """
+    from app.observability import REFUSED, STOP, WAIT, DONE, SKIPPED, decision
 
     stop = stop_reason(lead, db)
     if stop:
-        decision("orchestrator.next_touch", STOP, stop, lead=lead)
-        return {"action": "STOP", "reason": stop, "channel": None}
+        decision("orchestrator.plan_channels", STOP, stop, lead=lead)
+        return {"action": "STOP", "reason": stop, "channel": None,
+                "channels": [], "kind": "NONE"}
 
     elig = eligibility(lead, db)
-    if not any(v["eligible"] for v in elig.values()):
-        decision("orchestrator.next_touch", REFUSED,
-                 "no channel can reach this business today", lead=lead,
-                 blocked=",".join(sorted(elig)))
-        # On the business's own record, with each channel's own reason. This
-        # is the one an operator reads when asking "why has nothing happened
-        # to this account?". Deduped, so a nightly sweep that reaches the same
-        # conclusion does not write it again.
-        from app.services import lead_journal as journal
-        journal.record(
-            lead, db, method=journal.ORCHESTRATOR, outcome=journal.NO_CHANNEL,
-            remark="; ".join(f"{c}: {elig[c]['reason']}" for c in CHANNELS),
-            by="orchestrator")
-        return {"action": "UNREACHABLE", "channel": None,
-                "reason": "no channel can lawfully or technically reach this "
-                          "business today",
-                "blocked_by": {c: v["reason"] for c, v in elig.items()}}
-
     started = started or getattr(lead, "stage_entered_date", None) or datetime.utcnow()
     age_days = max(0, (datetime.utcnow() - started).days)
     done = {c for c, _ in _touches_done(lead, db)}
 
-    from app.observability import DONE, SKIPPED
-
-    for day, channel, angle in SEQUENCE:
+    proposed = []
+    # Day 0: email and phone independently, same day, no "pick one".
+    for channel, angle in ((EMAIL, "introduction"), (PHONE, "ai_qualification")):
         if channel in done:
             decision(f"{channel}.sequence", SKIPPED, "already attempted on this lead",
-                     lead=lead, day=day)
-            continue                      # that channel has had its turn
+                     lead=lead, day=0)
+            continue
+        if not elig[channel]["eligible"]:
+            decision(f"{channel}.sequence", SKIPPED, elig[channel]["reason"],
+                     lead=lead, day=0)
+            continue
+        proposed.append({
+            "channel": channel, "angle": angle, "day": 0,
+            "reason": elig[channel]["reason"],
+        })
+
+    if proposed:
+        channels = [p["channel"] for p in proposed]
+        if EMAIL in channels and PHONE in channels:
+            kind = "BOTH"
+            channel_key = "both"
+        elif PHONE in channels:
+            kind = "CALL"
+            channel_key = PHONE
+        else:
+            kind = "EMAIL"
+            channel_key = EMAIL
+        reason = "; ".join(f"{p['channel']}: {p['reason']}" for p in proposed)
+        decision("orchestrator.plan_channels", "PROPOSE",
+                 f"{kind} due on day 0 (lead is {age_days}d old) "
+                 f"— awaiting founder approval", lead=lead)
+        from app.services import lead_journal as journal
+        journal.record(
+            lead, db, method=channel_key if channel_key != "both" else journal.ORCHESTRATOR,
+            outcome=journal.QUEUED,
+            remark=(f"day 0 {kind}. {reason}. Awaiting founder approval — "
+                    f"nothing has been sent."),
+            by="orchestrator")
+        return {"action": "PROPOSE", "channel": channel_key, "channels": channels,
+                "kind": kind, "touches": proposed, "day": 0,
+                "reason": reason,
+                "note": "requires founder approval before it is sent"}
+
+    # Follow-up emails only after day-0 work is done (or was ineligible).
+    for day, channel, angle in SEQUENCE:
+        if day == 0:
+            continue
+        if channel in done:
+            continue
         if not elig[channel]["eligible"]:
             decision(f"{channel}.sequence", SKIPPED, elig[channel]["reason"],
                      lead=lead, day=day)
-            continue                      # skip, do not stall the sequence
+            continue
         if age_days < day:
-            decision("orchestrator.next_touch", WAIT,
+            decision("orchestrator.plan_channels", WAIT,
                      f"next touch is {channel} on day {day}", lead=lead,
                      due_in_days=day - age_days, age_days=age_days)
-            return {"action": "WAIT", "channel": channel, "angle": angle,
+            return {"action": "WAIT", "channel": channel, "channels": [],
+                    "kind": "WAIT", "angle": angle,
                     "due_in_days": day - age_days,
                     "reason": f"next touch is {channel} on day {day}"}
-        decision("orchestrator.next_touch", "PROPOSE",
+        decision("orchestrator.plan_channels", "PROPOSE",
                  f"{channel}/{angle} is due (day {day}, lead is {age_days}d old) "
                  f"— awaiting founder approval", lead=lead)
         from app.services import lead_journal as journal
@@ -341,14 +393,32 @@ def next_touch(lead, db, *, started: datetime = None) -> dict:
                     f"{elig[channel]['reason']}. Awaiting founder approval — "
                     f"nothing has been sent."),
             by="orchestrator")
-        return {"action": "PROPOSE", "channel": channel, "angle": angle,
-                "day": day,
+        return {"action": "PROPOSE", "channel": channel, "channels": [channel],
+                "kind": "EMAIL", "angle": angle, "day": day,
                 "reason": elig[channel]["reason"],
                 "note": "requires founder approval before it is sent"}
 
-    decision("orchestrator.next_touch", DONE,
+    if not any(elig[c]["eligible"] for c in (EMAIL, PHONE) if c not in done):
+        # Nothing reachable today and nothing already done that would make
+        # this COMPLETE rather than UNREACHABLE.
+        if not done:
+            decision("orchestrator.plan_channels", REFUSED,
+                     "no channel can reach this business today", lead=lead,
+                     blocked=",".join(sorted(elig)))
+            from app.services import lead_journal as journal
+            journal.record(
+                lead, db, method=journal.ORCHESTRATOR, outcome=journal.NO_CHANNEL,
+                remark="; ".join(f"{c}: {elig[c]['reason']}" for c in CHANNELS),
+                by="orchestrator")
+            return {"action": "UNREACHABLE", "channel": None, "channels": [],
+                    "kind": "NONE",
+                    "reason": "no channel can lawfully or technically reach this "
+                              "business today",
+                    "blocked_by": {c: v["reason"] for c, v in elig.items()}}
+
+    decision("orchestrator.plan_channels", DONE,
              "every eligible channel in the sequence has been attempted", lead=lead)
-    return {"action": "COMPLETE", "channel": None,
+    return {"action": "COMPLETE", "channel": None, "channels": [], "kind": "NONE",
             "reason": "every eligible channel in the sequence has been attempted"}
 
 

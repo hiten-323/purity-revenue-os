@@ -149,10 +149,13 @@ def main() -> int:
         for lead in leads:
             stop = orch.stop_reason(lead, db)
             elig = orch.eligibility(lead, db)
-            # journal=False equivalent: next_touch writes a journal row, which is
-            # a local DB write, not an outbound call. It is the real path, so it
-            # stays -- a dry run that skips the real path proves nothing.
-            plan = orch.next_touch(lead, db)
+            # journal writes are local DB, not outbound. The real planner is
+            # plan_channels; next_touch is a compatibility wrapper around it.
+            plan = orch.plan_channels(lead, db)
+            from app.services.founder_call_pipeline import may_place_ai_call
+            from app.services.trust_promoter import may_send
+            call_perm, call_why = may_place_ai_call(lead)
+            email_perm, email_why = may_send(lead)
 
             rows.append({
                 "lead_id": lead.id,
@@ -163,6 +166,10 @@ def main() -> int:
                 "personalisation_evidence": _personalisation_evidence(lead),
                 "eligibility": {c: {"eligible": elig[c]["eligible"],
                                     "reason": elig[c]["reason"]} for c in orch.CHANNELS},
+                "permission": {
+                    "call": {"eligible": bool(call_perm), "reason": call_why},
+                    "email": {"eligible": bool(email_perm), "reason": email_why},
+                },
                 "plan": plan,
             })
     finally:
@@ -173,9 +180,39 @@ def main() -> int:
     print("SMART OUTREACH DRY RUN — nothing was sent")
     print("=" * 78)
     print(f"candidates examined : {len(rows)}")
+    print(f"AI_CALLING_ENABLED  : {os.getenv('AI_CALLING_ENABLED', '0')}")
+    print(f"SMART_OUTREACH      : {os.getenv('SMART_OUTREACH_ENABLED', '0')}")
+    print(f"AUTO_OUTREACH       : {os.getenv('AUTO_OUTREACH_ENABLED', '0')}")
+    print(f"AISENSY_ENABLED     : {os.getenv('AISENSY_ENABLED', '0')}")
 
-    actions = Counter(r["plan"]["action"] for r in rows)
-    print("planned actions:")
+    print()
+    print("PERMISSION (may_place_ai_call / may_send — independent of arming flags):")
+    call_ok = sum(1 for r in rows if r["permission"]["call"]["eligible"])
+    email_ok = sum(1 for r in rows if r["permission"]["email"]["eligible"])
+    both_perm = sum(1 for r in rows if r["permission"]["call"]["eligible"] and r["permission"]["email"]["eligible"])
+    call_only = sum(1 for r in rows if r["permission"]["call"]["eligible"] and not r["permission"]["email"]["eligible"])
+    email_only = sum(1 for r in rows if r["permission"]["email"]["eligible"] and not r["permission"]["call"]["eligible"])
+    neither = sum(1 for r in rows if not r["permission"]["call"]["eligible"] and not r["permission"]["email"]["eligible"])
+    print(f"   AI CALL eligible : {call_ok:>5} / {len(rows)}")
+    print(f"   EMAIL   eligible : {email_ok:>5} / {len(rows)}")
+    print(f"   BOTH             : {both_perm:>5}")
+    print(f"   CALL only        : {call_only:>5}")
+    print(f"   EMAIL only       : {email_only:>5}")
+    print(f"   NEITHER          : {neither:>5}")
+    call_blockers = Counter(r["permission"]["call"]["reason"][:72]
+                            for r in rows if not r["permission"]["call"]["eligible"])
+    print("   AI CALL blockers:")
+    for reason, n in call_blockers.most_common(8):
+        print(f"              {n:>5}  {reason}")
+    email_blockers = Counter(r["permission"]["email"]["reason"][:72]
+                             for r in rows if not r["permission"]["email"]["eligible"])
+    print("   EMAIL blockers:")
+    for reason, n in email_blockers.most_common(5):
+        print(f"              {n:>5}  {reason}")
+
+    actions = Counter(r["plan"].get("kind") or r["plan"]["action"] for r in rows)
+    print()
+    print("ARMED PLAN (plan_channels — respects AI_CALLING_ENABLED / AISENSY_ENABLED):")
     for action, n in actions.most_common():
         print(f"   {action:<12} {n}")
 

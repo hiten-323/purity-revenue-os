@@ -39,6 +39,7 @@ def test_voice_router_refuses_unknown_provider(monkeypatch):
 def test_voice_router_refuses_missing_phone(monkeypatch):
     from app.services import voice_router
 
+    monkeypatch.setenv("AI_CALLING_ENABLED", "1")
     monkeypatch.setenv("VOICE_PROVIDER", "nuraveda")
     monkeypatch.setattr(voice_router, "config_status", lambda: (True, "nuraveda: configured"))
 
@@ -51,6 +52,7 @@ def test_voice_router_refuses_missing_phone(monkeypatch):
 def test_voice_router_dry_run_does_not_bypass_provider_adapter(monkeypatch):
     from app.services import voice_router
 
+    monkeypatch.setenv("AI_CALLING_ENABLED", "1")
     monkeypatch.setenv("VOICE_PROVIDER", "nuraveda")
     monkeypatch.setattr(voice_router, "config_status", lambda: (False, "nuraveda: not configured"))
 

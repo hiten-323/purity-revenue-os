@@ -1,8 +1,9 @@
-import re
 from datetime import datetime, timedelta
-from sqlalchemy import func
-from app.models.models import B2BLead, CallHistory
-from app.services.founder_call_pipeline import CALLABLE_SEGMENTS as _CALLABLE_SEGMENTS
+from app.models.models import B2BLead
+from app.services.founder_call_pipeline import (
+    CALLABLE_SEGMENTS as _CALLABLE_SEGMENTS,
+    normalize_company as _normalize_company,
+)
 
 
 class CallingAgentService:
@@ -25,18 +26,7 @@ class CallingAgentService:
 
     @staticmethod
     def normalize_company(company_name: str) -> str:
-        if not company_name:
-            return ""
-        name = company_name.lower().strip()
-        suffixes = [
-            r"\bpvt\b", r"\bltd\b", r"\bprivate\b", r"\blimited\b",
-            r"\bcorp\b", r"\bcorporation\b", r"\bllc\b", r"\bco\b",
-            r"\bcompany\b", r"\binc\b", r"\bincorporated\b",
-        ]
-        for suffix in suffixes:
-            name = re.sub(suffix, "", name)
-        name = re.sub(r"[^\w\s]", "", name)
-        return " ".join(name.split())
+        return _normalize_company(company_name)
 
     @staticmethod
     def get_average_realization(db) -> float:
@@ -68,14 +58,15 @@ class CallingAgentService:
 
     @staticmethod
     def check_daily_limits(db) -> tuple[int, float]:
-        today = datetime.utcnow().strftime("%Y-%m-%d")
-        calls_count = db.query(func.count(CallHistory.id)).filter(
-            func.strftime("%Y-%m-%d", CallHistory.call_date) == today
-        ).scalar() or 0
-        cost_sum = db.query(func.sum(CallHistory.cost)).filter(
-            func.strftime("%Y-%m-%d", CallHistory.call_date) == today
-        ).scalar() or 0.0
-        return int(calls_count), float(cost_sum)
+        """Delegate to the pipeline's 24h counter.
+
+        The previous implementation used SQLite's strftime() against
+        CallHistory.call_date, which is a no-op (or an error) on Neon
+        Postgres — so the 'daily cap' silently did not cap in production.
+        One counter, the one may_place_ai_call's caller already uses.
+        """
+        from app.services.founder_call_pipeline import calls_placed_today
+        return calls_placed_today(db), 0.0
 
     @staticmethod
     def check_eligibility(
@@ -83,58 +74,36 @@ class CallingAgentService:
         lead: B2BLead,
         ignore_dnc_override: bool = False,
     ) -> tuple[bool, str]:
-        """Apply the common call gates before any provider-side execution."""
+        """Process-wide arming + the one calling authority.
+
+        Per-lead permission is founder_call_pipeline.may_place_ai_call.
+        This function adds the switches and the daily cap that are not
+        properties of a lead.
+
+        low_margin is deliberately gone. estimated_value is 0 on most cafes,
+        so a 'safety' floor of ₹25k refused the priority segment without
+        anyone deciding that. Commercial ranking belongs in campaign
+        preview, not in the dial gate.
+        """
         if not CallingAgentService.CALLING_ENGINE_ENABLED:
             return False, "calling_engine_disabled"
 
-        calls_today, cost_today = CallingAgentService.check_daily_limits(db)
-        if calls_today >= CallingAgentService.MAX_CALLS_PER_DAY:
-            return False, "daily_call_limit_reached"
-        if cost_today >= CallingAgentService.MAX_CALL_COST_PER_DAY:
-            return False, "daily_cost_limit_reached"
+        from app.services import voice_router
+        if voice_router.kill_switch_engaged():
+            return False, "AI_CALLING_KILL_SWITCH is engaged — no outbound AI calls"
+        if not voice_router.calling_switched_on():
+            return False, "AI_CALLING_ENABLED is not set to 1 — no outbound AI calls"
 
-        if not lead.phone:
-            return False, "missing_phone"
+        from app.services import founder_call_pipeline as pipeline
+        if pipeline.daily_budget_remaining(db) <= 0:
+            return False, (
+                f"daily_ai_call_cap_reached: {pipeline.MAX_AI_CALLS_PER_DAY} placed in the last 24h"
+            )
 
-        lead_div = (lead.division or "").lower().strip()
-        if lead_div not in CallingAgentService.CALLABLE_SEGMENTS:
-            return False, "invalid_segment"
-
-        suggested_margin = lead.proposal_suggested_margin or 70.0
-        margin = lead.estimated_value * suggested_margin / 100.0
-        if margin <= 25000:
-            return False, "low_margin"
-
-        if CallingAgentService.DNC_ENABLED and lead.do_not_call:
-            if not (CallingAgentService.FOUNDER_OVERRIDE_ENABLED and lead.dnc_override_by):
-                return False, "do_not_call_active"
-
-        if (lead.call_attempts or 0) >= CallingAgentService.MAX_CALL_ATTEMPTS:
-            return False, "max_call_attempts_reached"
-
-        if lead.last_call_date:
-            cooldown_limit = datetime.utcnow() - timedelta(days=CallingAgentService.COOLDOWN_DAYS)
-            if lead.last_call_date > cooldown_limit:
-                return False, "cooldown_active"
-
-        if lead.lead_locked_until:
-            if lead.lead_locked_until > datetime.utcnow():
-                return False, "lead_locked"
-            lead.lead_locked_until = None
-            db.commit()
-
-        norm_company = CallingAgentService.normalize_company(lead.company)
-        lead.company_normalized = norm_company
-        db.commit()
-        dup_exists = db.query(B2BLead).filter(
-            B2BLead.company_normalized == norm_company,
-            B2BLead.id != lead.id,
-            B2BLead.status.notin_(["COLD", "ARCHIVED"]),
-        ).first()
-        if dup_exists:
-            return False, f"duplicate_company_active ({dup_exists.company})"
-
-        return True, "eligible"
+        may_call, why = pipeline.may_place_ai_call(lead)
+        if not may_call:
+            return False, why
+        return True, why
 
     @staticmethod
     def _place_qualification_call(db, lead: B2BLead, pipeline, scheduled_at=None) -> tuple[bool, str]:
@@ -184,12 +153,14 @@ class CallingAgentService:
         existing caller, including Smart Outreach.
         """
         from app.services import founder_call_pipeline as pipeline
+        from app.services import voice_router
 
         eligible, reason = CallingAgentService.check_eligibility(db, lead)
         if not eligible:
-            return False, reason
+            if reason.startswith("AI_CALLING_") or reason.startswith("daily_") or reason == "calling_engine_disabled":
+                return False, reason
+            return False, f"cold_call_refused: {reason}"
 
-        from app.services import voice_router
         cfg_ok, cfg_reason = voice_router.config_status()
         if not cfg_ok:
             return False, f"voice_not_configured: {cfg_reason}"
@@ -200,14 +171,7 @@ class CallingAgentService:
         # the call sheet's "OK to email/WhatsApp?"). It used to unlock a
         # "consented call" path that skipped the DND registry scrub and the
         # one-call rule. Nothing records consent to be called, so no lead
-        # bypasses may_place_ai_call.
-        may_call, why = pipeline.may_place_ai_call(lead)
-        if not may_call:
-            return False, f"cold_call_refused: {why}"
-        if pipeline.daily_budget_remaining(db) <= 0:
-            return False, (
-                f"daily_ai_call_cap_reached: {pipeline.MAX_AI_CALLS_PER_DAY} placed in the last 24h"
-            )
+        # bypasses may_place_ai_call — check_eligibility already ran it.
         return CallingAgentService._place_qualification_call(db, lead, pipeline, scheduled_at=scheduled_at)
 
     @staticmethod
@@ -222,7 +186,7 @@ class CallingAgentService:
 
         def sort_key(lead):
             score = lead.lead_temperature_score or 0.0
-            margin = lead.estimated_value * (lead.proposal_suggested_margin or 70.0) / 100.0
+            margin = (lead.estimated_value or 0.0) * (lead.proposal_suggested_margin or 70.0) / 100.0
             return score, margin
 
         leads.sort(key=sort_key, reverse=True)
@@ -231,7 +195,7 @@ class CallingAgentService:
         estimated_cost = 0.0
         for lead in leads:
             suggested_margin = lead.proposal_suggested_margin or 70.0
-            margin = lead.estimated_value * suggested_margin / 100.0
+            margin = (lead.estimated_value or 0.0) * suggested_margin / 100.0
             campaign_leads.append(lead)
             cumulative_margin += margin
             estimated_cost += 20.0

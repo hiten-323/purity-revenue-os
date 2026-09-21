@@ -90,3 +90,15 @@ def test_unreachable_leads_are_ranked_not_dropped():
     db.commit()
 
     assert [l.company for l in _ordered(db)] == ["Sendable", "Not Yet"]
+
+
+def test_a_phone_only_lead_is_considered_contactable():
+    """Phone is a channel. A lead with only a number used to be invisible
+    to both outreach executors, so AI calling could never pick it up."""
+    db = _db()
+    db.add(B2BLead(company="Email Only Untrusted", coffee_buying_score=95,
+                   email="x@example.in", email_trust="DISCOVERED"))
+    db.add(B2BLead(company="Phone Only Cafe", coffee_buying_score=0,
+                   phone="9876543210"))
+    db.commit()
+    assert _ordered(db)[0].company == "Phone Only Cafe"

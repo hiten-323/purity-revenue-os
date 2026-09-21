@@ -244,7 +244,7 @@ def test_msisdn_normalisation_matches_the_sender():
 
 # ---------------------------------- verification: NULL is not the same as no --
 
-def test_null_verification_no_longer_blocks_but_a_negative_still_does(tmp_path):
+def test_null_verification_no_longer_blocks_but_a_negative_still_does(tmp_path, monkeypatch):
     """whatsapp_verified was set by Evolution's /chat/whatsappNumbers, a
     WhatsApp-Web capability. Meta exposes no equivalent — enumerating its users
     is exactly what it will not allow — so nobody can ask any more.
@@ -258,6 +258,7 @@ def test_null_verification_no_longer_blocks_but_a_negative_still_does(tmp_path):
     from app.services import outreach_orchestrator as o
     from conftest import memory_engine
 
+    monkeypatch.setenv("AISENSY_ENABLED", "1")
     eng = memory_engine()
     Base.metadata.create_all(eng)
     db = sessionmaker(bind=eng)()
@@ -285,7 +286,7 @@ def test_null_verification_no_longer_blocks_but_a_negative_still_does(tmp_path):
         eng.dispose()
 
 
-def test_consent_is_still_the_binding_gate(tmp_path):
+def test_consent_is_still_the_binding_gate(tmp_path, monkeypatch):
     """Relaxing verification must not have relaxed anything else. A lead with
     a number and no opt-in is still refused."""
     from sqlalchemy.orm import sessionmaker
@@ -294,6 +295,7 @@ def test_consent_is_still_the_binding_gate(tmp_path):
     from app.services import outreach_orchestrator as o
     from conftest import memory_engine
 
+    monkeypatch.setenv("AISENSY_ENABLED", "1")
     eng = memory_engine()
     Base.metadata.create_all(eng)
     db = sessionmaker(bind=eng)()

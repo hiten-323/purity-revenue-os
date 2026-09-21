@@ -355,7 +355,9 @@ def test_cold_call_is_routed_through_the_pipeline(db, monkeypatch):
 
     monkeypatch.setenv("NURAVEDA_ENABLED", "1")
     monkeypatch.setenv("NURAVEDA_TOOL_SECRET", "test")
+    monkeypatch.setenv("AI_CALLING_ENABLED", "1")
     monkeypatch.delenv("DND_SUPPRESSION_FILE", raising=False)
+
     pref._cache_key = None
 
     # check_eligibility gates on `division`, the pipeline on `segment`, and the
@@ -376,7 +378,7 @@ def test_cold_call_is_routed_through_the_pipeline(db, monkeypatch):
     assert lead.outreach_stage is None
 
 
-def test_division_and_segment_vocabularies_now_agree(db, registry):
+def test_division_and_segment_vocabularies_now_agree(db, registry, monkeypatch):
     """This test used to assert the opposite, and that was the point of it.
 
     check_eligibility gates `division`; the pipeline gates `segment`; the two
@@ -391,13 +393,14 @@ def test_division_and_segment_vocabularies_now_agree(db, registry):
     """
     from app.services.calling_agent import CallingAgentService
 
-    lead = _lead(db, segment="horeca", division="cafe", estimated_value=60000.0)
+    monkeypatch.setenv("AI_CALLING_ENABLED", "1")
+    lead = _lead(db, segment="horeca", division="cafe", estimated_value=0)
 
     ok, why = CallingAgentService.check_eligibility(db, lead)
     assert why != "invalid_segment", (
         "the division gate still refuses a category the segment gate allows")
-
-    # Callable by both readings now.
+    assert why != "low_margin"
+    assert ok is True, why
     assert p.may_place_ai_call(lead)[0] is True
 
 
@@ -524,7 +527,7 @@ def test_the_number_messaged_is_the_number_consented(db, registry):
     assert destination(lead) == lead.consent_phone, "and it is the one that would be messaged"
 
 
-def test_verification_alone_never_grants_whatsapp(db, registry):
+def test_verification_alone_never_grants_whatsapp(db, registry, monkeypatch):
     """The link this deliberately does NOT make.
 
     whatsapp_verified proves an account exists on a number. It is a technical
@@ -533,6 +536,7 @@ def test_verification_alone_never_grants_whatsapp(db, registry):
     """
     from app.services import outreach_orchestrator as o
 
+    monkeypatch.setenv("AISENSY_ENABLED", "1")
     lead = _lead(db)
     lead.whatsapp_number = "9876543210"
     lead.whatsapp_verified = True          # WhatsApp says the account exists
@@ -908,3 +912,31 @@ def test_the_founder_brief_lists_who_is_waiting(db, registry):
     assert waiting[0]["business"] == "Waiting Co"
     assert waiting[0]["phone"] == "9876543219"
     assert waiting[0]["callback"] == "tomorrow 11am"
+
+
+def test_opt_out_consent_refuses_the_call(db, registry):
+    lead = _lead(db, company="Opted Out Cafe", consent_status="OPT_OUT")
+    ok, why = p.may_place_ai_call(lead)
+    assert ok is False
+    assert "OPT_OUT" in why
+
+
+def test_duplicate_company_is_refused_by_the_calling_authority(db, registry):
+    _lead(db, company="Cafe Mocha Pvt Ltd", phone="9876511111", status="CONTACTED")
+    target = _lead(db, company="Cafe Mocha Private Limited", phone="9876522222")
+    ok, why = p.may_place_ai_call(target)
+    assert ok is False
+    assert "duplicate_company_active" in why
+
+
+def test_zero_estimated_value_is_not_a_call_block(db, registry):
+    """low_margin used estimated_value, which is 0 on most cafes."""
+    lead = _lead(db, company="Zero Value Cafe", estimated_value=0)
+    assert p.may_place_ai_call(lead)[0] is True
+
+
+def test_short_digit_run_is_not_dialable(db, registry):
+    lead = _lead(db, company="Short Phone Cafe", phone="12345")
+    ok, why = p.may_place_ai_call(lead)
+    assert ok is False
+    assert "not a dialable number" in why or "fabricated" in why

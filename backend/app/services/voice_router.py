@@ -98,6 +98,19 @@ def idempotency_key(lead) -> str:
     return f"purity-lead-{getattr(lead, 'id', 'x')}-{date.today():%Y%m%d}"
 
 
+def _flag(name: str, default: str = "0") -> bool:
+    return (os.getenv(name, default) or default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def calling_switched_on() -> bool:
+    """Process-wide arming switch. Default OFF.
+
+    Distinct from AI_CALLING_KILL_SWITCH: that is an emergency stop.
+    This is the production arm. Both must allow a dial.
+    """
+    return _flag("AI_CALLING_ENABLED")
+
+
 def kill_switch_engaged() -> bool:
     """Global stop for every outbound AI voice call, cold or consented.
 
@@ -108,7 +121,7 @@ def kill_switch_engaged() -> bool:
     only covers the cold path, and a kill switch that missed the consented
     path would not be one.
     """
-    return (os.getenv("AI_CALLING_KILL_SWITCH", "") or "").strip().lower() in ("1", "true", "yes", "on")
+    return _flag("AI_CALLING_KILL_SWITCH", default="")
 
 
 def place_call(lead, *, context: dict[str, Any] | None = None,
@@ -126,6 +139,8 @@ def place_call(lead, *, context: dict[str, Any] | None = None,
     """
     if kill_switch_engaged():
         return CallResult(placed=False, error="AI_CALLING_KILL_SWITCH is engaged — no outbound AI calls")
+    if not calling_switched_on():
+        return CallResult(placed=False, error="AI_CALLING_ENABLED is not set to 1 — no outbound AI calls")
 
     name = active()
     ok, detail = config_status()

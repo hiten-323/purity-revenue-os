@@ -177,6 +177,7 @@ def _dry_voice(monkeypatch):
         calls.append((lead_obj.id, context))
         return Result()
 
+    monkeypatch.setenv("AI_CALLING_ENABLED", "1")
     monkeypatch.setattr(voice_router, "config_status", lambda: (True, "configured"))
     monkeypatch.setattr(voice_router, "active", lambda: "nuraveda")
     monkeypatch.setattr(voice_router, "place_call", fake_place_call)
