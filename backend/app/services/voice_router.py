@@ -159,6 +159,12 @@ def place_call(lead, *, context: dict[str, Any] | None = None,
         "segment": getattr(lead, "segment", "") or "",
         **(context or {}),
     }
+    # Every dial must carry the disclosed opening. Call sites that omit it
+    # (e.g. an early personal_test) used to hit a long Hindi profile fallback
+    # that mismatched male TTS and got cut off mid-line on PSTN.
+    if not (ctx.get("opening") or "").strip():
+        from app.services import founder_call_pipeline as pipeline
+        ctx["opening"] = pipeline.opening_for(lead)
 
     mod = _adapter(name)
     return mod.place_call(phone, context=ctx, dry_run=dry_run,

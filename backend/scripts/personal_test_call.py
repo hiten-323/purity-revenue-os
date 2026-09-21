@@ -71,6 +71,9 @@ def main() -> int:
         city = ""
         segment = "cafe"
 
+    import time as _time
+    _Lead.id = f"personal-test-{int(_time.time())}"
+
     if args.dry_run or not args.i_am_the_founder:
         print("DRY RUN — no provider call")
         print("  allowlist ok:", tail)
@@ -90,7 +93,17 @@ def main() -> int:
         return 2
 
     from datetime import datetime
-    result = voice_router.place_call(_Lead(), dry_run=False, scheduled_at=datetime.utcnow())
+    from app.services import founder_call_pipeline as pipeline
+    # Always pass the disclosed opening. Without it the voice profile falls
+    # back to a long Hindi welcome that was getting cut off mid-line, and
+    # gender of that fallback must match the female Sarvam speakers.
+    lead = _Lead()
+    result = voice_router.place_call(
+        lead,
+        context={"opening": pipeline.opening_for(lead)},
+        dry_run=False,
+        scheduled_at=datetime.utcnow(),
+    )
     print("placed:", result.placed)
     print("provider_call_id:", result.provider_call_id)
     print("error:", result.error)
