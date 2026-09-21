@@ -205,38 +205,13 @@ def _metric_row(db: Session, category: str, channel: str) -> dict:
 
 
 def learn_from_lifecycle(db: Session, min_sample: int = 5) -> dict:
-    ensure_schema()
-    categories = sorted({p.category for p in db.query(OutreachProfile).all() if p.category})
-    learned = 0
-    for category in categories:
-        for channel in ("email", "whatsapp"):
-            metric = _metric_row(db, category, channel)
-            if metric["sent"] < min_sample:
-                continue
-            row = (
-                db.query(LearnedPattern)
-                .filter(
-                    LearnedPattern.scope == "category_channel",
-                    LearnedPattern.key == f"{category}:{channel}",
-                    LearnedPattern.metric == "reply_rate_pct",
-                )
-                .first()
-            )
-            if row is None:
-                row = LearnedPattern(
-                    scope="category_channel",
-                    key=f"{category}:{channel}",
-                    metric="reply_rate_pct",
-                )
-                db.add(row)
-            row.value = round(metric["reply_rate"], 2)
-            row.sample_size = metric["sent"]
-            row.wins = metric["replies"]
-            row.updated_at = datetime.utcnow()
-            learned += 1
-    if learned:
-        db.commit()
-    return {"patterns_updated": learned}
+    """Compatibility wrapper for the unified email + AI-call learning loop."""
+    from app.services.outreach_learning import rebuild_learning
+
+    result = rebuild_learning(db, min_sample=min_sample)
+    db.commit()
+    return result
+
 
 
 def _best_channel(db: Session, category: str) -> str:
