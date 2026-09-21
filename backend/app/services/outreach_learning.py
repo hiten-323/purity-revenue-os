@@ -16,26 +16,16 @@ from datetime import datetime, timedelta
 from math import sqrt
 from typing import Any
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models.models import B2BLead, EmailDraft, LeadInteraction, LearnedPattern, WorkflowEvent
+from app.models.models import B2BLead, EmailDraft, LearnedPattern, WorkflowEvent
 
 
 EMAIL_SENT = {"EMAIL_SENT"}
 EMAIL_DELIVERED = {"EMAIL_DELIVERED"}
 EMAIL_BOUNCED = {"EMAIL_BOUNCED", "HARD_BOUNCE"}
 EMAIL_REPLIES = {"EMAIL_REPLY_RECEIVED", "REPLY_RECEIVED", "EMAIL_REPLIED"}
-CALL_ATTEMPTS = {"AI_CALL_ATTEMPTED"}
-CALL_POSITIVE = {
-    "AI_INTEREST_DETECTED", "FOUNDER_CALL_REQUESTED",
-    "FOUNDER_CALL_COMPLETED", "COMMERCIAL_OPPORTUNITY",
-}
 CALL_NEGATIVE = {"AI_NOT_INTERESTED", "AI_WRONG_NUMBER", "AI_OPTED_OUT", "CLOSED_NO_FIT"}
-POSITIVE_INTENTS = {
-    "CATALOGUE_REQUESTED", "PRICING_REQUESTED", "SAMPLE_REQUESTED",
-    "MEETING_REQUESTED", "CALLBACK", "INTERESTED", "NEGOTIATION",
-}
 MIN_ADAPTATION_SAMPLE = 20
 
 
@@ -54,14 +44,6 @@ def _events(db: Session, lead_ids: list[int] | None = None, since_days: int = 90
 
 def _event_payload(event: WorkflowEvent) -> dict[str, Any]:
     return event.payload if isinstance(event.payload, dict) else {}
-
-
-def _call_outcome_events(events: list[WorkflowEvent]) -> list[WorkflowEvent]:
-    return [
-        e for e in events
-        if e.event_type == "AI_CALL_DETAILS"
-        and str(_event_payload(e).get("outcome") or "").upper()
-    ]
 
 
 def _rate(successes: int, trials: int) -> float:
@@ -119,7 +101,6 @@ def rebuild_learning(db: Session, *, since_days: int = 90, min_sample: int = 5) 
             grouped[(category, "ai_call")]["completed"] += 1
             if outcome in {"INTERESTED", "MEETING_REQUESTED", "CALLBACK_REQUESTED", "HUMAN_HANDOFF", "WHATSAPP_OPT_IN", "SEND_INFO_EMAIL"}:
                 grouped[(category, "ai_call")]["positive"] += 1
-                grouped[(category, "ai_call")]["conversations"] += 1
             if outcome in {"SAMPLE_REQUESTED", "CATALOGUE_REQUESTED"}:
                 grouped[(category, "ai_call")]["next_step"] += 1
 
@@ -138,8 +119,9 @@ def rebuild_learning(db: Session, *, since_days: int = 90, min_sample: int = 5) 
             g["delivered"] += 1
         if draft.delivery_status == "BOUNCED":
             g["bounced"] += 1
-        if draft.reply_status:
-            g["replies"] += 1
+        # Reply events are the authoritative inbound evidence. EmailDraft
+        # contributes delivery/bounce state here, but we do not count its
+        # reply_status again or the same reply would be double-counted.
 
     metrics = []
     for (category, channel), g in grouped.items():
