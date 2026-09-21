@@ -62,7 +62,7 @@ class CallingAgentService:
 
         The previous implementation used SQLite's strftime() against
         CallHistory.call_date, which is a no-op (or an error) on Neon
-        Postgres — so the 'daily cap' silently did not cap in production.
+        Postgres -- so the 'daily cap' silently did not cap in production.
         One counter, the one may_place_ai_call's caller already uses.
         """
         from app.services.founder_call_pipeline import calls_placed_today
@@ -81,7 +81,7 @@ class CallingAgentService:
         properties of a lead.
 
         low_margin is deliberately gone. estimated_value is 0 on most cafes,
-        so a 'safety' floor of ₹25k refused the priority segment without
+        so a 'safety' floor of Rs25k refused the priority segment without
         anyone deciding that. Commercial ranking belongs in campaign
         preview, not in the dial gate.
         """
@@ -90,9 +90,9 @@ class CallingAgentService:
 
         from app.services import voice_router
         if voice_router.kill_switch_engaged():
-            return False, "AI_CALLING_KILL_SWITCH is engaged — no outbound AI calls"
+            return False, "AI_CALLING_KILL_SWITCH is engaged -- no outbound AI calls"
         if not voice_router.calling_switched_on():
-            return False, "AI_CALLING_ENABLED is not set to 1 — no outbound AI calls"
+            return False, "AI_CALLING_ENABLED is not set to 1 -- no outbound AI calls"
 
         from app.services import founder_call_pipeline as pipeline
         if pipeline.daily_budget_remaining(db) <= 0:
@@ -108,6 +108,7 @@ class CallingAgentService:
     @staticmethod
     def _place_qualification_call(db, lead: B2BLead, pipeline, scheduled_at=None) -> tuple[bool, str]:
         """Place the disclosed cold qualification call through the sole voice authority."""
+        from app.services import voice_quality
         from app.services import voice_router
 
         result = voice_router.place_call(
@@ -115,8 +116,12 @@ class CallingAgentService:
             context={
                 "opening": pipeline.opening_for(lead),
                 "questions": list(pipeline.QUALIFICATION_QUESTIONS),
-                # Without these the model invents prices. Verified, not feared.
-                "constraints": list(pipeline.CALL_CONSTRAINTS),
+                # Commercial CALL_CONSTRAINTS + conversational voice-quality
+                # rules. One list in the payload so the sidecar cannot drop
+                # either set by reading a second field that does not exist.
+                "constraints": voice_quality.constraints_for_dispatch(
+                    pipeline.CALL_CONSTRAINTS
+                ),
                 "handoff_topics": list(pipeline.HANDOFF_TOPICS),
                 # From the record only, so "how did you get my number?" has a
                 # true answer and the agent never improvises one.
@@ -147,7 +152,7 @@ class CallingAgentService:
         The historical name is retained for callers that have not migrated yet.
         It has no VAPI implementation and cannot select a provider itself.
 
-        scheduled_at: see voice_router.place_call — an explicit override of
+        scheduled_at: see voice_router.place_call -- an explicit override of
         the provider's normal dispatch delay, for an operator-requested
         immediate test call. None (the default) changes nothing for every
         existing caller, including Smart Outreach.
@@ -171,7 +176,7 @@ class CallingAgentService:
         # the call sheet's "OK to email/WhatsApp?"). It used to unlock a
         # "consented call" path that skipped the DND registry scrub and the
         # one-call rule. Nothing records consent to be called, so no lead
-        # bypasses may_place_ai_call — check_eligibility already ran it.
+        # bypasses may_place_ai_call -- check_eligibility already ran it.
         return CallingAgentService._place_qualification_call(db, lead, pipeline, scheduled_at=scheduled_at)
 
     @staticmethod
