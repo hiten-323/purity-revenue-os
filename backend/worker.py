@@ -128,6 +128,19 @@ if __name__ == "__main__":
             else:
                 scrapling_note = "disabled"
 
+            # Learning is observation-only and may run even while outbound automation
+            # is OFF. It never grants permission or sends anything; it turns the
+            # real email/call history already in the DB into evidence for the next
+            # cycle. This keeps the learning loop warm before automation is enabled.
+            try:
+                from app.services.outreach_learning import rebuild_learning
+
+                learned = rebuild_learning(db)
+                db.commit()
+                logging.info("outreach learning: patterns_updated=%s", learned.get("patterns_updated"))
+            except Exception as e:
+                logging.error("outreach learning failed: %s", e)
+
             if enabled:
                 try:
                     from app.services.outreach_lifecycle import run_automatic_cycle
