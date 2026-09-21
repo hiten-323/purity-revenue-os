@@ -23,7 +23,17 @@ def test_allowlist_is_a_singleton():
         if isinstance(node, ast.Assign):
             for t in node.targets:
                 if isinstance(t, ast.Name) and t.id == "ALLOWED_TAILS":
-                    value = ast.literal_eval(node.value)
+                    value_node = node.value
+                    # ALLOWED_TAILS = frozenset({"9855593323"}) / set(...)
+                    if (
+                        isinstance(value_node, ast.Call)
+                        and isinstance(value_node.func, ast.Name)
+                        and value_node.func.id in ("frozenset", "set")
+                        and value_node.args
+                    ):
+                        value = ast.literal_eval(value_node.args[0])
+                    else:
+                        value = ast.literal_eval(value_node)
                     assert set(value) == {"9855593323"}
                     return
     raise AssertionError("ALLOWED_TAILS not found")
