@@ -4,8 +4,8 @@ from __future__ import annotations
 from sqlalchemy.orm import sessionmaker
 
 from app.database.database import Base
-from app.models.models import B2BLead, LearnedPattern, WorkflowEvent
-from app.services.smart_outreach import OutreachProfile, OutreachTouch
+from app.models.models import B2BLead
+from app.services.smart_outreach import OutreachProfile
 from app.services.outreach_intelligence.models import (
     OutreachEvent,
     OutreachExperienceAggregate,
