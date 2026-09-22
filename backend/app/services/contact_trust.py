@@ -160,6 +160,7 @@ def sweep(db, reverify=True) -> dict:
                              "note": "email_verified=1 with no trust level and no "
                                      "source — written outside the application"},
                     occurred_at=datetime.utcnow()))
+            stamp(l)  # own reconcile must not trip is_out_of_band below
         addr = (l.email or "").strip()
         if not addr:
             continue
