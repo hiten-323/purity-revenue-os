@@ -1,6 +1,8 @@
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, declarative_base
 import os
+import time
+import sqlite3
 
 _DEFAULT_DB = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "purity_beans.db"))
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -17,6 +19,17 @@ if DATABASE_URL:
 else:
     DATABASE_URL = f"sqlite:///{_DEFAULT_DB}"
 
+# SQLite busy wait also set via PRAGMA; connect timeout is a second line of defence
+# when the OS-level lock is held longer than a single statement.
+_SQLITE_TIMEOUT_S = float(os.getenv("SQLITE_BUSY_TIMEOUT_S", "60"))
+
+_connect_args = {}
+if "sqlite" in (DATABASE_URL or ""):
+    _connect_args = {
+        "check_same_thread": False,
+        "timeout": _SQLITE_TIMEOUT_S,
+    }
+
 # Pool MUST be sized for FastAPI's threadpool. Route handlers are sync `def`, so
 # FastAPI runs them in its threadpool (default 40 workers) and each holds a DB
 # session for the life of the request. SQLAlchemy's default pool is only
@@ -28,7 +41,7 @@ else:
 # WAL + check_same_thread=False handles these concurrent connections fine.
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
+    connect_args=_connect_args,
     pool_size=20,
     max_overflow=30,
     pool_timeout=30,
@@ -48,10 +61,14 @@ if "sqlite" in DATABASE_URL:
         WAL lets one writer and many readers run concurrently; busy_timeout makes
         a brief lock wait rather than raise "database is locked"; synchronous=
         NORMAL is the safe, fast pairing for WAL.
+
+        busy_timeout raised from 10s to 60s (override via SQLITE_BUSY_TIMEOUT_S)
+        because purity-api + purity-worker + purity-outreach + voice webhooks all
+        write the same file; 10s still timed out under concurrent call UPDATEs.
         """
         cur = dbapi_conn.cursor()
         cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA busy_timeout=10000")
+        cur.execute(f"PRAGMA busy_timeout={int(_SQLITE_TIMEOUT_S * 1000)}")
         cur.execute("PRAGMA synchronous=NORMAL")
         cur.close()
 
@@ -59,6 +76,55 @@ if "sqlite" in DATABASE_URL:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
+
+
+def is_sqlite_locked(exc: BaseException) -> bool:
+    """True for sqlite3 / SQLAlchemy OperationalError 'database is locked'."""
+    msg = str(exc).lower()
+    if "database is locked" in msg or "database is busy" in msg:
+        return True
+    if isinstance(exc, sqlite3.OperationalError) and "locked" in msg:
+        return True
+    return False
+
+
+def commit_with_retry(db, *, attempts: int = 6, base_delay: float = 0.05):
+    """
+    Commit with short exponential backoff on SQLite lock contention.
+
+    Multi-process writers (api/worker/outreach/webhooks) still race under WAL;
+    busy_timeout waits inside SQLite, this retries the whole commit if the
+    wait still expired. Do NOT hold the session across network I/O — commit
+    before dials, then call this for the post-dial lead UPDATE.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    last = None
+    for i in range(max(1, attempts)):
+        try:
+            db.commit()
+            return
+        except OperationalError as e:
+            last = e
+            if not is_sqlite_locked(e) or i == attempts - 1:
+                raise
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            time.sleep(base_delay * (2 ** i))
+        except sqlite3.OperationalError as e:
+            last = e
+            if not is_sqlite_locked(e) or i == attempts - 1:
+                raise
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            time.sleep(base_delay * (2 ** i))
+    if last:
+        raise last
+
 
 def get_db():
     db = SessionLocal()
