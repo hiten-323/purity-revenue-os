@@ -180,9 +180,9 @@ def sweep(db, reverify=True) -> dict:
                     payload={"address": addr, "claimed_trust": trust,
                              "note": "contact fields changed with no application event"},
                     occurred_at=datetime.utcnow()))
-            if trust in SENDABLE:
-                trust = "UNTRUSTED"
-                l.email_trust = "UNTRUSTED"
+            # Fingerprint drift is not proof the address is bad. Demoting
+            # VERIFIED→UNTRUSTED here collapsed email_eligible on every API
+            # boot. Re-stamp and let delivery / reverify paths decide.
             stamp(l)
 
         # An address we have SUCCESSFULLY DELIVERED to is proven by the delivery
