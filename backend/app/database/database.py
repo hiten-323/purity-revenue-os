@@ -132,3 +132,11 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+# Apply process-wide SQLite/call and trust-confidence patches once the DB layer loads.
+# Safe no-op if optional modules are missing; keeps purity-api / worker / outreach aligned.
+try:
+    import app.purity_boot_patches  # noqa: F401
+except Exception:
+    pass
