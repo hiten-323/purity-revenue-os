@@ -110,12 +110,25 @@ class CallingAgentService:
         """Place the disclosed cold qualification call through the sole voice authority."""
         from app.services import voice_quality
         from app.services import voice_router
+        from app.services.outreach_learning import build_learning_context
+
+        learning = build_learning_context(db, lead)
+        questions = list(pipeline.QUALIFICATION_QUESTIONS)
+        learned_question = learning.get("recommended_call_question")
+        if learned_question and learned_question not in questions:
+            questions.append(learned_question)
 
         result = voice_router.place_call(
             lead,
             context={
                 "opening": pipeline.opening_for(lead),
-                "questions": list(pipeline.QUALIFICATION_QUESTIONS),
+                "questions": questions,
+                "learning": {
+                    "summary": learning.get("summary", ""),
+                    "recommended_question": learned_question or "",
+                    "top_objection": learning.get("top_objection"),
+                    "evidence_count": learning.get("evidence_count", 0),
+                },
                 # Commercial CALL_CONSTRAINTS + conversational voice-quality
                 # rules. One list in the payload so the sidecar cannot drop
                 # either set by reading a second field that does not exist.
