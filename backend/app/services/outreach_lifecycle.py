@@ -205,19 +205,24 @@ def _metric_row(db: Session, category: str, channel: str) -> dict:
 
 
 def learn_from_lifecycle(db: Session, min_sample: int = 5) -> dict:
+    """Refresh measured cross-lead memory for email and AI calling.
+
+    This function records evidence; it never chooses a single channel. The
+    automatic cycle executes every independently eligible channel. The next
+    lead consumes this memory through outreach_learning.build_learning_context.
+    """
     ensure_schema()
     categories = sorted({p.category for p in db.query(OutreachProfile).all() if p.category})
     learned = 0
+
     for category in categories:
-        for channel in ("email", "whatsapp"):
-            metric = _metric_row(db, category, channel)
-            if metric["sent"] < min_sample:
-                continue
+        metric = _metric_row(db, category, "email")
+        if metric["sent"] >= min_sample:
             row = (
                 db.query(LearnedPattern)
                 .filter(
                     LearnedPattern.scope == "category_channel",
-                    LearnedPattern.key == f"{category}:{channel}",
+                    LearnedPattern.key == f"{category}:email",
                     LearnedPattern.metric == "reply_rate_pct",
                 )
                 .first()
@@ -225,7 +230,7 @@ def learn_from_lifecycle(db: Session, min_sample: int = 5) -> dict:
             if row is None:
                 row = LearnedPattern(
                     scope="category_channel",
-                    key=f"{category}:{channel}",
+                    key=f"{category}:email",
                     metric="reply_rate_pct",
                 )
                 db.add(row)
@@ -234,26 +239,53 @@ def learn_from_lifecycle(db: Session, min_sample: int = 5) -> dict:
             row.wins = metric["replies"]
             row.updated_at = datetime.utcnow()
             learned += 1
+
+        # Calling is learned independently from the email channel. A call is
+        # successful only when its recorded outcome is a real conversation
+        # outcome; dialing/queueing alone is never a "win".
+        peers = (
+            db.query(B2BLead)
+            .join(OutreachProfile, OutreachProfile.lead_id == B2BLead.id)
+            .filter(OutreachProfile.category == category)
+            .all()
+        )
+        outcomes = [
+            str(getattr(lead, "call_outcome_last", "") or "").upper()
+            for lead in peers
+            if getattr(lead, "call_outcome_last", None)
+        ]
+        if len(outcomes) >= min_sample:
+            positive = {
+                "INTERESTED", "SEND_DETAILS", "SEND_PRICING",
+                "SAMPLE_REQUESTED", "MEETING_REQUESTED", "CALLBACK",
+                "PRICE_OBJECTION", "EXISTING_SUPPLIER",
+            }
+            wins = sum(1 for x in outcomes if x in positive)
+            row = (
+                db.query(LearnedPattern)
+                .filter(
+                    LearnedPattern.scope == "category_channel",
+                    LearnedPattern.key == f"{category}:phone",
+                    LearnedPattern.metric == "positive_rate_pct",
+                )
+                .first()
+            )
+            if row is None:
+                row = LearnedPattern(
+                    scope="category_channel",
+                    key=f"{category}:phone",
+                    metric="positive_rate_pct",
+                )
+                db.add(row)
+            row.value = round(wins / len(outcomes) * 100.0, 2)
+            row.sample_size = len(outcomes)
+            row.wins = wins
+            row.updated_at = datetime.utcnow()
+            learned += 1
+
     if learned:
         db.commit()
     return {"patterns_updated": learned}
-
-
-def _best_channel(db: Session, category: str) -> str:
-    candidates = []
-    for channel in ("email", "whatsapp"):
-        row = (
-            db.query(LearnedPattern)
-            .filter(
-                LearnedPattern.scope == "category_channel",
-                LearnedPattern.key == f"{category}:{channel}",
-                LearnedPattern.metric == "reply_rate_pct",
-            )
-            .first()
-        )
-        if row and row.sample_size >= 5:
-            candidates.append((float(row.value), channel))
-    return max(candidates, default=(0.0, "email"))[1]
 
 
 def run_automatic_cycle(db: Session, limit: int = 20) -> dict:
@@ -275,20 +307,10 @@ def run_automatic_cycle(db: Session, limit: int = 20) -> dict:
         try:
             profile = classify_lead(db, lead)
             decision = plan_touch(db, lead, profile)
-            if decision.get("execute") and decision.get("action") in (
-                "WARM_FIRST_TOUCH",
-                "WARM_FOLLOW_UP",
-            ):
-                preferred = _best_channel(db, profile.category)
-                if preferred == "whatsapp":
-                    from app.services.whatsapp_sender import consent_check
-
-                    allowed, _ = consent_check(lead)
-                    if not allowed:
-                        preferred = "email"
-                profile.preferred_channel = preferred
-                db.flush()
-            # SEND_CATALOGUE, warm touches, and skips all go through execute_one
+            # Do not pick a "best" channel here. plan_channels/run_cycle owns
+            # independent eligibility and executes every eligible method.
+            # Learning only shapes the content/questions of each method.
+            # SEND_CATALOGUE, warm touches, and skips all go through execute_one.
             results.append({"lead_id": lead.id, "company": lead.company, **execute_one(db, lead)})
         except Exception as exc:
             db.rollback()

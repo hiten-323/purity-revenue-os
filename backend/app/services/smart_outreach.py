@@ -769,6 +769,32 @@ def _record(
     return touch
 
 
+def _adapt_email_to_learning(body: str, learning: dict) -> str:
+    """Apply learned cross-lead evidence without changing channel permission.
+
+    This is intentionally additive. The baseline category copy remains intact;
+    only the CTA emphasis changes when comparable evidence is strong enough.
+    """
+    if not learning or not learning.get("learned_intent"):
+        return body
+    intent = learning["learned_intent"]
+    cta = {
+        "SAMPLE_REQUESTED": "If useful, I can arrange a small sample so you can evaluate it first.",
+        "CATALOGUE_REQUESTED": "If useful, I can send the catalogue and pack-size range.",
+        "PRICING_REQUESTED": "If commercial details are useful, I can have the founder share the current terms.",
+        "MEETING_REQUESTED": "If useful, we can arrange a short conversation with the founder.",
+        "CALLBACK": "If useful, tell me a convenient time and the founder can follow up.",
+        "INTERESTED": "If useful, I can send the range and a sample option.",
+    }.get(intent)
+    if not cta:
+        return body
+    # Avoid repeating a CTA already present in the baseline template.
+    low = body.lower()
+    if any(token in low for token in ("sample", "catalogue", "catalog", "commercial details", "founder")):
+        return body
+    return body.rstrip() + "\n\n" + cta
+
+
 def execute_one(db: Session, lead: B2BLead) -> dict:
     profile = classify_lead(db, lead)
     decision = plan_touch(db, lead, profile)
@@ -801,15 +827,18 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
 
     if decision["channel"] == "email":
         from app.services.email_sender import build_outreach_email, send_email, whatsapp_ask
+        from app.services.outreach_learning import build_learning_context
 
         proven_n = len(_proven_email_touches(db, lead.id))
         seq = _sequence_state(db, lead)
         touch_name = (seq.get("next_touch") or ("intro" if proven_n == 0 else "nudge"))
+        learning = build_learning_context(db, lead, profile)
         subject, body = render_email(
             lead, profile,
             1 if proven_n == 0 else 2,
             touch=touch_name,
         )
+        body = _adapt_email_to_learning(body, learning)
         if decision["action"] == "SEND_CATALOGUE":
             import os
 
@@ -860,6 +889,7 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
             ),
             error=result.error,
             message_id=result.message_id,
+            learning=learning,
         )
         db.commit()
         return {**decision, "status": status, "error": result.error, "message_id": result.message_id}
