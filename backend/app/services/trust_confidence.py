@@ -3,8 +3,13 @@
 Fixes VERIFIED-at-confidence-0 / stuck VALIDATED by syncing email_confidence
 from confidence_for (+ live tech) when provenance warrants it. Does NOT invent
 emails, bypass bounce/purge/opt-out, or lower CONFIDENCE_FLOOR.
+
+Also wraps trust_promoter.run so the nightly worker sweep auto-runs a limited
+confidence sync without editing worker.py.
 """
 from __future__ import annotations
+
+import os
 
 from app.services import trust_promoter as tp
 
@@ -126,6 +131,8 @@ def run_limited_sweep(db, *, limit: int = 80, verify: bool = True) -> dict:
 
 
 _EVALUATE_PATCHED = False
+_RUN_PATCHED = False
+
 
 def patch_evaluate_scoring() -> None:
     global _EVALUATE_PATCHED
@@ -139,8 +146,39 @@ def patch_evaluate_scoring() -> None:
     tp.evaluate = _evaluate  # type: ignore[assignment]
     _EVALUATE_PATCHED = True
 
+
+def patch_trust_run() -> None:
+    """After trust_promoter.run, sync confidence for VALIDATED / low-conf VERIFIED."""
+    global _RUN_PATCHED
+    if _RUN_PATCHED: return
+    if not hasattr(tp, "run"):
+        return
+    _orig = tp.run
+    def _run(db, limit: int = 0, verify: bool = True):
+        result = _orig(db, limit=limit, verify=verify)
+        try:
+            conf_limit = max(1, min(100, int(os.getenv("TRUST_CONFIDENCE_SWEEP_LIMIT", "80"))))
+            cf = run_limited_sweep(db, limit=conf_limit, verify=verify)
+            if isinstance(result, dict):
+                result["confidence_sweep"] = {
+                    k: cf.get(k) for k in (
+                        "considered", "moved", "confidence_synced",
+                        "may_send_in_batch", "before", "after",
+                    )
+                }
+        except Exception as e:
+            if isinstance(result, dict):
+                result["confidence_sweep_error"] = f"{e.__class__.__name__}: {e}"
+        return result
+    tp.run = _run  # type: ignore[assignment]
+    _RUN_PATCHED = True
+
+
 try: patch_evaluate_scoring()
 except Exception: pass
+try: patch_trust_run()
+except Exception: pass
+
 
 def patch_contact_trust_grant() -> None:
     try:
