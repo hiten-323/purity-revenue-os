@@ -18,6 +18,7 @@ from app.services.outreach_intelligence.event_ledger import (
 from app.services.outreach_intelligence.experience_store import (
     build_lead_outreach_profile,
     retrieve_similar_lead_experience,
+    MIN_EVIDENCE,
 )
 from app.services.outreach_intelligence.learning_loop import (
     on_outreach_event,
@@ -25,6 +26,7 @@ from app.services.outreach_intelligence.learning_loop import (
     apply_correction,
 )
 from app.services.outreach_intelligence.report import build_intelligence_report
+from app.services.outreach_intelligence.boot import register_outreach_intelligence
 from app.services.outreach_intelligence.outcomes import (
     classify_email_reply,
     extract_call_commercial_signals,
@@ -42,6 +44,7 @@ __all__ = [
     "ensure_outreach_intelligence_schema",
     "build_lead_outreach_profile",
     "retrieve_similar_lead_experience",
+    "MIN_EVIDENCE",
     "on_outreach_event",
     "recalculate_segment_stats",
     "apply_correction",
@@ -49,4 +52,5 @@ __all__ = [
     "classify_email_reply",
     "extract_call_commercial_signals",
     "outcome_level",
+    "register_outreach_intelligence",
 ]
