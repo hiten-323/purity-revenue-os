@@ -131,17 +131,19 @@ async def startup():
             _db.close()
     except Exception as _e:
         print(f"[trust-sweep] skipped: {_e}")
-    import app.models.models
-    import app.services.founder_actions  # noqa: F401
-    import app.models.send_proof_fix  # noqa: F401
-    import app.services.whatsapp_gateway.models  # noqa: F401
-    import app.models.marketplace_intel  # noqa: F401
+    import importlib as _il
+    _il.import_module("app.models.models")
+    _il.import_module("app.services.founder_actions")
+    _il.import_module("app.models.send_proof_fix")
+    _il.import_module("app.services.whatsapp_gateway.models")
+    _il.import_module("app.models.marketplace_intel")
     from app.services.call_outcome_failclosed import install as _install_call_outcome
     _install_call_outcome()
     Base.metadata.create_all(bind=engine)
     # Outreach Intelligence V1 (ledger / experience / report). Advisory only.
+    # Use importlib + globals()["app"] so `import app.*` cannot shadow FastAPI app.
     from app.services.outreach_intelligence.boot import register_outreach_intelligence
-    register_outreach_intelligence(app, engine)
+    register_outreach_intelligence(globals()["app"], engine)
     if engine.dialect.name == "postgresql":
         assert_schema_compatible(engine, Base.metadata)
 
