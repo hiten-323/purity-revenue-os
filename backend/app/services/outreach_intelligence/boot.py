@@ -1,4 +1,4 @@
-﻿"""Startup helpers for Outreach Intelligence V1.
+"""Startup helpers for Outreach Intelligence V1.
 
 Call `register_outreach_intelligence(fastapi_app, engine)` from main.py after create_all.
 Does not enable any outreach kill-switch flags.
