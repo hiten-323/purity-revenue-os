@@ -139,6 +139,9 @@ async def startup():
     from app.services.call_outcome_failclosed import install as _install_call_outcome
     _install_call_outcome()
     Base.metadata.create_all(bind=engine)
+    # Outreach Intelligence V1 (ledger / experience / report). Advisory only.
+    from app.services.outreach_intelligence.boot import register_outreach_intelligence
+    register_outreach_intelligence(app, engine)
     if engine.dialect.name == "postgresql":
         assert_schema_compatible(engine, Base.metadata)
 
