@@ -146,7 +146,8 @@ def test_thin_evidence_does_not_adapt():
         ctx = build_learning_context(db, current)
         assert ctx["learned_intent"] is None
         assert ctx["evidence_count"] == 0
-        assert "baseline" in ctx["summary"]
+        assert ctx["recommended_cta"] == "catalogue"
+        assert "learned CTA" not in ctx["summary"]
     finally:
         db.close()
         engine.dispose()
