@@ -145,6 +145,24 @@ class CallingAgentService:
         if not result.placed:
             return False, f"provider_refused: {result.error}"
 
+        # Persist exactly what cross-lead experience influenced this call.
+        # This is audit/memory, not a permission decision.
+        from app.models.models import WorkflowEvent
+        db.add(WorkflowEvent(
+            lead_id=lead.id,
+            event_type="AI_CALL_LEARNING_CONTEXT",
+            actor="SMART_OUTREACH",
+            channel="call",
+            payload={
+                "summary": learning.get("summary", ""),
+                "recommended_question": learned_question or "",
+                "top_objection": learning.get("top_objection"),
+                "evidence_count": learning.get("evidence_count", 0),
+                "category": learning.get("category"),
+            },
+            occurred_at=datetime.utcnow(),
+        ))
+
         pipeline.advance(
             lead,
             db,
