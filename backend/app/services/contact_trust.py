@@ -167,15 +167,23 @@ def sweep(db, reverify=True) -> dict:
 
         if is_out_of_band(l):
             flagged += 1
-            db.add(WorkflowEvent(
-                lead_id=l.id, event_type="OUT_OF_BAND_MODIFICATION",
-                actor="SYSTEM", channel="trust",
-                payload={"address": addr, "claimed_trust": trust,
-                         "note": "contact fields changed with no application event"},
-                occurred_at=datetime.utcnow()))
+            # Emit at most one OOB event per mismatch cycle, then re-stamp so
+            # every API boot does not stack MANUAL_EDIT -35 forever.
+            prior = db.query(WorkflowEvent).filter(
+                WorkflowEvent.lead_id == l.id,
+                WorkflowEvent.event_type == "OUT_OF_BAND_MODIFICATION",
+            ).count()
+            if prior == 0:
+                db.add(WorkflowEvent(
+                    lead_id=l.id, event_type="OUT_OF_BAND_MODIFICATION",
+                    actor="SYSTEM", channel="trust",
+                    payload={"address": addr, "claimed_trust": trust,
+                             "note": "contact fields changed with no application event"},
+                    occurred_at=datetime.utcnow()))
             if trust in SENDABLE:
                 trust = "UNTRUSTED"
                 l.email_trust = "UNTRUSTED"
+            stamp(l)
 
         # An address we have SUCCESSFULLY DELIVERED to is proven by the delivery
         # itself. The sweep was purging exactly those: admin@bgtechvista.com was

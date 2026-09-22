@@ -205,12 +205,36 @@ def confidence_for(lead, db) -> dict:
         elif e.event_type == "SAMPLE_REQUESTED":
             w = ("SAMPLE_REQUEST", EVIDENCE_WEIGHT["SAMPLE_REQUEST"])
         elif e.event_type in ("EMAIL_BOUNCED", "HARD_BOUNCE"):
-            score += PENALTY["BOUNCE"]
-            contributed.append(f"BOUNCE {PENALTY['BOUNCE']}")
+            # One bounce kind is enough — stacking destroyed recoverable scores.
+            if "BOUNCE" not in seen:
+                seen.add("BOUNCE")
+                score += PENALTY["BOUNCE"]
+                contributed.append(f"BOUNCE {PENALTY['BOUNCE']}")
             continue
         elif e.event_type == "OUT_OF_BAND_MODIFICATION":
-            score += PENALTY["MANUAL_EDIT"]
-            contributed.append(f"MANUAL_EDIT {PENALTY['MANUAL_EDIT']}")
+            # Integrity sweeps log fingerprint drift as OUT_OF_BAND. That is
+            # bookkeeping, not a human rewriting the address — do not punish
+            # MX/website-proven contacts with MANUAL_EDIT -35 for it.
+            # Only real external address edits (non-SYSTEM actor, or payload
+            # showing an address change) count, and only once.
+            payload = e.payload or {}
+            actor = (getattr(e, "actor", None) or "").upper()
+            note = str(payload.get("note") or "")
+            is_fingerprint_noise = (
+                actor in ("SYSTEM", "")
+                and (
+                    "fingerprint" in note.lower()
+                    or "no application event" in note.lower()
+                    or "email_verified=1" in note.lower()
+                    or "contact fields changed" in note.lower()
+                )
+            )
+            if is_fingerprint_noise:
+                continue
+            if "MANUAL_EDIT" not in seen:
+                seen.add("MANUAL_EDIT")
+                score += PENALTY["MANUAL_EDIT"]
+                contributed.append(f"MANUAL_EDIT {PENALTY['MANUAL_EDIT']}")
             continue
         if w and w[0] not in seen:          # each KIND of evidence counts once
             seen.add(w[0])
