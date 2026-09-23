@@ -115,7 +115,7 @@ const apps = [
         DND_SUPPRESSION_FILE: need("DND_SUPPRESSION_FILE"),
         AUTO_WARM_ENABLED: "1",
         SMART_OUTREACH_ENABLED: "0",
-        AUTO_OUTREACH_ENABLED: "0",
+        AUTO_OUTREACH_ENABLED: "1",
         AISENSY_ENABLED: "0",
         AI_CALLING_ENABLED: "0",
         SENDER_EMAIL: ENV.SENDER_EMAIL || "connect@purepantryprovisions.com",

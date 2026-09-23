@@ -21,6 +21,7 @@ except Exception as _e:
     print(f"[email_sender] .env load skipped: {_e}")
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.utils import formataddr, getaddresses
 from dataclasses import dataclass
 from datetime import datetime
 from sqlalchemy.orm import Session
@@ -185,6 +186,26 @@ def domain_is_deliverable(email_addr: str, timeout: float = 5.0) -> bool:
 
 
 def send_email(email: OutreachEmail) -> OutreachEmail:
+    # Read identity at dispatch time so a long-running worker cannot retain a
+    # stale/blank From identity after environment configuration changes.
+    sender_email = (os.getenv("SENDER_EMAIL") or SENDER_EMAIL or "").strip()
+    sender_name = (os.getenv("SENDER_NAME") or SENDER_NAME or "").strip()
+    _to = (email.to_email or "").strip().lower()
+    _is_self = _to == sender_email.lower()
+
+    # All prospect sends are hard-held outside India business hours. Founder
+    # previews/verification mail to the sender's own inbox are exempt.
+    if not _is_self:
+        try:
+            from app.services.business_hours import is_open
+            if not is_open():
+                return _gate_failure(email, "outside outreach business hours (Asia/Kolkata 09:00-18:00)")
+        except Exception as _exc:
+            return _gate_failure(email, "business-hours gate unavailable; email not sent", _exc)
+
+    if not sender_email or "@" not in sender_email:
+        return _gate_failure(email, "invalid sender identity; email not sent")
+
     if not SENDER_PASSWORD:
         email.status = "failed"
         email.error = "ZOHO_APP_PASSWORD not set in .env — get it from accounts.zoho.in → Security → App Passwords"
@@ -208,8 +229,6 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
     # a guess, and guesses are what produced 63 NXDOMAIN failures and got the
     # Zoho account flagged. Mail addressed to the founder's own inbox (draft
     # previews) is exempt — that is not outbound to a prospect.
-    _to = (email.to_email or "").strip().lower()
-    _is_self = _to == (SENDER_EMAIL or "").strip().lower()
     if not _is_self and getattr(email, "lead_id", None):
         try:
             from app.database.database import SessionLocal
@@ -397,12 +416,16 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = email.subject
-    msg["From"]    = f"{SENDER_NAME} <{SENDER_EMAIL}>"
+    from_header = formataddr((sender_name, sender_email))
+    parsed_from = getaddresses([from_header])
+    if len(parsed_from) != 1 or parsed_from[0][1].strip().lower() != sender_email.lower():
+        return _gate_failure(email, "invalid RFC5322 From header; email not sent")
+    msg["From"]    = from_header
     msg["To"]      = f"{email.to_name} <{email.to_email}>" if email.to_name else email.to_email
-    msg["Reply-To"] = SENDER_EMAIL
+    msg["Reply-To"] = sender_email
     msg["Message-ID"] = msg_id
     if not _is_self:
-        msg["List-Unsubscribe"] = f"<mailto:{SENDER_EMAIL}?subject=unsubscribe>"
+        msg["List-Unsubscribe"] = f"<mailto:{sender_email}?subject=unsubscribe>"
 
     msg.attach(MIMEText(email.body_text, "plain", "utf-8"))
     msg.attach(MIMEText(email.body_html or _text_to_html(email.body_text), "html", "utf-8"))
@@ -412,8 +435,8 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
             smtp.ehlo()
             smtp.starttls()
             smtp.ehlo()
-            smtp.login(SENDER_EMAIL, SENDER_PASSWORD)
-            smtp.sendmail(SENDER_EMAIL, email.to_email, msg.as_string())
+            smtp.login(sender_email, SENDER_PASSWORD)
+            smtp.sendmail(sender_email, email.to_email, msg.as_string())
         email.status = "sent"
         email.sent_at = datetime.utcnow().isoformat()
         email.smtp_response = "250 OK - Accepted for delivery"
