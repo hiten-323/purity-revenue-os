@@ -63,7 +63,7 @@ if "sqlite" in DATABASE_URL:
         NORMAL is the safe, fast pairing for WAL.
 
         busy_timeout raised from 10s to 60s (override via SQLITE_BUSY_TIMEOUT_S)
-        because purity-api + purity-worker + purity-outreach + voice webhooks all
+        because purity-api + purity-worker + voice webhooks all
         write the same file; 10s still timed out under concurrent call UPDATEs.
         """
         cur = dbapi_conn.cursor()
