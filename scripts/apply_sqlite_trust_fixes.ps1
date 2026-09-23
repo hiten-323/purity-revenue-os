@@ -70,7 +70,7 @@ python -m scripts.trust_confidence_sweep --counts-only
 
 Set-Location $Root
 Write-Host "=== Restarting purity-api, purity-worker ==="
-pm2 restart purity-api purity-worker purity-outreach
+pm2 restart purity-api purity-worker
 Start-Sleep -Seconds 8
 pm2 list
 
