@@ -33,10 +33,6 @@ const CLOUDFLARED = process.env.CLOUDFLARED_BIN || "cloudflared";
 const BACKEND_DIR = path.join(ROOT, "backend");
 const FRONTEND_DIR = path.join(ROOT, "frontend");
 
-// Deterministic voice-sidecar cwd. Prefer NURAVEDA_DIR from the environment
-// (or backend/.env), then a sibling checkout, then an in-repo mirror. Refuse
-// to invent a path that does not exist -- a silent wrong cwd is how LiveKit
-// agents start "online" while dialling into silence.
 function resolveNuravedaDir() {
   const candidates = [
     process.env.NURAVEDA_DIR,
@@ -64,7 +60,6 @@ function mustExist(label, filePath) {
 
 mustExist("backend run_server.py", path.join(BACKEND_DIR, "run_server.py"));
 mustExist("backend worker.py", path.join(BACKEND_DIR, "worker.py"));
-mustExist("backend smart_outreach_worker.py", path.join(BACKEND_DIR, "smart_outreach_worker.py"));
 if (NURAVEDA_DIR) {
   mustExist("nuraveda server", path.join(NURAVEDA_DIR, "src", "server.js"));
   mustExist("nuraveda livekit agent", path.join(NURAVEDA_DIR, "src", "livekit-agent.js"));
@@ -128,29 +123,6 @@ const apps = [
         ZOHO_APP_PASSWORD: need("ZOHO_APP_PASSWORD"),
         CEREBRAS_API_KEY: need("CEREBRAS_API_KEY"),
         GOOGLE_MAPS_API_KEY: need("GOOGLE_MAPS_API_KEY"),
-      },
-    },
-    {
-      name: "purity-outreach",
-      script: PYTHON,
-      args: "smart_outreach_worker.py",
-      cwd: BACKEND_DIR,
-      interpreter: "none",
-      autorestart: false,
-      env: {
-        PYTHONUNBUFFERED: "1",
-        AUTO_OUTREACH_ENABLED: "0",
-        SMART_OUTREACH_ENABLED: "0",
-        AI_CALLING_ENABLED: "0",
-        OUTREACH_INTERVAL_SECONDS: "900",
-        OUTREACH_BATCH_SIZE: "20",
-        SENDER_EMAIL: ENV.SENDER_EMAIL || "connect@purepantryprovisions.com",
-        SENDER_NAME: ENV.SENDER_NAME || "Hiten Jain | Pure Pantry Provisions",
-        ZOHO_APP_PASSWORD: need("ZOHO_APP_PASSWORD"),
-        AISENSY_ENABLED: "0",
-        AISENSY_API_KEY: need("AISENSY_API_KEY"),
-        WHATSAPP_TEMPLATE: ENV.WHATSAPP_TEMPLATE || "",
-        AISENSY_CAMPAIGN_NAME: ENV.AISENSY_CAMPAIGN_NAME || "",
       },
     },
     {
