@@ -75,7 +75,6 @@ Start-Sleep -Seconds 8
 pm2 list
 
 Write-Host "=== Recent lock / trust lines ==="
-pm2 logs purity-outreach --lines 80 --nostream 2>$null | Select-String -Pattern "database is locked" | Select-Object -Last 20
 pm2 logs purity-worker --lines 60 --nostream 2>$null | Select-String -Pattern "database is locked|confidence sweep|trust sweep" | Select-Object -Last 20
 
 Write-Host "DONE. AISENSY untouched (must stay 0). Smart/Auto/AI calling not disabled."
