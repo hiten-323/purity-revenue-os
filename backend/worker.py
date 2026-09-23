@@ -4,14 +4,14 @@ Auto-Warm background worker — runs in its OWN process.
 Each cycle syncs replies, reconciles contact trust from evidence already on
 record (a maintenance sweep, on its own slower cadence), updates conversation
 memory, classifies leads, and
-— only when SMART_OUTREACH_ENABLED is explicitly on — executes due
+— only when AUTO_OUTREACH_ENABLED is explicitly on — executes due
 consent-safe automatic email/WhatsApp outreach and learns measured
 category/channel reply rates.
 
 Ordinary outreach requires no founder approval. Commercial pricing/discount
 policy remains governed by its existing gates.
 
-Default: SMART_OUTREACH_ENABLED=0 so merge ≠ live sending.
+Default: AUTO_OUTREACH_ENABLED=0 so merge ≠ live sending.
 """
 import logging
 import os
@@ -39,9 +39,9 @@ if __name__ == "__main__":
 
     cycle_sec = int(os.getenv("SMART_OUTREACH_CYCLE_SECONDS", "600"))
     # Default OFF: production must opt in after /health + controlled send proof.
-    enabled = os.getenv("SMART_OUTREACH_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+    enabled = os.getenv("AUTO_OUTREACH_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
     limit = max(1, min(100, int(os.getenv("SMART_OUTREACH_LIMIT", "20"))))
-    logging.info("Adaptive outreach: enabled=%s limit=%s cycle=%ss", enabled, limit, cycle_sec)
+    logging.info("Auto outreach: enabled=%s limit=%s cycle=%ss", enabled, limit, cycle_sec)
 
     # Scrapling is an OPTIONAL web-intelligence dependency. It is deliberately
     # disabled by default and has no outbound-channel authority.
@@ -142,7 +142,7 @@ if __name__ == "__main__":
                 except Exception as e:
                     logging.error("smart outreach cycle failed: %s", e)
             else:
-                logging.info("smart outreach disabled (set SMART_OUTREACH_ENABLED=1 after runtime gate)")
+                logging.info("auto outreach disabled (set AUTO_OUTREACH_ENABLED=1 after runtime gate)")
 
             try:
                 from app.services.sequence_engine import prepare_due_drafts
@@ -172,13 +172,13 @@ if __name__ == "__main__":
                     db,
                     {
                         "reply_sync": str(rep)[:120],
-                        "smart_outreach": "enabled" if enabled else "disabled",
+                        "auto_outreach": "enabled" if enabled else "disabled",
                         "trust_sweep": sweep_note,
                         "scrapling": scrapling_note,
                     },
                 )
                 beat(
-                    "smart_outreach",
+                    "auto_outreach",
                     db,
                     {
                         "note": "classify -> evaluate_next_action -> execute -> learn",
