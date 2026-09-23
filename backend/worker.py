@@ -1,17 +1,15 @@
 """
-Auto-Warm background worker — runs in its OWN process.
+Auto-Warm + autonomous outreach worker — runs in its OWN process.
 
-Each cycle syncs replies, reconciles contact trust from evidence already on
-record (a maintenance sweep, on its own slower cadence), updates conversation
-memory, classifies leads, and
-— only when SMART_OUTREACH_ENABLED is explicitly on — executes due
-consent-safe automatic email/WhatsApp outreach and learns measured
+Each cycle syncs replies, reconciles contact trust, updates conversation
+memory, classifies leads, and — only when AUTO_OUTREACH_ENABLED is explicitly
+on — executes due consent-safe automatic email outreach and learns measured
 category/channel reply rates.
 
 Ordinary outreach requires no founder approval. Commercial pricing/discount
 policy remains governed by its existing gates.
 
-Default: SMART_OUTREACH_ENABLED=0 so merge ≠ live sending.
+Default: AUTO_OUTREACH_ENABLED=0 so merge ≠ live sending.
 """
 import logging
 import os
@@ -21,15 +19,11 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from app.observability import setup_logging  # noqa: E402
 
-# Replaces the previous basicConfig. Same stdout stream so pm2 still captures
-# it, plus a rotating file under backend/logs — pm2's copy is what survives a
-# crash, the local file is what exists when pm2 is not running, which after a
-# reboot is the normal state.
 setup_logging("worker")
 
 if __name__ == "__main__":
     import app.models.models  # noqa: F401
-    import app.models.send_proof_fix  # noqa: F401  — fail-closed EMAIL_SENT proof
+    import app.models.send_proof_fix  # noqa: F401
 
     from app.api.endpoints import start_auto_warm_worker, _relearn_patterns
     from app.database.database import SessionLocal
@@ -37,14 +31,11 @@ if __name__ == "__main__":
     logging.info("Auto-Warm worker starting (separate process)")
     start_auto_warm_worker()
 
-    cycle_sec = int(os.getenv("SMART_OUTREACH_CYCLE_SECONDS", "600"))
-    # Default OFF: production must opt in after /health + controlled send proof.
-    enabled = os.getenv("SMART_OUTREACH_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
-    limit = max(1, min(100, int(os.getenv("SMART_OUTREACH_LIMIT", "20"))))
-    logging.info("Adaptive outreach: enabled=%s limit=%s cycle=%ss", enabled, limit, cycle_sec)
+    cycle_sec = int(os.getenv("AUTO_OUTREACH_CYCLE_SECONDS", "600"))
+    enabled = os.getenv("AUTO_OUTREACH_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+    limit = max(1, min(100, int(os.getenv("AUTO_OUTREACH_LIMIT", "20"))))
+    logging.info("Autonomous outreach: enabled=%s limit=%s cycle=%ss", enabled, limit, cycle_sec)
 
-    # Scrapling is an OPTIONAL web-intelligence dependency. It is deliberately
-    # disabled by default and has no outbound-channel authority.
     scrapling_enabled = os.getenv("SCRAPLING_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
     scrapling_hours = max(1.0, float(os.getenv("SCRAPLING_CYCLE_HOURS", "24")))
     scrapling_limit = max(1, min(100, int(os.getenv("SCRAPLING_LIMIT", "20"))))
@@ -55,16 +46,8 @@ if __name__ == "__main__":
         scrapling_enabled, scrapling_hours, scrapling_limit,
     )
 
-    # Trust reconciliation is a MAINTENANCE job, not a decision engine. It reads
-    # evidence already on record, reconciles it into email_trust, and writes a
-    # TRUST_TRANSITION audit event. It never sends, never classifies a lead,
-    # never sets cadence or offers, and never touches learning weights.
-    #
-    # Nightly by default: evaluate() is a fixpoint, so re-running it every
-    # 10-minute outreach cycle re-derives identical states and buys nothing but
-    # MX lookups. Set TRUST_SWEEP_HOURS=0 to disable.
     sweep_hours = max(0.0, float(os.getenv("TRUST_SWEEP_HOURS", "24")))
-    last_sweep = None          # None => run once on the first cycle after start
+    last_sweep = None
     sweep_note = "not yet run"
     logging.info("trust sweep: every %sh (0=off)", sweep_hours)
 
@@ -73,23 +56,17 @@ if __name__ == "__main__":
         try:
             try:
                 from app.api.endpoints import sync_email_replies
-
                 rep = sync_email_replies(days=7, db=db)
                 logging.info("reply sync: %s", rep)
             except Exception as e:
                 logging.error("reply sync failed: %s", e)
                 rep = {"error": str(e)}
 
-            # Ordered after reply sync and before outreach on purpose: a reply
-            # synced this cycle is fresh evidence, and a lead promoted here
-            # becomes visible to evaluate_next_action() in the same cycle
-            # instead of waiting for the next one.
             if sweep_hours:
                 _now = time.monotonic()
                 if last_sweep is None or (_now - last_sweep) >= sweep_hours * 3600:
                     try:
                         from app.services.trust_promoter import run as trust_sweep
-
                         sw = trust_sweep(db)
                         last_sweep = _now
                         sweep_note = f"moved={sw.get('moved')} of {sw.get('considered')} {sw.get('into')}"
@@ -99,20 +76,14 @@ if __name__ == "__main__":
                             sw.get("into"), len(sw.get("errors") or []),
                         )
                     except Exception as e:
-                        # last_sweep deliberately NOT advanced: a failed sweep
-                        # retries next cycle rather than silently skipping a day.
                         sweep_note = f"failed: {e}"[:120]
                         logging.error("trust sweep failed: %s", e)
 
-            # Web intelligence is deliberately before outreach so newly found
-            # first-party contact evidence can be evaluated by the existing
-            # trust/outreach gates on a later cycle. Scrapling itself never sends.
             if scrapling_enabled:
                 _now = time.monotonic()
                 if last_scrapling is None or (_now - last_scrapling) >= scrapling_hours * 3600:
                     try:
                         from app.services.scrapling_harvester import harvest as scrapling_harvest
-
                         web_result = scrapling_harvest(db, limit=scrapling_limit, only_missing=True)
                         last_scrapling = _now
                         scrapling_note = (
@@ -121,8 +92,6 @@ if __name__ == "__main__":
                         )
                         logging.info("Scrapling enrichment: %s", scrapling_note)
                     except Exception as e:
-                        # Do not advance last_scrapling after a failed run: the
-                        # next worker cycle retries rather than silently skipping.
                         scrapling_note = f"failed: {e}"[:160]
                         logging.error("Scrapling enrichment failed: %s", e)
             else:
@@ -131,29 +100,25 @@ if __name__ == "__main__":
             if enabled:
                 try:
                     from app.services.outreach_lifecycle import run_automatic_cycle
-
                     result = run_automatic_cycle(db, limit=limit)
                     logging.info(
-                        "smart outreach: processed=%s memory=%s learning=%s",
+                        "autonomous outreach: processed=%s memory=%s learning=%s",
                         result.get("processed"),
                         result.get("memory"),
                         result.get("learning"),
                     )
                 except Exception as e:
-                    logging.error("smart outreach cycle failed: %s", e)
+                    logging.error("autonomous outreach cycle failed: %s", e)
             else:
-                logging.info("smart outreach disabled (set SMART_OUTREACH_ENABLED=1 after runtime gate)")
+                logging.info("autonomous outreach disabled (set AUTO_OUTREACH_ENABLED=1 after runtime gate)")
 
             try:
                 from app.services.sequence_engine import prepare_due_drafts
-
                 prep = prepare_due_drafts(db)
                 if prep.get("created") or prep.get("due"):
                     logging.info(
                         "legacy sequence drafts: created=%s due=%s skipped=%s",
-                        prep.get("created"),
-                        prep.get("due"),
-                        prep.get("skipped"),
+                        prep.get("created"), prep.get("due"), prep.get("skipped"),
                     )
             except Exception as e:
                 logging.error("sequence prepare failed: %s", e)
@@ -166,27 +131,18 @@ if __name__ == "__main__":
 
             try:
                 from app.services.heartbeat import beat
-
-                beat(
-                    "worker",
-                    db,
-                    {
-                        "reply_sync": str(rep)[:120],
-                        "smart_outreach": "enabled" if enabled else "disabled",
-                        "trust_sweep": sweep_note,
-                        "scrapling": scrapling_note,
-                    },
-                )
-                beat(
-                    "smart_outreach",
-                    db,
-                    {
-                        "note": "classify -> evaluate_next_action -> execute -> learn",
-                        "limit": limit,
-                        "enabled": enabled,
-                        "scrapling_enabled": scrapling_enabled,
-                    },
-                )
+                beat("worker", db, {
+                    "reply_sync": str(rep)[:120],
+                    "autonomous_outreach": "enabled" if enabled else "disabled",
+                    "trust_sweep": sweep_note,
+                    "scrapling": scrapling_note,
+                })
+                beat("smart_outreach", db, {
+                    "note": "classify -> evaluate_next_action -> execute -> learn",
+                    "limit": limit,
+                    "enabled": enabled,
+                    "scrapling_enabled": scrapling_enabled,
+                })
             except Exception as e:
                 logging.error("heartbeat failed: %s", e)
         except Exception as e:
