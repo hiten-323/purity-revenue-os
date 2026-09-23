@@ -115,8 +115,8 @@ class WorkflowEngine:
 
         draft_id = payload.get("draft_id")
         draft = db.query(EmailDraft).filter(EmailDraft.id == draft_id).first() if draft_id else None
-        if not draft or draft.status not in ("PENDING", "EDITED", "APPROVED"):
-            raise ValueError("No approvable draft found — email must go through the Approval Inbox")
+        if not draft or draft.status != "FOUNDER_APPROVED":
+            raise ValueError("No founder-approved draft found — email must go through the Approval Inbox")
 
         email_obj = build_outreach_email(
             to_email=lead.email,
