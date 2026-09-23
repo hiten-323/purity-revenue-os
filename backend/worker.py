@@ -39,9 +39,13 @@ if __name__ == "__main__":
 
     cycle_sec = int(os.getenv("SMART_OUTREACH_CYCLE_SECONDS", "600"))
     # Default OFF: production must opt in after /health + controlled send proof.
-    enabled = os.getenv("SMART_OUTREACH_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+    # Autonomous outreach has a single production executor: purity-outreach
+    # (smart_outreach_worker.py). Keep this worker for warm/enrichment,
+    # reply-sync, trust maintenance, sequence preparation and learning only.
+    # SMART_OUTREACH_ENABLED is retained as a compatibility flag but MUST NOT
+    # grant this worker outbound authority; this prevents duplicate executors.
     limit = max(1, min(100, int(os.getenv("SMART_OUTREACH_LIMIT", "20"))))
-    logging.info("Adaptive outreach: enabled=%s limit=%s cycle=%ss", enabled, limit, cycle_sec)
+    logging.info("Adaptive outreach executor: retired in purity-worker; limit=%s cycle=%ss", limit, cycle_sec)
 
     # Scrapling is an OPTIONAL web-intelligence dependency. It is deliberately
     # disabled by default and has no outbound-channel authority.
@@ -128,22 +132,8 @@ if __name__ == "__main__":
             else:
                 scrapling_note = "disabled"
 
-            if enabled:
-                try:
-                    from app.services.outreach_lifecycle import run_automatic_cycle
-
-                    result = run_automatic_cycle(db, limit=limit)
-                    logging.info(
-                        "smart outreach: processed=%s memory=%s learning=%s",
-                        result.get("processed"),
-                        result.get("memory"),
-                        result.get("learning"),
-                    )
-                except Exception as e:
-                    logging.error("smart outreach cycle failed: %s", e)
-            else:
-                logging.info("smart outreach disabled (set SMART_OUTREACH_ENABLED=1 after runtime gate)")
-
+            # Intentionally no autonomous outreach here.
+            # The dedicated purity-outreach process is the sole send executor.
             try:
                 from app.services.sequence_engine import prepare_due_drafts
 
@@ -172,7 +162,7 @@ if __name__ == "__main__":
                     db,
                     {
                         "reply_sync": str(rep)[:120],
-                        "smart_outreach": "enabled" if enabled else "disabled",
+                        "smart_outreach": "retired_in_worker",
                         "trust_sweep": sweep_note,
                         "scrapling": scrapling_note,
                     },
@@ -183,7 +173,7 @@ if __name__ == "__main__":
                     {
                         "note": "classify -> evaluate_next_action -> execute -> learn",
                         "limit": limit,
-                        "enabled": enabled,
+                        "enabled": False,
                         "scrapling_enabled": scrapling_enabled,
                     },
                 )
