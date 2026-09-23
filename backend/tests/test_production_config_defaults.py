@@ -29,12 +29,12 @@ def test_env_example_keeps_outreach_and_calling_off():
 
 def test_ecosystem_has_one_autonomous_executor_and_safe_channels():
     text = _read("ecosystem.config.js")
-    assert 'SMART_OUTREACH_ENABLED: "0"' in text
-    assert 'AUTO_OUTREACH_ENABLED: "1"' in text
-    assert 'AISENSY_ENABLED: "0"' in text
-    assert 'AI_CALLING_ENABLED: "0"' in text
     assert 'name: "purity-outreach"' not in text
     assert 'script: path.join(BACKEND_DIR, "smart_outreach_worker.py")' not in text
+    assert 'SMART_OUTREACH_ENABLED: "0"' in text
+    assert 'AUTO_OUTREACH_ENABLED: "0"' in text
+    assert 'AISENSY_ENABLED: "0"' in text
+    assert 'AI_CALLING_ENABLED: "0"' in text
 
 
 def test_worker_uses_auto_outreach_as_sole_send_switch():
