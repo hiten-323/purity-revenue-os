@@ -63,7 +63,7 @@ if "sqlite" in DATABASE_URL:
         NORMAL is the safe, fast pairing for WAL.
 
         busy_timeout raised from 10s to 60s (override via SQLITE_BUSY_TIMEOUT_S)
-        because purity-api + purity-worker + purity-outreach + voice webhooks all
+        because purity-api + purity-worker + voice webhooks all
         write the same file; 10s still timed out under concurrent call UPDATEs.
         """
         cur = dbapi_conn.cursor()
@@ -92,7 +92,7 @@ def commit_with_retry(db, *, attempts: int = 6, base_delay: float = 0.05):
     """
     Commit with short exponential backoff on SQLite lock contention.
 
-    Multi-process writers (api/worker/outreach/webhooks) still race under WAL;
+    Multi-process writers (api/worker/webhooks) still race under WAL;
     busy_timeout waits inside SQLite, this retries the whole commit if the
     wait still expired. Do NOT hold the session across network I/O — commit
     before dials, then call this for the post-dial lead UPDATE.
@@ -135,7 +135,7 @@ def get_db():
 
 
 # Apply process-wide SQLite/call and trust-confidence patches once the DB layer loads.
-# Safe no-op if optional modules are missing; keeps purity-api / worker / outreach aligned.
+# Safe no-op if optional modules are missing; keeps purity-api / worker aligned.
 try:
     import app.purity_boot_patches  # noqa: F401
 except Exception:
