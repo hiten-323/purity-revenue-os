@@ -52,13 +52,6 @@ try {
 }
 
 try {
-    $resp = Invoke-RestMethod -Uri 'http://127.0.0.1:8003/api/v1/b2b/leads?limit=1' -TimeoutSec 45
-    Say "INFO: API reports $($resp.total) leads"
-} catch {
-    Say "WARN: could not read the lead count ($($_.Exception.Message))."
-}
-
-try {
     $conn = Get-NetTCPConnection -LocalPort 8003 -State Listen -ErrorAction Stop | Select-Object -First 1
     $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($conn.OwningProcess)"
     if ($proc.CommandLine -match 'Python31[01]') {

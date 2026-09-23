@@ -54,3 +54,31 @@ jobs:
         run: pnpm exec tsc --noEmit
       - name: Build
         run: pnpm build
+
+
+  # Exercise the production authority switch without starting a worker or
+  # contacting any provider. This catches regressions where AUTO_OUTREACH_ENABLED
+  # is wired to the wrong executor or a second outbound channel is armed.
+  auto-authority:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Verify single-worker authority
+        env:
+          SMART_OUTREACH_ENABLED: "0"
+          AUTO_OUTREACH_ENABLED: "1"
+          AI_CALLING_ENABLED: "0"
+          AISENSY_ENABLED: "0"
+          SYSTEM_INTEGRITY: "0"
+        run: |
+          python -m pytest -q tests/test_production_config_defaults.py tests/test_calling_authority.py tests/test_business_hours_outbound_gate.py --tb=short
