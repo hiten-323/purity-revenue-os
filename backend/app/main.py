@@ -124,7 +124,11 @@ async def startup():
         from app.services.contact_trust import sweep as _sweep
         _db = _S()
         try:
-            _r = _sweep(_db)
+            # Boot must reconcile local trust bookkeeping without performing
+            # live email verification. Reverification is a worker/dispatch concern;
+            # API startup must not mutate contacts because an external verifier is
+            # unavailable or temporarily inconclusive.
+            _r = _sweep(_db, reverify=False)
             if _r.get("demoted_to_purged") or _r.get("out_of_band_flagged"):
                 print(f"[trust-sweep] {_r}")
         finally:
