@@ -4,7 +4,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\apply_sqlite_trust_fixes.ps1
 #
 # Keeps AISENSY_ENABLED=0. Does not place dials or mass-email.
-# Restarts purity-api, purity-worker, purity-outreach so WAL/busy_timeout + patches load.
+# Restarts purity-api and purity-worker so WAL/busy_timeout + patches load.
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
