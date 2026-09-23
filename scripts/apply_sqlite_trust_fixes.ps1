@@ -4,7 +4,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\apply_sqlite_trust_fixes.ps1
 #
 # Keeps AISENSY_ENABLED=0. Does not place dials or mass-email.
-# Restarts purity-api, purity-worker, purity-outreach so WAL/busy_timeout + patches load.
+# Restarts purity-api and purity-worker so WAL/busy_timeout + patches load.
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
@@ -69,13 +69,12 @@ Write-Host "=== AFTER counts ==="
 python -m scripts.trust_confidence_sweep --counts-only
 
 Set-Location $Root
-Write-Host "=== Restarting purity-api, purity-worker, purity-outreach ==="
-pm2 restart purity-api purity-worker purity-outreach
+Write-Host "=== Restarting purity-api, purity-worker ==="
+pm2 restart purity-api purity-worker
 Start-Sleep -Seconds 8
 pm2 list
 
 Write-Host "=== Recent lock / trust lines ==="
-pm2 logs purity-outreach --lines 80 --nostream 2>$null | Select-String -Pattern "database is locked" | Select-Object -Last 20
 pm2 logs purity-worker --lines 60 --nostream 2>$null | Select-String -Pattern "database is locked|confidence sweep|trust sweep" | Select-Object -Last 20
 
 Write-Host "DONE. AISENSY untouched (must stay 0). Smart/Auto/AI calling not disabled."

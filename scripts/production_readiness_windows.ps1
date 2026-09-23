@@ -46,12 +46,12 @@ if (Test-Path $BackendEnv) {
     Record 'B-env-file' 'FAIL' 'backend/.env missing'
 }
 
-# C-F -- committed flags OFF in ecosystem (string check only)
+# C-F -- production executor policy: SMART off, AUTO on; WhatsApp/calling remain off
 if (Test-Path $Ecosystem) {
     $eco = Get-Content $Ecosystem -Raw
     foreach ($pair in @(
         @{ Id = 'C-smart-outreach-off'; Needle = 'SMART_OUTREACH_ENABLED: "0"' },
-        @{ Id = 'D-auto-outreach-off'; Needle = 'AUTO_OUTREACH_ENABLED: "0"' },
+        @{ Id = 'D-auto-outreach-on'; Needle = 'AUTO_OUTREACH_ENABLED: "1"' },
         @{ Id = 'E-aisensy-off'; Needle = 'AISENSY_ENABLED: "0"' },
         @{ Id = 'F-ai-calling-off'; Needle = 'AI_CALLING_ENABLED: "0"' }
     )) {
