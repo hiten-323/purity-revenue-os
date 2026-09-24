@@ -117,7 +117,7 @@ const apps = [
         SMART_OUTREACH_ENABLED: "0",
         AUTO_OUTREACH_ENABLED: "1",
         AISENSY_ENABLED: "0",
-        AI_CALLING_ENABLED: "0",
+        AI_CALLING_ENABLED: "1",
         SENDER_EMAIL: ENV.SENDER_EMAIL || "connect@purepantryprovisions.com",
         SENDER_NAME: ENV.SENDER_NAME || "Hiten Jain | Pure Pantry Provisions",
         ZOHO_APP_PASSWORD: need("ZOHO_APP_PASSWORD"),
