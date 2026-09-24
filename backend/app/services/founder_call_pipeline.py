@@ -804,6 +804,13 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
     lead.call_outcome_last = key
     lead.last_call_date = datetime.utcnow()
 
+    retryable = key in {"NO_ANSWER", "VOICEMAIL", "FAILED", "OTHER"}
+    callback_dt = parse_callback_datetime(callback_window, datetime.utcnow()) if callback_window else None
+    if retryable and (getattr(lead, "ai_call_count", 0) or 0) < MAX_AI_COLD_CALLS_PER_LEAD:
+        schedule_ai_retry(lead, db, callback_datetime=callback_dt)
+    else:
+        lead.ai_retry_after = None
+
     if key == "WHATSAPP_OPT_IN":
         # Consent is written by whatsapp_consent.record and nowhere else. This
         # branch used to set the four consent fields and the NEXT_ACTION_SET
