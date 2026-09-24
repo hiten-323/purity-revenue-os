@@ -481,6 +481,35 @@ def is_shared_across_many_leads(value, db, record_id=None) -> bool:
     return False
 
 
+def parse_callback_datetime(value: str, now: datetime | None = None) -> datetime | None:
+    raw = (value or '').strip()
+    if not raw: return None
+    base = now or datetime.utcnow()
+    import re as _re
+    from datetime import time as _time
+    m = _re.search(r'\b(tomorrow|today)\s+([0-9]{1,2})(?::([0-9]{2}))?\s*(am|pm)?\b', raw, _re.I)
+    if m:
+        day = base.date() + timedelta(days=1 if m.group(1).lower() == 'tomorrow' else 0)
+        hour = int(m.group(2)); minute = int(m.group(3) or 0); ap = (m.group(4) or '').lower()
+        if ap == 'pm' and hour < 12: hour += 12
+        if ap == 'am' and hour == 12: hour = 0
+        return datetime.combine(day, _time(hour, minute)) if 0 <= hour <= 23 and 0 <= minute <= 59 else None
+    try:
+        from dateutil import parser as _parser
+        parsed = _parser.parse(raw, default=base, fuzzy=True)
+        return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+    except Exception: return None
+
+def schedule_ai_retry(lead, db, now: datetime | None = None, callback_datetime: datetime | None = None) -> datetime:
+    now = now or datetime.utcnow()
+    target = callback_datetime or (now + timedelta(hours=AI_CALL_RETRY_COOLDOWN_HOURS))
+    lead.ai_retry_after = target
+    return target
+
+def _retry_due(lead, now: datetime | None = None) -> bool:
+    retry_after = getattr(lead, 'ai_retry_after', None)
+    return bool(retry_after and retry_after <= (now or datetime.utcnow()))
+
 def may_place_ai_call(lead) -> tuple[bool, str]:
     """The single authority on whether the ONE cold qualification call is
     permitted. Reasons are returned, never raised, so a batch reports instead
