@@ -543,18 +543,18 @@ def may_place_ai_call(lead) -> tuple[bool, str]:
         return False, "lead_locked"
 
     stage = stage_of(lead)
-    if stage != ELIGIBLE:
-        return False, ("already in the pipeline at %s; the AI cold call is "
-                       "once per lead" % stage)
-
     placed = getattr(lead, "ai_call_count", 0) or 0
+    now = datetime.utcnow()
     if placed >= MAX_AI_COLD_CALLS_PER_LEAD:
         return False, ("ai_call_count is already %d; limit is %d"
                        % (placed, MAX_AI_COLD_CALLS_PER_LEAD))
-
-    last_call = getattr(lead, "last_call_date", None)
-    if last_call and last_call > datetime.utcnow() - timedelta(days=14):
-        return False, "cooldown_active: a call was placed in the last 14 days"
+    if stage == ELIGIBLE:
+        pass
+    elif stage == AI_CALL_ATTEMPTED and _retry_due(lead, now):
+        pass
+    else:
+        return False, ("already in the pipeline at %s; retry is allowed only "
+                       "when ai_retry_after is due" % stage)
 
     phone = (getattr(lead, "phone", "") or "").strip()
     if not phone:
