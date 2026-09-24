@@ -892,10 +892,19 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
     # callback, a meeting or a handoff can only ever be kept by a human --
     # left at AI_INTEREST_DETECTED, the ask was recorded and nobody was told.
     if key in FOUNDER_CALL_ASKS:
-        request_founder_call(
-            lead, db, reason=FOUNDER_CALL_ASKS[key], requested_by="AI",
-            note=(summary or "")
-                 + (f" | callback: {callback_window}" if callback_window else ""))
+        callback_dt = parse_callback_datetime(callback_window, datetime.utcnow()) if callback_window else None
+        if key == "CALLBACK_REQUESTED" and callback_dt is not None and (getattr(lead, "ai_call_count", 0) or 0) < MAX_AI_COLD_CALLS_PER_LEAD:
+            schedule_ai_retry(lead, db, callback_datetime=callback_dt)
+            from app.models.models import WorkflowEvent
+            db.add(WorkflowEvent(
+                lead_id=lead.id, event_type="AI_CALLBACK_SCHEDULED", actor="AI", channel="phone",
+                payload={"requested_callback": callback_window, "scheduled_for": callback_dt.isoformat()},
+                occurred_at=datetime.utcnow()))
+        else:
+            request_founder_call(
+                lead, db, reason=FOUNDER_CALL_ASKS[key], requested_by="AI",
+                note=(summary or "")
+                     + (f" | callback: {callback_window}" if callback_window else ""))
     # Where the lead actually is -- past `target` when the ask was queued.
     # The webhook reports this, and a retry reports stage_of(); they must agree.
     return stage_of(lead)
