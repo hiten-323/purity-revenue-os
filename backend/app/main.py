@@ -357,6 +357,19 @@ async def startup():
 
         conn.commit()
 
+        # Recover stale AI-call attempts from older deployments. Only rows with
+        # a known last_call_date and an already-due 72h retry are recovered.
+        cursor.execute("""
+            UPDATE b2b_leads
+               SET ai_retry_after = datetime(last_call_date, '+72 hours')
+             WHERE outreach_stage = 'AI_CALL_ATTEMPTED'
+               AND ai_retry_after IS NULL
+               AND ai_call_count < 3
+               AND last_call_date IS NOT NULL
+               AND datetime(last_call_date, '+72 hours') <= datetime('now');
+        """)
+        conn.commit()
+
         cursor.execute("SELECT id, division, company FROM b2b_leads;")
         leads_to_migrate = cursor.fetchall()
 
