@@ -176,8 +176,9 @@ OUTCOMES: dict[str, str] = {
 
 # ----------------------------------------------------------- invariants ----
 
-MAX_AI_COLD_CALLS_PER_LEAD = 1
-MAX_AI_CALLS_PER_DAY = 25
+MAX_AI_COLD_CALLS_PER_LEAD = 3
+MAX_AI_CALLS_PER_DAY = 10**9
+AI_CALL_RETRY_COOLDOWN_HOURS = 72
 # Every business category we are willing to call. Founder decision, 2026-09-10:
 # all of them.
 #
