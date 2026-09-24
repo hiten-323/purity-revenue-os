@@ -216,10 +216,13 @@ import importlib.util
 import sys as _sys
 from pathlib import Path
 
-_AGENT_JS = (
-    Path(__file__).resolve().parents[3]
-    / "ai-voice-agent" / "profiles" / "purity-coffee-b2b" / "agent.js"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_VOICE_REPO_CANDIDATES = (
+    _REPO_ROOT / "ai-voice-agent-purity",
+    _REPO_ROOT / "ai-voice-agent",
 )
+_VOICE_REPO = next((p for p in _VOICE_REPO_CANDIDATES if p.exists()), _VOICE_REPO_CANDIDATES[-1])
+_AGENT_JS = _VOICE_REPO / "profiles" / "purity-coffee-b2b" / "agent.js"
 
 
 def _read_agent_js() -> str:
