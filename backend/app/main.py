@@ -220,6 +220,7 @@ async def startup():
             "outreach_stage": "VARCHAR",
             "outreach_stage_at": "DATETIME",
             "ai_call_count": "INTEGER DEFAULT 0",
+            "ai_retry_after": "DATETIME",
             "ai_interest_level": "VARCHAR",
             "founder_callback_window": "VARCHAR",
             "lead_temperature_score": "FLOAT DEFAULT 0.0",
