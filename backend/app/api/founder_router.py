@@ -137,6 +137,24 @@ class AICallOutcomeBody(BaseModel):
     objection: str = ""
 
 
+@router.get("/ai-call-learning", dependencies=[Depends(require_api_admin)])
+def get_ai_call_learning(segment: str = "", days: int = 30, limit: int = 500,
+                         db: Session = Depends(get_db)):
+    """Return advisory call-learning aggregates for the voice agent.
+
+    This endpoint exposes patterns only. It never grants calling permission,
+    changes DND/consent, schedules a callback, or returns raw transcripts.
+    """
+    from app.services.call_learning import build_strategy_hints
+
+    return build_strategy_hints(
+        db,
+        segment=segment.strip() or None,
+        days=min(max(days, 1), 90),
+        limit=min(max(limit, 1), 1000),
+    )
+
+
 @router.post("/ai-call-outcome", dependencies=[Depends(require_api_admin)])
 def post_ai_call_outcome(body: AICallOutcomeBody, db: Session = Depends(get_db)):
     """Called by the Nuraveda voice agent (profiles/purity-coffee-b2b/agent.js)
