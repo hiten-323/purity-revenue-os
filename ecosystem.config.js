@@ -116,7 +116,7 @@ const apps = [
         AUTO_WARM_ENABLED: "1",
         SMART_OUTREACH_ENABLED: "0",
         AUTO_OUTREACH_ENABLED: "1",
-        AUTO_AI_CALLING_ENABLED: "0",
+        AUTO_AI_CALLING_ENABLED: "1",
         AISENSY_ENABLED: "0",
         AI_CALLING_ENABLED: "1",
         SENDER_EMAIL: ENV.SENDER_EMAIL || "connect@purepantryprovisions.com",
