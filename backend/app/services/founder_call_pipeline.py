@@ -109,6 +109,10 @@ TRANSITIONS: dict[str, frozenset[str]] = {
         AI_INTEREST_DETECTED, AI_NOT_INTERESTED, AI_NO_ANSWER,
         AI_WRONG_NUMBER, AI_OPTED_OUT, AI_CALL_ATTEMPTED,
     }),
+    # A no-answer/busy/waiting outcome may return to the retry-ready state
+    # once its explicit retry time is due. The retry scheduler, not the model,
+    # decides when the next dial may happen.
+    AI_NO_ANSWER: frozenset({AI_CALL_ATTEMPTED}),
     AI_INTEREST_DETECTED: frozenset({FOUNDER_CALL_REQUESTED, AI_OPTED_OUT}),
     FOUNDER_CALL_REQUESTED: frozenset({FOUNDER_CALL_COMPLETED, AI_OPTED_OUT}),
     FOUNDER_CALL_COMPLETED: frozenset({COMMERCIAL_OPPORTUNITY, CLOSED_NO_FIT}),
@@ -153,6 +157,8 @@ OUTCOMES: dict[str, str] = {
     # inference from this call.
     "WRONG_PERSON": AI_NOT_INTERESTED,
     "NO_ANSWER": AI_NO_ANSWER,
+    "BUSY": AI_NO_ANSWER,
+    "WAITING": AI_NO_ANSWER,
     # Engine-detected (voicemail greeting pattern match), not something the
     # model decides — see livekit-agent.js VOICEMAIL_PATTERNS. Same terminal
     # stage as NO_ANSWER: this system is one attempt per lead regardless of
@@ -237,8 +243,28 @@ CALLABLE_SEGMENTS = tuple(sorted(CALLABLE_CATEGORIES))
 # "female voice speaking English" failure. Markers "AI" and "Purity" still
 # satisfy script_discloses() (case-insensitive).
 OPENING_DISCLOSURE = (
-    "Namaste, main Purity Beans ki taraf se AI assistant baat kar rahi hoon. "
-    "Kya aapke paas ek chhota sa minute hai?"
+    "नमस्ते, मैं Purity Beans की तरफ़ से AI assistant बात कर रही हूँ। "
+    "क्या आपके पास एक छोटा सा minute है?"
+)
+
+# Conversation contract shared with the voice-agent profile.
+# Keep turns short enough for a real PSTN conversation and never talk over
+# the person. The agent should begin the greeting immediately after answer
+# detection; there is no intentional multi-second preamble.
+MAX_AGENT_RESPONSE_WORDS = 15
+VOICE_CONVERSATION_RULES = (
+    "Start speaking immediately when the lead answers; do not wait several seconds.",
+    "Stop TTS immediately when the lead starts speaking and listen.",
+    "Use short natural turns, normally one sentence and never more than 15 words.",
+    "Ask one question at a time. Never stack questions.",
+    "After a meaningful answer, acknowledge briefly before the next question.",
+    "If the lead says no, ask once whether another time would be better.",
+    "If the lead again says no, say: Okay ji, understood. Have a good day. Then end the call.",
+    "If the lead asks to call at a specific date/time, record it exactly and prioritize it over normal business hours.",
+    "If the requested callback is outside business hours, still call at the requested time.",
+    "If a requested callback is unanswered, retry once 5 minutes later, then use the normal 72-hour retry policy if still unresolved.",
+    "If the lead says busy or waiting, treat it as retryable and capture any requested time.",
+    "If the lead gives a new callback time during the conversation, replace the previous callback with the new time.",
 )
 
 # Words that sit in contact_name but are not a person's name. Greeting a
@@ -382,10 +408,10 @@ HANDOFF_TOPICS = ("margins", "territory or exclusivity", "credit terms",
                   "a custom or bulk order", "a formal quotation")
 
 QUALIFICATION_QUESTIONS = (
-    "Are you the person who handles coffee or procurement here?",
-    "Are you buying coffee commercially at the moment?",
-    "Would you be open to hearing about an alternative supplier?",
-    "Would you like our founder to call you directly?",
+    "क्या आप यहाँ coffee या procurement देखते हैं?",
+    "क्या आप अभी commercially coffee खरीदते हैं?",
+    "क्या आप किसी alternative supplier के बारे में जानना चाहेंगे?",
+    "क्या आप चाहेंगे कि हमारी founder आपसे सीधे बात करें?",
 )
 
 # Markers that must survive any rewrite of the opening line.
@@ -788,7 +814,12 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
 
     if stage_of(lead) == ELIGIBLE:
         advance(lead, db, AI_CALL_ATTEMPTED, note="AI qualification call placed")
-        lead.ai_call_count = (getattr(lead, "ai_call_count", 0) or 0) + 1
+    elif stage_of(lead) == AI_NO_ANSWER:
+        # A due retry re-enters the attempted state before recording the new
+        # outcome. Count every actual provider-accepted attempt.
+        advance(lead, db, AI_CALL_ATTEMPTED, note="retrying scheduled AI call")
+
+    lead.ai_call_count = (getattr(lead, "ai_call_count", 0) or 0) + 1
 
     target = OUTCOMES[key]
     advance(lead, db, target, note=summary[:300])
@@ -804,9 +835,11 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
     lead.call_outcome_last = key
     lead.last_call_date = datetime.utcnow()
 
-    retryable = key in {"NO_ANSWER", "VOICEMAIL", "FAILED", "OTHER"}
+    retryable = key in {"NO_ANSWER", "VOICEMAIL", "FAILED", "OTHER", "BUSY", "WAITING"}
     callback_dt = parse_callback_datetime(callback_window, datetime.utcnow()) if callback_window else None
     if retryable and (getattr(lead, "ai_call_count", 0) or 0) < MAX_AI_COLD_CALLS_PER_LEAD:
+        # Explicit lead-requested callback is always authoritative, including
+        # outside normal business hours. Otherwise retry after 72 hours.
         schedule_ai_retry(lead, db, callback_datetime=callback_dt)
     else:
         lead.ai_retry_after = None
