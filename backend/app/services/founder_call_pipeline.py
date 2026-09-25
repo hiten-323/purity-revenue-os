@@ -838,12 +838,27 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
     retryable = key in {"NO_ANSWER", "VOICEMAIL", "FAILED", "OTHER", "BUSY", "WAITING"}
     now_for_retry = datetime.utcnow()
     callback_dt = parse_callback_datetime(callback_window, now_for_retry) if callback_window else None
+
+    # A callback-requested call has a special two-attempt window:
+    # requested time -> one reattempt 5 minutes later if unanswered/busy/waiting
+    # -> then the normal 72-hour unresolved-contact cadence. We identify the
+    # special first callback attempt from the immediately preceding terminal
+    # outcome, so a later ordinary 72-hour retry never inherits the old
+    # callback time.
+    prior_outcome = (getattr(lead, "call_outcome_last", "") or "").strip().upper()
+    callback_attempt_missed = (
+        retryable
+        and prior_outcome == "CALLBACK_REQUESTED"
+        and callback_dt is None
+    )
+
     if retryable and (getattr(lead, "ai_call_count", 0) or 0) < MAX_AI_COLD_CALLS_PER_LEAD:
-        # Explicit lead-requested callback is always authoritative, including
-        # outside normal business hours. If that requested callback has just
-        # gone unanswered, give it one five-minute reattempt before falling
-        # back to the normal 72-hour unresolved-contact cadence.
-        if callback_dt is not None and callback_dt <= now_for_retry:
+        if callback_attempt_missed:
+            schedule_ai_retry(
+                lead, db,
+                callback_datetime=now_for_retry + timedelta(minutes=5),
+            )
+        elif callback_dt is not None and callback_dt <= now_for_retry:
             schedule_ai_retry(
                 lead, db,
                 callback_datetime=now_for_retry + timedelta(minutes=5),
