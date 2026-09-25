@@ -920,7 +920,8 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
     except Exception:
         # Learning must never make a completed call fail or change its outcome.
         pass
-\n    learned = clean_call_details(details)
+
+    learned = clean_call_details(details)
     if learned:
         from app.models.models import WorkflowEvent
         db.add(WorkflowEvent(
