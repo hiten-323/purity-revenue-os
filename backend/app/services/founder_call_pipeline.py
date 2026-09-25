@@ -908,7 +908,7 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
                        status="AI_%s" % key, summary=summary[:1000] or None,
                        call_status="COMPLETED"))
 
-    learned = clean_call_details(details)
+    # Record structured learning as an advisory projection. This is deliberately\n    # after outcome/safety state has been committed to the in-memory lead and\n    # cannot alter DND, consent, callback scheduling, or retry policy.\n    try:\n        from app.services.call_learning import record_call_learning\n        record_call_learning(\n            db, lead, outcome=key, summary=summary, transcript=transcript,\n            details=details or {}, callback_window=callback_window,\n        )\n    except Exception:\n        # Learning must never make a completed call fail or change its outcome.\n        pass\n\n    learned = clean_call_details(details)
     if learned:
         from app.models.models import WorkflowEvent
         db.add(WorkflowEvent(
