@@ -29,19 +29,28 @@
     "wrong email -- a wrong call is a real phone ringing in a real shop."
   ],
   "voice_quality": {
-    "goal": "natural Indian business-call delivery: warm, clear, concise, responsive",
-    "language_strategy": "hi-IN/en-IN code-switching; mirror the caller's language",
-    "response_style": "short conversational turns; avoid monologues and list-reading",
-    "pace": "conversational, not drawn-out; provider should optimize time-to-first-audio",
-    "clarity": "clear articulation, simple vocabulary, repeat more slowly only when asked",
-    "turn_taking": "low endpointing delay with barge-in/interruption handling enabled",
-    "tts": "prefer a streaming Indian-language TTS with natural prosody; provider-level voice/speed settings remain authoritative",
+    "goal": "natural North-Indian female B2B telecaller: warm, confident, grounded, concise, attentive",
+    "language_strategy": "hi-IN/en-IN code-switching; use native Devanagari for Hindi phrases and mirror the caller's language",
+    "speaker": "shreya",
+    "model": "bulbul:v3",
+    "pace": 0.96,
+    "temperature": 0.6,
+    "response_style": "short conversational turns; normally one sentence; maximum 15 words; never monologue",
+    "turn_taking": "start immediately after answer detection; stop TTS when the lead speaks; capture the lead's complete answer before responding",
+    "interruption": "barge-in enabled; prioritize lead speech over agent playout",
+    "callback_behavior": "record exact requested callback date/time, including outside business hours; requested time overrides business-hours policy",
+    "retry_behavior": "explicit callback: exact requested time; unanswered explicit callback: one retry after 5 minutes; unresolved/no meaningful/busy/waiting: 72-hour retry",
+    "refusal_behavior": "first no -> ask once about another time; repeated no -> acknowledge, wish a good day, end call",
+    "tts": "Sarvam Bulbul v3 streaming with native-script Hindi for better pronunciation",
     "qa_required": [
       "human-naturalness",
       "first-audio-latency",
       "turn-gap",
       "speech-clarity",
-      "interruption-recovery"
-    ]
+      "interruption-recovery",
+      "callback-capture",
+      "no-overlap"
+    ],
+    "production_note": "Bulbul v3 does not expose pitch/loudness controls; 'deep base' must be achieved through speaker selection and delivery, not unsupported pitch parameters."
   }
 }
