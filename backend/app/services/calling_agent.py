@@ -7,9 +7,9 @@ from app.services.founder_call_pipeline import (
 
 
 class CallingAgentService:
-    AI_CALLING_VERSION = "1.0-RC1"
-    AI_CALLING_FROZEN = True
-    ARCHITECTURE_STATUS = "RC1_APPROVED"
+    AI_CALLING_VERSION = "2.0-PRODUCTION"
+    AI_CALLING_FROZEN = False
+    ARCHITECTURE_STATUS = "PRODUCTION"
     CALLING_ENGINE_ENABLED = True
     VOICE = "hi-IN-MadhurNeural"
     DEFAULT_REALIZATION_PER_KG = 1400.0
@@ -19,8 +19,9 @@ class CallingAgentService:
     MAX_CALL_ATTEMPTS = 3
     COOLDOWN_DAYS = 14
     CALL_CAMPAIGN_MARGIN_TARGET = 500000.0
-    MAX_CALLS_PER_DAY = 25
-    MAX_CALL_COST_PER_DAY = 500.0
+    # No artificial fleet-wide call ceiling; the pipeline owns safety gates.
+    MAX_CALLS_PER_DAY = 10**9
+    MAX_CALL_COST_PER_DAY = float("inf")
     FOUNDER_OVERRIDE_ENABLED = True
     CALLABLE_SEGMENTS = _CALLABLE_SEGMENTS
 
