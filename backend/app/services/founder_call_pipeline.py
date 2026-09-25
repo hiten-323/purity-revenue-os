@@ -576,7 +576,7 @@ def may_place_ai_call(lead) -> tuple[bool, str]:
                        % (placed, MAX_AI_COLD_CALLS_PER_LEAD))
     if stage == ELIGIBLE:
         pass
-    elif stage == AI_CALL_ATTEMPTED and _retry_due(lead, now):
+    elif stage in {AI_CALL_ATTEMPTED, AI_NO_ANSWER} and _retry_due(lead, now):
         pass
     else:
         return False, ("already in the pipeline at %s; retry is allowed only "
@@ -836,11 +836,20 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
     lead.last_call_date = datetime.utcnow()
 
     retryable = key in {"NO_ANSWER", "VOICEMAIL", "FAILED", "OTHER", "BUSY", "WAITING"}
-    callback_dt = parse_callback_datetime(callback_window, datetime.utcnow()) if callback_window else None
+    now_for_retry = datetime.utcnow()
+    callback_dt = parse_callback_datetime(callback_window, now_for_retry) if callback_window else None
     if retryable and (getattr(lead, "ai_call_count", 0) or 0) < MAX_AI_COLD_CALLS_PER_LEAD:
         # Explicit lead-requested callback is always authoritative, including
-        # outside normal business hours. Otherwise retry after 72 hours.
-        schedule_ai_retry(lead, db, callback_datetime=callback_dt)
+        # outside normal business hours. If that requested callback has just
+        # gone unanswered, give it one five-minute reattempt before falling
+        # back to the normal 72-hour unresolved-contact cadence.
+        if callback_dt is not None and callback_dt <= now_for_retry:
+            schedule_ai_retry(
+                lead, db,
+                callback_datetime=now_for_retry + timedelta(minutes=5),
+            )
+        else:
+            schedule_ai_retry(lead, db, callback_datetime=callback_dt)
     else:
         lead.ai_retry_after = None
 
