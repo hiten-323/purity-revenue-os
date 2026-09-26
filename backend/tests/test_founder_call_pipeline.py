@@ -602,7 +602,12 @@ def test_constraints_are_dispatched_with_every_qualification_call():
 ])
 def test_the_opening_uses_the_current_disclosure(db, contact_name):
     lead = _lead(db, contact_name=contact_name, company=f"Opening {contact_name or 'blank'}")
-    assert p.opening_for(lead).startswith(p.OPENING_DISCLOSURE)
+    line = p.opening_for(lead)
+    assert line.startswith("नमस्ते,")
+    assert "Purity Beans" in line
+    assert "AI assistant" in line
+    assert p.script_discloses(line)[0] is True
+
 def test_every_opening_passes_the_disclosure_gate(db, registry):
     """Founder decision 2026-09-18: natural, but the AI disclosure stays in
     the first sentence. The gate runs on the per-lead line, so a name can
