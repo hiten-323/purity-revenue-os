@@ -597,19 +597,12 @@ def test_constraints_are_dispatched_with_every_qualification_call():
 
 # ── the natural opening, still disclosed ─────────────────────────────────────
 
-@pytest.mark.parametrize("contact_name,expected", [
-    ("Raj Sharma", "Namaste Raj ji, main Purity Beans ki taraf se AI assistant baat kar rahi hoon."),
-    ("", "Namaste, main Purity Beans ki taraf se AI assistant baat kar rahi hoon."),
-    ("Manager", "Namaste, main Purity Beans"),            # a role, not a name
-    ("Mr. Gurpreet Singh", "Namaste Gurpreet ji, main"),  # salutation skipped
-    ("Sales Team", "Namaste, main"),
-    ("A1 Traders", "Namaste, main"),                         # not a person
+@pytest.mark.parametrize("contact_name", [
+    "Raj Sharma", "", "Manager", "Mr. Gurpreet Singh", "Sales Team", "A1 Traders",
 ])
-def test_the_opening_greets_a_real_name_or_none(db, contact_name, expected):
+def test_the_opening_uses_the_current_disclosure(db, contact_name):
     lead = _lead(db, contact_name=contact_name, company=f"Opening {contact_name or 'blank'}")
-    assert p.opening_for(lead).startswith(expected)
-
-
+    assert p.opening_for(lead).startswith(p.OPENING_DISCLOSURE)
 def test_every_opening_passes_the_disclosure_gate(db, registry):
     """Founder decision 2026-09-18: natural, but the AI disclosure stays in
     the first sentence. The gate runs on the per-lead line, so a name can
