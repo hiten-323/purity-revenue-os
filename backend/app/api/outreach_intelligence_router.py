@@ -1,7 +1,7 @@
 """HTTP API for Outreach Intelligence V1 — dry/admin only; never sends or dials."""
 from __future__ import annotations
 from typing import Any, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.database.database import get_db
@@ -45,16 +45,6 @@ def create_correction(body: CorrectionBody, db: Session = Depends(get_db)) -> di
 def report(db: Session = Depends(get_db)) -> dict[str, Any]:
     from app.services.outreach_intelligence.report import build_intelligence_report
     return build_intelligence_report(db)
-
-
-@router.get("/status")
-def status(
-    hours: int = Query(default=3, ge=1, le=168),
-    db: Session = Depends(get_db),
-) -> dict[str, Any]:
-    """Read-only live operational status for the requested time window."""
-    from app.services.outreach_intelligence.report import build_status_report
-    return build_status_report(db, hours=hours)
 
 
 @router.get("/lead/{lead_id}/profile")
