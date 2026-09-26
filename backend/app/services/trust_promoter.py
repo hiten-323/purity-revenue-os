@@ -42,9 +42,9 @@ RANK = {UNSEEN: 0, DISCOVERED: 1, VALIDATED: 2, VERIFIED: 3, TRUSTED: 4, ACTIVE:
 # Permissions. These three tuples are the ONLY place sending rights are
 # decided — V1 had the same question answered in three modules and they drifted
 # until the dashboard advertised addresses the sender refused.
-MAY_SEND = (VERIFIED, TRUSTED, ACTIVE)
+MAY_SEND = (VALIDATED, VERIFIED, TRUSTED, ACTIVE)
 MAY_DRAFT = (DISCOVERED, VALIDATED, VERIFIED, TRUSTED, ACTIVE)
-MAY_DRAFT_ONLY = (DISCOVERED, VALIDATED)   # draft but NOT send
+MAY_DRAFT_ONLY = (DISCOVERED,)   # VALIDATED is now eligible for autonomous email
 MAY_NEVER_SEND = (UNSEEN, BOUNCED, INVALID, PURGED, EXPIRED)
 
 CONFIDENCE_FLOOR = 40      # trust grants permission; confidence earns it
