@@ -75,7 +75,7 @@ def _snapshot(lead):
 def test_website_evidence_promotes_to_verified(db):
     """The whole reason the sweep exists: evidence on record, never applied."""
     lead = _lead(db, "Abohar Coffee House", "owner@abohorcoffeehouse.in")
-    # VALIDATED is now eligible for autonomous email when the confidence gate is met.
+    # VALIDATED is eligible for autonomous email when the confidence gate is met; keep CI coverage explicit.
     assert tp.may_send(lead)[0] is False  # confidence is still below the floor
 
     tp.run(db, verify=False)
