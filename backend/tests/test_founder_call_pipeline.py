@@ -937,13 +937,19 @@ def test_short_digit_run_is_not_dialable(db, registry):
     lead = _lead(db, company="Short Phone Cafe", phone="12345")
     ok, why = p.may_place_ai_call(lead)
     assert ok is False
-    assert "not a dialable number" in why or "fabricated" in why@pytest.mark.parametrize(
+    assert "not a dialable number" in why or "fabricated" in why
+
+@pytest.mark.parametrize(
     "contact_name", [
     "Raj Sharma", "", "Manager", "Mr. Gurpreet Singh", "Sales Team", "A1 Traders",
 ])
 def test_the_opening_uses_the_current_disclosure(db, contact_name):
     lead = _lead(db, contact_name=contact_name, company=f"Opening {contact_name or 'blank'}")
-    assert p.opening_for(lead).startswith(p.OPENING_DISCLOSURE)
+    line = p.opening_for(lead)
+    assert line.startswith("नमस्ते,")
+    assert "Purity Beans" in line
+    assert "AI assistant" in line
+    assert p.script_discloses(line)[0] is True
 
 def test_every_opening_passes_the_disclosure_gate(db, registry):
     """Founder decision 2026-09-18: natural, but the AI disclosure stays in
