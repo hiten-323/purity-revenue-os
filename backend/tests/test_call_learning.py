@@ -14,7 +14,7 @@ def _session():
         poolclass=StaticPool,
     )
     Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine)()
+    return sessionmaker(bind=engine, expire_on_commit=False)()
 
 
 def _lead():
