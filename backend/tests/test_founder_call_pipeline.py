@@ -96,7 +96,7 @@ def test_one_ai_call_per_lead(db, registry):
 
     ok, why = p.may_place_ai_call(lead)
     assert ok is False
-    assert "once per lead" in why
+    assert "retry is allowed only when ai_retry_after is due" in why
     assert lead.ai_call_count == 1
 
 
@@ -106,7 +106,7 @@ def test_no_answer_does_not_license_a_retry(db, registry):
     p.record_ai_outcome(lead, db, "NO_ANSWER")
     db.commit()
     assert p.stage_of(lead) == p.AI_NO_ANSWER
-    assert p.stage_of(lead) in p.TERMINAL
+    assert p.stage_of(lead) == p.AI_NO_ANSWER
     assert p.may_place_ai_call(lead)[0] is False
 
 
@@ -597,18 +597,359 @@ def test_constraints_are_dispatched_with_every_qualification_call():
 
 # ── the natural opening, still disclosed ─────────────────────────────────────
 
-@pytest.mark.parametrize("contact_name,expected", [
-    ("Raj Sharma", "Namaste Raj ji, main Purity Beans ki taraf se AI assistant baat kar rahi hoon."),
-    ("", "Namaste, main Purity Beans ki taraf se AI assistant baat kar rahi hoon."),
-    ("Manager", "Namaste, main Purity Beans"),            # a role, not a name
-    ("Mr. Gurpreet Singh", "Namaste Gurpreet ji, main"),  # salutation skipped
-    ("Sales Team", "Namaste, main"),
-    ("A1 Traders", "Namaste, main"),                         # not a person
+@pytest.mark.parametrize("contact_name", [
+    "Raj Sharma", "", "Manager", "Mr. Gurpreet Singh", "Sales Team", "A1 Traders",
 ])
-def test_the_opening_greets_a_real_name_or_none(db, contact_name, expected):
+def test_the_opening_uses_the_current_disclosure(db, contact_name):
     lead = _lead(db, contact_name=contact_name, company=f"Opening {contact_name or 'blank'}")
-    assert p.opening_for(lead).startswith(expected)
+    line = p.opening_for(lead)
+    assert line.startswith("नमस्ते,")
+    assert "Purity Beans" in line
+    assert "AI assistant" in line
+    assert p.script_discloses(line)[0] is True
 
+def test_every_opening_passes_the_disclosure_gate(db, registry):
+    """Founder decision 2026-09-18: natural, but the AI disclosure stays in
+    the first sentence. The gate runs on the per-lead line, so a name can
+    never push the disclosure out of it."""
+    for name in ("Raj", "", "Manager", "Mr. Gurpreet Singh"):
+        lead = _lead(db, contact_name=name, company=f"Gate {name or 'blank'}")
+        line = p.opening_for(lead)
+        assert p.script_discloses(line)[0] is True, line
+        assert "Purity Beans" in line
+        assert "minute" in line.lower()
+    assert p.may_place_ai_call(_lead(db, contact_name="Raj", company="Gate call"))[0] is True
+
+
+def test_the_opening_asks_before_it_pitches():
+    """The old opening delivered a pitch before permission. This one asks."""
+    assert "supply" not in p.OPENING_DISCLOSURE.lower()
+    assert p.OPENING_DISCLOSURE.rstrip().endswith("?")
+
+
+# ── which number a WhatsApp yes on the call covers ───────────────────────────
+
+def _consent_events(db, lead, kind):
+    from app.models.models import WorkflowEvent
+    return (db.query(WorkflowEvent)
+            .filter(WorkflowEvent.lead_id == lead.id, WorkflowEvent.event_type == kind).all())
+
+
+def test_this_number_is_fine_binds_the_number_that_was_called(db, registry):
+    """A WhatsApp number scraped earlier is not what they said yes to."""
+    lead = _lead(db, phone="+919876543210", whatsapp_number="+919999911111",
+                 company="Existing Number Co")
+    p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN", summary="yes, this number is fine")
+    db.commit()
+
+    assert lead.consent_status == "EXPLICIT"
+    assert lead.consent_phone == "+919876543210"
+    assert lead.whatsapp_number == "+919876543210"
+
+
+def test_a_number_read_out_on_the_call_is_the_one_bound(db, registry):
+    lead = _lead(db, phone="+919876543210", company="New Number Co")
+    p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN", summary="send it to 98123 45678",
+                        whatsapp_number="98123 45678")
+    db.commit()
+
+    assert lead.consent_phone == "9812345678"
+    assert lead.whatsapp_number == "9812345678"
+    ev = _consent_events(db, lead, "WHATSAPP_CONSENT_RECORDED")
+    assert len(ev) == 1 and "read out on the call" in ev[0].payload["evidence"]
+
+
+def test_a_misheard_number_is_not_consent(db, registry):
+    """Eight digits is a mishearing, not a destination."""
+    lead = _lead(db, phone="+919876543210", company="Misheard Co")
+    p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN", summary="send it there",
+                        whatsapp_number="98123456")
+    db.commit()
+
+    assert (lead.consent_status or "UNKNOWN").upper() != "EXPLICIT"
+    assert len(_consent_events(db, lead, "WHATSAPP_CONSENT_UNBOUND")) == 1
+    # the call itself is still recorded as interest
+    assert lead.outreach_stage == p.AI_INTEREST_DETECTED
+
+
+def test_a_yes_on_a_landline_is_not_consent(db, registry):
+    """They agreed, but the number they were speaking on cannot receive
+    WhatsApp. A person follows up for a mobile; nothing is bound."""
+    lead = _lead(db, phone="+91 172 234 5678", company="Landline Co")
+    p.record_ai_outcome(lead, db, "WHATSAPP_OPT_IN", summary="yes this number is fine")
+    db.commit()
+
+    assert (lead.consent_status or "UNKNOWN").upper() != "EXPLICIT"
+    ev = _consent_events(db, lead, "WHATSAPP_CONSENT_UNBOUND")
+    assert len(ev) == 1 and "landline" in ev[0].payload["note"]
+
+
+# ── V3: commercial guardrails ────────────────────────────────────────────────
+
+def test_no_commercial_figure_of_any_kind_may_be_improvised():
+    """A price was the first thing the model invented. Margins, MOQ, credit
+    and territory are the next things a distributor asks, and each is a
+    commitment the business would then have to honour or retract."""
+    blob = " ".join(p.CALL_CONSTRAINTS).lower()
+    for term in ("price", "margins", "minimum order", "credit terms",
+                 "territory", "delivery timelines", "sales figures"):
+        assert term in blob, f"{term} is not ruled out on the call"
+    assert "incorrect figure" in blob, "the agent needs a true thing to say instead"
+
+
+def test_handoff_topics_are_dispatched_with_the_call():
+    """The prompt offers a person for these; the list travels from here so
+    the two cannot drift."""
+    import inspect
+
+    from app.services.calling_agent import CallingAgentService
+
+    src = inspect.getsource(CallingAgentService._place_qualification_call)
+    assert '"handoff_topics"' in src and "call_context(" in src
+    assert "margins" in p.HANDOFF_TOPICS and "territory or exclusivity" in p.HANDOFF_TOPICS
+
+
+# ── V3: what the agent knows before it speaks ────────────────────────────────
+
+def test_provenance_names_the_public_listing_not_the_search_tool(db):
+    """phone_source records the tools that FOUND the listing. "We found you on
+    Perplexity" is neither where the number is published nor something a
+    shopkeeper would recognise."""
+    lead = _lead(db, company="Listed Co",
+                 phone_source="Perplexity, BraveSearch, IndiaMart, TradeIndia",
+                 lead_source="Google Maps")
+    ctx = p.call_context(lead, db)
+    assert ctx["provenance"] == "IndiaMART and TradeIndia"
+    assert "perplexity" not in ctx["provenance"].lower()
+
+
+def test_an_unknown_source_is_said_to_be_unknown(db):
+    """The prompt turns "" into "I don't have that detail". Any value here
+    would be spoken as fact."""
+    lead = _lead(db, company="Unknown Source Co", phone_source=None,
+                 lead_source="UNVERIFIED_IMPORT")
+    assert p.call_context(lead, db)["provenance"] == ""
+
+
+def test_business_type_comes_from_the_record(db):
+    lead = _lead(db, company="Kirana Co", division="retail_kirana", segment="grocery")
+    assert p.call_context(lead, db)["business_type"] == "retail kirana"
+
+
+def test_previous_contact_is_the_last_proven_touch_only(db):
+    from datetime import datetime
+
+    from app.models.models import WorkflowEvent
+
+    lead = _lead(db, company="Emailed Co")
+    assert p.call_context(lead, db)["previous_contact"] == "", "no touch, no claim of one"
+
+    # A decision to email is not an email, and a send with no provider proof
+    # is stored as EMAIL_SENT_UNPROVEN -- neither may be claimed on a call.
+    db.add(WorkflowEvent(lead_id=lead.id, event_type="NEXT_ACTION_SET",
+                         payload={"action": "SEND_EMAIL"}, occurred_at=datetime(2026, 9, 1)))
+    db.add(WorkflowEvent(lead_id=lead.id, event_type="EMAIL_SENT",
+                         occurred_at=datetime(2026, 9, 5)))
+    db.commit()
+    assert p.call_context(lead, db)["previous_contact"] == ""
+
+    db.add(WorkflowEvent(lead_id=lead.id, event_type="EMAIL_SENT", channel="email",
+                         payload={"to": "owner@emailed.in", "message_id": "<ctx-1@test>"},
+                         occurred_at=datetime(2026, 9, 10)))
+    db.commit()
+    assert p.call_context(lead, db)["previous_contact"] == "we sent an email on 10 Sep 2026"
+
+
+# ── V3: what the call learned ────────────────────────────────────────────────
+
+def _details(db, lead):
+    from app.models.models import WorkflowEvent
+    return (db.query(WorkflowEvent)
+            .filter(WorkflowEvent.lead_id == lead.id,
+                    WorkflowEvent.event_type == "AI_CALL_DETAILS").all())
+
+
+def test_what_the_call_learned_is_recorded_in_a_closed_vocabulary(db, registry):
+    lead = _lead(db, company="Learned Co", segment="distributor")
+    p.record_ai_outcome(lead, db, "SEND_INFO_EMAIL", summary="send to a@b.in",
+                        details={"preferred_channel": "email",
+                                 "handles_instant_coffee": "YES",
+                                 "decision_maker": "yes",
+                                 "objection": "EXISTING_SUPPLIER"})
+    db.commit()
+
+    ev = _details(db, lead)
+    assert len(ev) == 1
+    assert ev[0].payload == {"outcome": "SEND_INFO_EMAIL", "preferred_channel": "EMAIL",
+                             "handles_instant_coffee": "YES", "decision_maker": "YES",
+                             "objection": "EXISTING_SUPPLIER"}
+
+
+def test_an_unrecognised_detail_is_dropped_not_mapped(db, registry):
+    """"KEEN" is not a channel. Recording it as the nearest value would turn
+    a model's paraphrase into a fact the reports then count."""
+    lead = _lead(db, company="Paraphrase Co")
+    p.record_ai_outcome(lead, db, "INTERESTED", summary="sounded keen",
+                        details={"preferred_channel": "KEEN", "objection": "price"})
+    db.commit()
+
+    assert _details(db, lead)[0].payload == {"outcome": "INTERESTED", "objection": "PRICE"}
+
+
+def test_no_details_writes_no_details_row(db, registry):
+    lead = _lead(db, company="Silent Co")
+    p.record_ai_outcome(lead, db, "NOT_INTERESTED", summary="no")
+    db.commit()
+    assert _details(db, lead) == []
+
+
+def test_preferring_whatsapp_is_not_consent_to_it(db, registry):
+    """preferred_channel is what they said they like. Only the WHATSAPP_OPT_IN
+    outcome -- they chose it, for this number -- is permission."""
+    lead = _lead(db, company="Prefers WA Co", phone="+919876543210")
+    p.record_ai_outcome(lead, db, "INTERESTED", summary="likes whatsapp generally",
+                        details={"preferred_channel": "WHATSAPP"})
+    db.commit()
+
+    assert (lead.consent_status or "UNKNOWN").upper() != "EXPLICIT"
+    assert _consent_events(db, lead, "WHATSAPP_CONSENT_RECORDED") == []
+
+
+# ── #27: an ask for a person reaches a person ────────────────────────────────
+
+def _open_items(db, lead):
+    from app.models.models import WorkflowExecution
+    return (db.query(WorkflowExecution)
+            .filter(WorkflowExecution.lead_id == lead.id,
+                    WorkflowExecution.workflow_type == "FOUNDER_CALL",
+                    WorkflowExecution.status == "REQUESTED").all())
+
+
+@pytest.mark.parametrize("outcome", ["HUMAN_HANDOFF", "CALLBACK_REQUESTED", "MEETING_REQUESTED"])
+def test_an_ask_for_a_person_reaches_the_founder_queue_on_its_own(db, registry, outcome):
+    """Nothing called request_founder_call(), so these asks stopped at
+    AI_INTEREST_DETECTED and nobody was told. One AI call per lead means a
+    callback can only ever be kept by a human."""
+    lead = _lead(db, company=f"Asks {outcome}")
+    p.record_ai_outcome(lead, db, outcome, summary="wants to talk to someone",
+                        callback_window="after 6pm")
+    db.commit()          # the JSON payload used to fail exactly here
+    db.expire_all()
+
+    assert p.stage_of(lead) == p.FOUNDER_CALL_REQUESTED
+    items = _open_items(db, lead)
+    assert len(items) == 1
+    assert items[0].requested_by == "AI"
+    assert items[0].payload["reason"] == p.FOUNDER_CALL_ASKS[outcome]
+    assert "after 6pm" in items[0].payload["note"]
+    assert items[0].payload["founder_brief"]["business"] == lead.company
+
+
+def test_plain_interest_is_not_promoted_for_the_founder(db, registry):
+    """"Sounds interesting" is not a request to be called; the founder
+    promotes those by choice."""
+    lead = _lead(db, company="Just Interested")
+    p.record_ai_outcome(lead, db, "INTERESTED", summary="maybe later")
+    db.commit()
+    assert p.stage_of(lead) == p.AI_INTEREST_DETECTED
+    assert _open_items(db, lead) == []
+
+
+def test_the_brief_in_the_work_item_survives_a_round_trip(db, registry):
+    """founder_brief carries datetimes; the JSON column rejected them."""
+    lead = _lead(db, company="Dated Co")
+    p.record_ai_outcome(lead, db, "HUMAN_HANDOFF", summary="call me")
+    db.commit()
+    db.expire_all()
+    brief = _open_items(db, lead)[0].payload["founder_brief"]
+    assert isinstance(brief["stage_since"], str) and "T" in brief["stage_since"]
+
+
+def test_completing_the_call_closes_the_item_and_the_stage(db, registry):
+    from app.models.models import WorkflowEvent
+
+    lead = _lead(db, company="Called Back Co")
+    p.record_ai_outcome(lead, db, "CALLBACK_REQUESTED", summary="call after 6")
+    db.commit()
+    assert [i.lead_id for i in p.founder_call_queue(db)] == [lead.id]
+
+    p.complete_founder_call(lead, db, outcome="SAMPLE_AGREED", note="sending 2 jars")
+    db.commit()
+
+    assert p.stage_of(lead) == p.FOUNDER_CALL_COMPLETED
+    assert _open_items(db, lead) == []
+    assert p.founder_call_queue(db) == []
+    ev = (db.query(WorkflowEvent)
+          .filter(WorkflowEvent.lead_id == lead.id,
+                  WorkflowEvent.event_type == "FOUNDER_CALL_COMPLETED").one())
+    assert ev.payload["outcome"] == "SAMPLE_AGREED"
+
+
+def test_a_call_that_was_never_queued_cannot_be_completed(db, registry):
+    lead = _lead(db, company="Never Queued Co")
+    with pytest.raises(ValueError, match="not in the founder call queue"):
+        p.complete_founder_call(lead, db, outcome="SPOKE")
+
+
+def test_a_completed_call_needs_an_outcome(db, registry):
+    lead = _lead(db, company="No Outcome Co")
+    p.record_ai_outcome(lead, db, "HUMAN_HANDOFF", summary="x")
+    with pytest.raises(ValueError, match="needs an outcome"):
+        p.complete_founder_call(lead, db, outcome="  ")
+
+
+def test_the_founder_brief_lists_who_is_waiting(db, registry):
+    from app.services.founder_brief import _founder_calls_waiting
+
+    lead = _lead(db, company="Waiting Co", phone="9876543219")
+    p.record_ai_outcome(lead, db, "HUMAN_HANDOFF", summary="call me",
+                        callback_window="tomorrow 11am")
+    db.commit()
+    waiting = _founder_calls_waiting(db)
+    assert len(waiting) == 1
+    assert waiting[0]["business"] == "Waiting Co"
+    assert waiting[0]["phone"] == "9876543219"
+    assert waiting[0]["callback"] == "tomorrow 11am"
+
+
+def test_opt_out_consent_refuses_the_call(db, registry):
+    lead = _lead(db, company="Opted Out Cafe", consent_status="OPT_OUT")
+    ok, why = p.may_place_ai_call(lead)
+    assert ok is False
+    assert "OPT_OUT" in why
+
+
+def test_duplicate_company_is_refused_by_the_calling_authority(db, registry):
+    _lead(db, company="Cafe Mocha Pvt Ltd", phone="9876511111", status="CONTACTED")
+    target = _lead(db, company="Cafe Mocha Private Limited", phone="9876522222")
+    ok, why = p.may_place_ai_call(target)
+    assert ok is False
+    assert "duplicate_company_active" in why
+
+
+def test_zero_estimated_value_is_not_a_call_block(db, registry):
+    """low_margin used estimated_value, which is 0 on most cafes."""
+    lead = _lead(db, company="Zero Value Cafe", estimated_value=0)
+    assert p.may_place_ai_call(lead)[0] is True
+
+
+def test_short_digit_run_is_not_dialable(db, registry):
+    lead = _lead(db, company="Short Phone Cafe", phone="12345")
+    ok, why = p.may_place_ai_call(lead)
+    assert ok is False
+    assert "not a dialable number" in why or "fabricated" in why
+
+@pytest.mark.parametrize(
+    "contact_name", [
+    "Raj Sharma", "", "Manager", "Mr. Gurpreet Singh", "Sales Team", "A1 Traders",
+])
+def test_the_opening_uses_the_current_disclosure(db, contact_name):
+    lead = _lead(db, contact_name=contact_name, company=f"Opening {contact_name or 'blank'}")
+    line = p.opening_for(lead)
+    assert line.startswith("नमस्ते,")
+    assert "Purity Beans" in line
+    assert "AI assistant" in line
+    assert p.script_discloses(line)[0] is True
 
 def test_every_opening_passes_the_disclosure_gate(db, registry):
     """Founder decision 2026-09-18: natural, but the AI disclosure stays in

@@ -10,6 +10,8 @@ from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any
 
+from sqlalchemy import inspect
+
 from app.models.models import AgentLog, WorkflowEvent
 
 
@@ -42,6 +44,15 @@ def record_call_learning(db, lead, *, outcome: str, summary: str = "",
         "details": details or {},
         "recorded_at": datetime.utcnow().isoformat(),
     }
+    # Learning is advisory. If a legacy/test database has not materialized
+    # the optional projection table yet, recording learning must not break the
+    # authoritative call outcome or founder workflow.
+    try:
+        bind = getattr(db, "bind", None)
+        if bind is not None and not inspect(bind).has_table("agent_logs"):
+            return
+    except Exception:
+        return
     db.add(AgentLog(
         agent_name="ai_call_learning",
         action="CALL_LEARNING_RECORDED",

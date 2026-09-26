@@ -218,7 +218,7 @@ def test_whatsapp_consent_does_not_license_a_second_ai_call(db, tmp_path, monkey
 
     assert ok is False
     assert reason.startswith("cold_call_refused"), reason
-    assert "once per lead" in reason
+    assert "retry is allowed only when ai_retry_after is due" in reason
     assert calls == []
 
 

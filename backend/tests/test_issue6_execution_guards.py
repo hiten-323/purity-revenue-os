@@ -5,6 +5,7 @@ from fastapi import HTTPException
 
 
 def _email_sender(monkeypatch):
+    monkeypatch.setenv("OUTREACH_BUSINESS_HOURS", "0")
     from app.services import email_sender
 
     monkeypatch.setattr(email_sender, "SENDER_PASSWORD", "test-only")

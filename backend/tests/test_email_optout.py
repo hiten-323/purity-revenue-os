@@ -65,6 +65,7 @@ def captured(monkeypatch):
     _CapturedSMTP.sent = []
     monkeypatch.setattr(es.smtplib, "SMTP", _CapturedSMTP)
     monkeypatch.setattr(es, "SENDER_PASSWORD", "test-password")
+    monkeypatch.setenv("OUTREACH_BUSINESS_HOURS", "0")
     # The NXDOMAIN gate does a real DNS lookup; this suite must not.
     monkeypatch.setattr(es, "domain_is_deliverable", lambda addr: True)
     # Gate B (volume/pace/provider health) fails closed without a database,
