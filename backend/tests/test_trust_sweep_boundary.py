@@ -179,3 +179,13 @@ def test_sweep_is_a_fixpoint(db):
     events = db.query(WorkflowEvent).filter(
         WorkflowEvent.event_type == "TRUST_TRANSITION").count()
     assert events == first["moved"], "re-running duplicated audit history"
+
+
+def test_validated_is_sendable_at_confidence_floor(db):
+    """VALIDATED contacts may enter autonomous email once the normal confidence gate is met."""
+    lead = _lead(db, "Validated Coffee Co", "owner@validatedcoffee.in")
+    lead.email_confidence = tp.CONFIDENCE_FLOOR
+    db.commit()
+
+    ok, why = tp.may_send(lead)
+    assert ok is True, f"VALIDATED at confidence floor refused: {why}"
