@@ -19,6 +19,7 @@ from app.api.endpoints import router as api_router
 from app.api.founder_router import router as founder_router
 from app.api.whatsapp_gateway import router as whatsapp_gateway_router
 from app.api.marketplace_router import router as marketplace_router
+from app.api.outreach_status_router import router as outreach_status_router
 from app.database.database import engine, Base, get_db
 from app.database.schema import assert_schema_compatible
 from app.api.auth import is_protected_webhook_path, require_api_admin
@@ -42,6 +43,7 @@ SENSITIVE_GET_PATHS = {
     "/api/v1/shopify/orders",
     "/api/v1/shopify/inventory",
     "/api/v1/webhooks/shopify/events",
+    "/api/v1/outreach/status",
     "/api/v1/settings",
 }
 
@@ -432,6 +434,7 @@ app.include_router(api_router, prefix="/api/v1")
 app.include_router(founder_router, prefix="/api/v1")
 app.include_router(whatsapp_gateway_router, prefix="/api/v1")
 app.include_router(marketplace_router, prefix="/api/v1")
+app.include_router(outreach_status_router, prefix="/api/v1")
 
 @app.get("/")
 def read_root():
