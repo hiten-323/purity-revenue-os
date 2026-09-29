@@ -119,6 +119,14 @@ class CallingAgentService:
         if learned_question and learned_question not in questions:
             questions.append(learned_question)
 
+        # Call learning loop: standing do-not-call rules and the pre-dial
+        # brief (prior calls with this lead + segment lessons). May only
+        # REFUSE; a brief that cannot be built never blocks the dial.
+        from app.services.call_intelligence.dial_hooks import after_dial, prepare_dial
+        refusal, brief_ctx, call_brief, call_ref = prepare_dial(db, lead)
+        if refusal:
+            return False, f"cold_call_refused: {refusal}"
+
         result = voice_router.place_call(
             lead,
             context={
@@ -140,6 +148,7 @@ class CallingAgentService:
                 # From the record only, so "how did you get my number?" has a
                 # true answer and the agent never improvises one.
                 **pipeline.call_context(lead, db),
+                **brief_ctx,
             },
             scheduled_at=scheduled_at,
         )
@@ -175,6 +184,15 @@ class CallingAgentService:
         lead.call_provider = voice_router.active()
         lead.last_call_date = datetime.utcnow()
         db.commit()
+        # Opened only after the lead state is durable, in its own commit, so
+        # a learning-side failure can never roll back the dial bookkeeping.
+        after_dial(db, lead, call_ref=call_ref, brief=call_brief,
+                   provider=voice_router.active(),
+                   provider_call_id=result.provider_call_id)
+        try:
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
         return True, f"qualification_call_placed: {result.provider_call_id}"
 
     @staticmethod

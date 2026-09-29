@@ -112,6 +112,20 @@ if __name__ == "__main__":
             else:
                 logging.info("autonomous outreach disabled (set AUTO_OUTREACH_ENABLED=1 after runtime gate)")
 
+            # Call learning loop: leads stuck in call_status=CALLING past
+            # CALL_RECONCILER_STALE_MINUTES get a terminal state. Default mode
+            # is dry_run (report only); CALL_RECONCILER_MODE=write to apply.
+            # Never dials, never changes outreach_stage.
+            try:
+                from app.services.call_intelligence.reconciler import run_from_worker
+                rec = run_from_worker(db)
+                if rec.get("mode") != "off":
+                    logging.info("call reconciler: %s", {k: rec.get(k) for k in
+                                 ("mode", "stuck_calling_leads", "proposed_terminal_state", "applied")})
+            except Exception as e:
+                db.rollback()
+                logging.error("call reconciler failed: %s", e)
+
             try:
                 from app.services.sequence_engine import prepare_due_drafts
                 prep = prepare_due_drafts(db)

@@ -44,6 +44,8 @@ SENSITIVE_GET_PATHS = {
     "/api/v1/shopify/inventory",
     "/api/v1/webhooks/shopify/events",
     "/api/v1/outreach/status",
+    # call learning loop: founder follow-up list carries company names
+    "/api/v1/outreach-intelligence/calls",
     "/api/v1/settings",
 }
 

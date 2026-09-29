@@ -793,8 +793,14 @@ def clean_call_details(details) -> dict:
 def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
                       interest: str = "", callback_window: str = "",
                       transcript: str = "", whatsapp_number: str = "",
-                      details: dict | None = None) -> str:
+                      details: dict | None = None,
+                      call_meta: dict | None = None) -> str:
     """Apply one AI call result. The only entry point after a dial.
+
+    call_meta (optional) is what the voice agent/engine knows about the call
+    itself -- call_ref, room/SIP ids, answered/ended timestamps, turns,
+    opener variant, termination reason. It feeds the structured CallResult
+    only; nothing in it affects the state machine below.
 
     Consent is not written here in any branch. An opt-out DOES write
     do_not_call -- that is the business telling us to stop, which is a fact
@@ -975,6 +981,26 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
                 lead, db, reason=FOUNDER_CALL_ASKS[key], requested_by="AI",
                 note=(summary or "")
                      + (f" | callback: {callback_window}" if callback_window else ""))
+    # Guaranteed writeback: the lead leaves call_status=CALLING and the call
+    # gets its structured result (call_intelligence). Before this, nothing on
+    # this path ever touched call_status, so even a recorded outcome left the
+    # lead CALLING forever. Advisory for everything except call_status; never
+    # allowed to fail the outcome itself.
+    try:
+        from app.services.call_intelligence.capture import finalize_call
+        meta = dict(call_meta or {})
+        finalize_call(
+            db, lead, fsm_key=key,
+            termination_reason=meta.pop("termination_reason", None),
+            source=meta.pop("source", None) or "voice_agent",
+            meta=meta, transcript=transcript, summary=summary,
+            details=details or {}, callback_window=callback_window,
+            sip_status_code=meta.pop("sip_status_code", None),
+        )
+    except Exception:
+        if getattr(lead, "call_status", None) == "CALLING":
+            lead.call_status = "COMPLETED"
+
     # Where the lead actually is -- past `target` when the ask was queued.
     # The webhook reports this, and a retry reports stage_of(); they must agree.
     return stage_of(lead)
