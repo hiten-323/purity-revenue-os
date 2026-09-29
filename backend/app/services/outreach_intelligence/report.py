@@ -69,9 +69,23 @@ def build_intelligence_report(db: Session) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
 
+    # Call learning loop (call_intelligence): outcome breakdown, lessons,
+    # founder follow-up list. Advisory; an error here never breaks the report.
+    try:
+        from app.services.call_intelligence.report import build_calls_report
+        calls = build_calls_report(db, follow_up_limit=25)
+        # This report is not admin-gated; the named follow-up list lives on
+        # the admin-only GET /outreach-intelligence/calls.
+        fu = calls.pop("founder_follow_up", []) or []
+        calls["founder_follow_up_count"] = len(fu)
+        calls["founder_follow_up_endpoint"] = "/api/v1/outreach-intelligence/calls"
+    except Exception as exc:  # noqa: BLE001
+        calls = {"error": str(exc)[:200]}
+
     return {
         "email_funnel": email_funnel,
         "call_funnel": call_funnel,
+        "calls": calls,
         "sequence_summaries": {
             "note": "Touch-level sequences via OutreachTouch; not expanded in V1 report.",
             "ledger_events": len(events),

@@ -1,0 +1,45 @@
+--- a/profiles/purity-coffee-b2b/agent.js
++++ b/profiles/purity-coffee-b2b/agent.js
+@@ -143,6 +143,14 @@
+     previous_contact: attrs.previous_contact || '',
+     past_summary: attrs.past_summary || '',
+     order_number: attrs.entity_ref || '',
++    // Call learning loop (backend call_intelligence.brief). call_ref is
++    // echoed back with the outcome so Python can match the exact attempt;
++    // call_brief is a short, founder-safe block of prior-call facts and
++    // thresholded segment lessons. Each is '' from an older backend.
++    call_ref: attrs.call_ref || '',
++    opener_variant: attrs.opener_variant || '',
++    script_variant: attrs.script_variant || '',
++    call_brief: String(attrs.call_brief || '').slice(0, 1200),
+   };
+ }
+ 
+@@ -256,6 +264,9 @@
+       // Empty is not proof of no contact (an older backend does not send the
+       // field at all), so this line claims neither.
+       : `- You don't know of any earlier contact. Never claim one; if they mention one, acknowledge it. Do not invent that a catalogue email was already sent.`,
++    v.call_brief
++      ? `- Notes from earlier calls and what has worked (advisory; the HARD RULES below always win):\n${v.call_brief}`
++      : '',
+     v.provenance
+       ? `- If asked how you got their number: "Your business number is listed publicly — we found it on ${v.provenance}." Nothing more.`
+       : `- If asked how you got their number: you don't have that detail to hand — say so, and that the team can confirm it. Never invent a source.`,
+@@ -493,6 +504,17 @@
+         handles_instant_coffee: extra.handles_instant_coffee || '',
+         decision_maker: extra.decision_maker || '',
+         objection: extra.objection || '',
++        // Call learning loop: which attempt, how it went. All optional.
++        call_ref: v.call_ref || '',
++        opener_variant: v.opener_variant || '',
++        script_variant: v.script_variant || '',
++        room_name: extra.room_name || '',
++        sip_call_id: extra.sip_call_id || '',
++        answered_at: extra.answered_at || '',
++        ended_at: extra.ended_at || new Date().toISOString(),
++        language: extra.language || '',
++        termination_reason: extra.termination_reason || '',
++        ...(Array.isArray(extra.turns) ? { turns: extra.turns.slice(-60) } : {}),
+       }),
+     });
+     const body = await res.json().catch(() => ({}));

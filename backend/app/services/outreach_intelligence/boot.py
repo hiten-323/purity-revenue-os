@@ -23,6 +23,13 @@ def register_outreach_intelligence(fastapi_app, engine) -> None:
     except Exception as exc:  # noqa: BLE001
         log.warning("outreach intelligence schema ensure failed: %s", exc)
 
+    # Call learning loop: new call_results table only (CREATE IF NOT EXISTS).
+    try:
+        from app.services.call_intelligence.models import ensure_call_results_table
+        ensure_call_results_table(engine)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("call_results schema ensure failed: %s", exc)
+
     # Avoid double-registration if main already included the router
     paths = {getattr(r, "path", None) for r in fastapi_app.routes}
     if not any(p and "outreach-intelligence" in str(p) for p in paths):

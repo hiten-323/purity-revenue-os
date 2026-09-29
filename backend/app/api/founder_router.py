@@ -7,6 +7,8 @@ The founder's only required role in outreach is approval. Everything else
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+from typing import Optional
+
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -135,6 +137,46 @@ class AICallOutcomeBody(BaseModel):
     handles_instant_coffee: str = ""
     decision_maker: str = ""
     objection: str = ""
+    # Call-level facts for the structured CallResult (call_intelligence).
+    # All optional: an older agent that sends none of them still works.
+    call_ref: str = ""
+    room_name: str = ""
+    sip_call_id: str = ""
+    provider_call_id: str = ""
+    started_at: str = ""
+    answered_at: str = ""
+    ended_at: str = ""
+    duration_seconds: Optional[float] = None
+    turns: Optional[list] = None
+    language: str = ""
+    opener_variant: str = ""
+    script_variant: str = ""
+    termination_reason: str = ""
+
+
+# call_status values meaning "a dial went out and no real result is in yet".
+# UNKNOWN_NO_RESULT is what the stale-call reconciler writes; a late but real
+# report (the sidecar retries a no-answer for up to ~3h) must still land.
+_DIAL_OUTSTANDING = {"CALLING", "UNKNOWN_NO_RESULT"}
+
+
+def _call_meta(body) -> dict:
+    keys = ("call_ref", "room_name", "sip_call_id", "provider_call_id", "started_at",
+            "answered_at", "ended_at", "duration_seconds", "turns", "language",
+            "opener_variant", "script_variant", "termination_reason")
+    return {k: getattr(body, k) for k in keys
+            if getattr(body, k, None) not in (None, "", [])}
+
+
+def _already_final(db, call_ref: str) -> bool:
+    if not call_ref:
+        return False
+    try:
+        from app.services.call_intelligence.capture import find_result
+        row = find_result(db, call_ref)
+    except Exception:  # noqa: BLE001
+        return False
+    return row is not None and row.status == "FINAL" and row.source in ("voice_agent", "founder")
 
 
 @router.get("/ai-call-learning", dependencies=[Depends(require_api_admin)])
@@ -183,7 +225,19 @@ def post_ai_call_outcome(body: AICallOutcomeBody, db: Session = Depends(get_db))
     # retry — MAX_AI_COLD_CALLS_PER_LEAD is 1, so there is no legitimate way
     # for a second real call to have happened, and that case still surfaces
     # as an error rather than being silently accepted.
-    if lead.call_outcome_last == key and pipeline.stage_of(lead) != pipeline.ELIGIBLE:
+    #
+    # Call learning loop fix: with retries (AI_NO_ANSWER -> redial) a second
+    # REAL attempt can legitimately report the same outcome as the first, and
+    # the old check swallowed it -- the lead then sat in CALLING forever.
+    # A report is now a duplicate when (a) its call_ref already has a final
+    # result, or (b) with no call_ref, the outcome matches AND no dial is
+    # outstanding (call_status != CALLING: the first report cleared it).
+    meta = _call_meta(body)
+    duplicate = _already_final(db, body.call_ref) if body.call_ref else (
+        lead.call_outcome_last == key
+        and pipeline.stage_of(lead) != pipeline.ELIGIBLE
+        and (lead.call_status or "") not in _DIAL_OUTSTANDING)
+    if duplicate:
         return {
             "status": "already_recorded",
             "lead_id": lead.id,
@@ -203,6 +257,7 @@ def post_ai_call_outcome(body: AICallOutcomeBody, db: Session = Depends(get_db))
                      "handles_instant_coffee": body.handles_instant_coffee,
                      "decision_maker": body.decision_maker,
                      "objection": body.objection},
+            call_meta=meta,
         )
     except ValueError as e:
         db.rollback()
@@ -220,7 +275,82 @@ def post_ai_call_outcome(body: AICallOutcomeBody, db: Session = Depends(get_db))
     # call whose outcome never appeared in the database afterward.
     db.commit()
 
-    return {"status": "recorded", "lead_id": lead.id, "stage": target_stage}
+    return {"status": "recorded", "lead_id": lead.id, "stage": target_stage,
+            "call_status": lead.call_status}
+
+
+class AICallStatusBody(BaseModel):
+    """An engine-side termination (no answer, busy, SIP error, agent crash,
+    timeout) -- the paths that never reach the model's outcome tool. Sent by
+    the sidecar scheduler's onNoAnswer hook and the agent's SIP-failure path.
+    """
+    lead_id: int
+    reason: str = ""            # NO_ANSWER | BUSY | VOICEMAIL | FAILED | SIP_ERROR | ...
+    sip_status_code: Optional[int] = None
+    call_ref: str = ""
+    room_name: str = ""
+    sip_call_id: str = ""
+    provider_call_id: str = ""
+    started_at: str = ""
+    ended_at: str = ""
+    attempts: Optional[int] = None
+    detail: str = ""
+
+
+@router.post("/ai-call-status", dependencies=[Depends(require_api_admin)])
+def post_ai_call_status(body: AICallStatusBody, db: Session = Depends(get_db)):
+    """Terminal writeback for calls that ended without a model outcome.
+
+    Maps the engine reason (or SIP code) onto the existing FSM outcome
+    vocabulary and routes through record_ai_outcome. If no dial is
+    outstanding or the FSM refuses, the call is still finalised
+    (call_status leaves CALLING, a CallResult is written) without touching
+    outreach_stage. Never dials, never sends.
+    """
+    from app.services import founder_call_pipeline as pipeline
+    from app.services.call_intelligence.capture import finalize_call
+    from app.services.call_intelligence.taxonomy import ENGINE_TERMINATIONS, termination_from_sip
+
+    lead = db.query(B2BLead).filter(B2BLead.id == body.lead_id).first()
+    if not lead:
+        raise HTTPException(404, f"lead {body.lead_id} not found")
+    reason = ((body.reason or "").strip().upper()
+              or termination_from_sip(body.sip_status_code) or "")
+    if reason == "SIP_ERROR" and body.sip_status_code is not None:
+        reason = termination_from_sip(body.sip_status_code) or reason
+    if reason not in ENGINE_TERMINATIONS:
+        raise HTTPException(400, f"unknown termination reason {body.reason!r}; expected one of "
+                                 + ", ".join(sorted(ENGINE_TERMINATIONS)))
+    if body.call_ref and _already_final(db, body.call_ref):
+        return {"status": "already_recorded", "lead_id": lead.id,
+                "stage": pipeline.stage_of(lead), "call_status": lead.call_status}
+    fsm_key = ENGINE_TERMINATIONS[reason]
+    meta = {k: v for k, v in {
+        "call_ref": body.call_ref, "room_name": body.room_name,
+        "sip_call_id": body.sip_call_id, "provider_call_id": body.provider_call_id,
+        "started_at": body.started_at, "ended_at": body.ended_at,
+    }.items() if v not in (None, "")}
+    # Only an outstanding dial gets a new FSM outcome; a late engine report
+    # for an already-concluded call must not count another attempt.
+    fsm_applied = False
+    if (lead.call_status or "") in _DIAL_OUTSTANDING:
+        try:
+            pipeline.record_ai_outcome(
+                lead, db, fsm_key, summary=(body.detail or "")[:500],
+                call_meta={**meta, "termination_reason": reason, "source": "engine",
+                           "sip_status_code": body.sip_status_code})
+            fsm_applied = True
+        except ValueError:
+            db.rollback()
+            lead = db.query(B2BLead).filter(B2BLead.id == body.lead_id).first()
+    if not fsm_applied:
+        finalize_call(db, lead, fsm_key=fsm_key, termination_reason=reason, source="engine",
+                      meta=meta, summary=body.detail or None,
+                      sip_status_code=body.sip_status_code)
+    db.commit()
+    return {"status": "recorded", "lead_id": lead.id, "fsm_applied": fsm_applied,
+            "stage": pipeline.stage_of(lead), "call_status": lead.call_status,
+            "termination_reason": reason}
 
 
 # ── the founder call queue ───────────────────────────────────────────────────
