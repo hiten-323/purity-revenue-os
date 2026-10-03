@@ -369,6 +369,31 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
                 _exc,
             )
 
+    # Gate A3: repeat-send backstop (email_repeat_guard). At most one email per
+    # lead (or mailbox) per EMAIL_LEAD_MIN_GAP_HOURS, default 72, unless the
+    # buyer engaged after the last one — so replies still go out — plus the
+    # EMAIL_HOLD_LEAD_IDS operator hold. AltSpace got 45 emails and FabHotel
+    # 37, one per worker cycle, because no layer here asked "did we just email
+    # them?". Fails closed.
+    if not _is_self and getattr(email, "lead_id", None):
+        try:
+            from app.database.database import SessionLocal
+            from app.services.email_repeat_guard import check as _repeat_check
+            _db = SessionLocal()
+            try:
+                _rok, _rwhy = _repeat_check(_db, int(email.lead_id), to_email=email.to_email)
+            finally:
+                _db.close()
+        except Exception as _exc:
+            return _gate_failure(email, "repeat-send guard unavailable; email not sent", _exc)
+        if not _rok:
+            try:
+                from app.observability import REFUSED, decision
+                decision("email.repeat_guard", REFUSED, _rwhy, lead=email.lead_id, to=email.to_email)
+            except Exception:
+                pass
+            return _gate_failure(email, _rwhy.removeprefix("HELD: "))
+
     # Gate B: provider-level throttling / account blocks and our own volume,
     # pace and failure limits. Previously only bg_send_emails consulted this,
     # so the other four paths could hammer a flagged account.
