@@ -662,6 +662,19 @@ def plan_touch(db: Session, lead: B2BLead, profile: OutreachProfile | None = Non
             "reason": "sequence/history state unavailable — refusing automated outreach",
             "execute": False,
         }
+    # A scheduled cadence touch needs the authority's SEND, nothing less.
+    # DRAFT_ONLY ("may write, not send") used to fall through to here, and
+    # with it AltSpace (lead 1345) got 45 follow-ups and FabHotel (lead 266)
+    # 37 — one per worker cycle, long after the sequence had completed.
+    # Request fulfilment above (catalogue, sample, call follow-up) is answering
+    # the buyer and keeps its own one-shot duplicate guards.
+    if verdict["action"] != "SEND":
+        return {"action": "DRAFT_ONLY", "channel": None, "execute": False,
+                "reason": f"decision engine: {verdict['action']} — "
+                          f"{verdict.get('reason', '')}; no automated cadence send"}
+    if not seq.get("active") or not seq.get("ready"):
+        return {"action": "NURTURE", "channel": None, "execute": False,
+                "reason": f"sequence {seq.get('reason')} — nothing due"}
     touch = (seq.get("next_touch") or "").lower()
     variant = {
         "intro": "WARM_FIRST_TOUCH",
@@ -769,6 +782,46 @@ def _record(
     return touch
 
 
+def _step_already_sent(db: Session, lead_id: int, step_key: str) -> bool:
+    rows = (
+        db.query(OutreachTouch)
+        .filter(
+            OutreachTouch.lead_id == lead_id,
+            OutreachTouch.channel == "email",
+            OutreachTouch.status.in_(PROVEN_SEND + ("SENDING", "UNPROVEN")),
+        )
+        .all()
+    )
+    return any((r.payload or {}).get("step_key") == step_key for r in rows)
+
+
+def _reserve_send(db: Session, lead: B2BLead, profile: OutreachProfile,
+                  action: str, step_key: str, attempts: int = 6):
+    """Durable in-flight marker, committed before SMTP. Returns the row or None."""
+    import time as _time
+    from app.database.database import is_sqlite_locked
+
+    for i in range(attempts):
+        row = OutreachTouch(
+            lead_id=lead.id, profile_id=profile.id, channel="email",
+            touch_type=action, template_key="reservation", status="SENDING",
+            payload={"step_key": step_key, "to": lead.email,
+                     "reserved_at": datetime.utcnow().isoformat()},
+        )
+        db.add(row)
+        try:
+            db.commit()
+            return row
+        except Exception as exc:
+            db.rollback()
+            if not is_sqlite_locked(exc) or i == attempts - 1:
+                print(f"[smart_outreach] send reservation failed for lead {lead.id}: "
+                      f"{exc.__class__.__name__}")
+                return None
+            _time.sleep(0.05 * (2 ** i))
+    return None
+
+
 def _adapt_email_to_learning(body: str, learning: dict) -> str:
     """Apply learned cross-lead evidence without changing channel permission.
 
@@ -864,6 +917,26 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
             _record(db, lead, profile, "email", decision["action"], "BLOCKED", "missing_email")
             db.commit()
             return {**decision, "status": "BLOCKED", "reason": "missing email"}
+
+        # Idempotency, independent of the planner: (1) the per-lead repeat
+        # guard, counting in-flight reservations; (2) a durable per-step key —
+        # a given step for a given lead is sent once; (3) a SENDING reservation
+        # committed BEFORE SMTP, so a crash or lock between SMTP success and
+        # the record can never let the next cycle send the same step again.
+        from app.services import email_repeat_guard as _rg
+        step_key = f"{decision['action']}:{touch_name}:{seq.get('touches', proven_n)}"
+        try:
+            ok, why = _rg.check(db, lead.id, to_email=lead.email, include_reservations=True)
+            if ok and _step_already_sent(db, lead.id, step_key):
+                ok, why = False, f"HELD: step {step_key} already sent or in flight"
+        except Exception as exc:
+            ok, why = False, f"HELD: repeat-send guard unavailable ({exc.__class__.__name__})"
+        if not ok:
+            return {**decision, "status": "SKIPPED", "reason": why}
+        reservation = _reserve_send(db, lead, profile, decision["action"], step_key)
+        if reservation is None:
+            return {**decision, "status": "SKIPPED",
+                    "reason": "HELD: could not reserve send (database busy)"}
         email = build_outreach_email(
             lead.email or "",
             lead.contact_name or "",
@@ -890,8 +963,17 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
             error=result.error,
             message_id=result.message_id,
             learning=learning,
+            step_key=step_key,
         )
-        db.commit()
+        # The SENT/FAILED touch is now the durable record; the reservation goes
+        # in the same commit. If this commit fails after a real send, the
+        # reservation survives and keeps blocking the step — fail safe.
+        try:
+            db.delete(reservation)
+        except Exception:
+            pass
+        from app.database.database import commit_with_retry
+        commit_with_retry(db)
         return {**decision, "status": status, "error": result.error, "message_id": result.message_id}
 
     if decision["channel"] == "whatsapp":
