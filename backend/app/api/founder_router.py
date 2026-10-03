@@ -309,7 +309,8 @@ def post_ai_call_status(body: AICallStatusBody, db: Session = Depends(get_db)):
     """
     from app.services import founder_call_pipeline as pipeline
     from app.services.call_intelligence.capture import finalize_call
-    from app.services.call_intelligence.taxonomy import ENGINE_TERMINATIONS, termination_from_sip
+    from app.services.call_intelligence.taxonomy import (
+        ENGINE_TERMINATIONS, NEVER_RANG_TERMINATIONS, termination_from_sip)
 
     lead = db.query(B2BLead).filter(B2BLead.id == body.lead_id).first()
     if not lead:
@@ -325,6 +326,22 @@ def post_ai_call_status(body: AICallStatusBody, db: Session = Depends(get_db)):
         return {"status": "already_recorded", "lead_id": lead.id,
                 "stage": pipeline.stage_of(lead), "call_status": lead.call_status}
     fsm_key = ENGINE_TERMINATIONS[reason]
+    if reason in NEVER_RANG_TERMINATIONS:
+        # The business's phone never rang: not an attempt, not a no-answer.
+        from app.services.call_intelligence.never_rang import release_never_rang
+        meta = {k: v for k, v in {
+            "call_ref": body.call_ref, "room_name": body.room_name,
+            "sip_call_id": body.sip_call_id, "provider_call_id": body.provider_call_id,
+            "started_at": body.started_at, "ended_at": body.ended_at,
+        }.items() if v not in (None, "")}
+        res = release_never_rang(db, lead, reason=reason, meta=meta,
+                                 detail=(body.detail or "")[:500] or None)
+        db.commit()
+        return {"status": "released" if res["released"] else "recorded",
+                "lead_id": lead.id, "fsm_applied": False,
+                "stage": pipeline.stage_of(lead), "call_status": lead.call_status,
+                "termination_reason": reason, "attempt_released": res["released"],
+                "ai_call_count": res["ai_call_count"]}
     meta = {k: v for k, v in {
         "call_ref": body.call_ref, "room_name": body.room_name,
         "sip_call_id": body.sip_call_id, "provider_call_id": body.provider_call_id,
@@ -351,6 +368,22 @@ def post_ai_call_status(body: AICallStatusBody, db: Session = Depends(get_db)):
     return {"status": "recorded", "lead_id": lead.id, "fsm_applied": fsm_applied,
             "stage": pipeline.stage_of(lead), "call_status": lead.call_status,
             "termination_reason": reason}
+
+
+class SystemAlertBody(BaseModel):
+    """An operational alert for the founder (provider credit exhausted, voice
+    agent wedged, auto-dispatch paused). Emailed to the founder only."""
+    kind: str = Field(..., min_length=2, max_length=60)
+    detail: str = Field("", max_length=4000)
+    key: str = Field("", max_length=120)
+
+
+@router.post("/system-alert", dependencies=[Depends(require_api_admin)])
+def post_system_alert(body: SystemAlertBody):
+    """Email the founder a rate-limited system alert. Never contacts a lead."""
+    from app.services.founder_alert import send_system_alert
+
+    return send_system_alert(body.kind, body.detail, key=body.key or None)
 
 
 # ── the founder call queue ───────────────────────────────────────────────────

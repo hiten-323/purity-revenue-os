@@ -1,0 +1,9 @@
+{
+  "name": "purity-nuraveda-voice-integration",
+  "private": true,
+  "type": "module",
+  "description": "Purity-owned files installed into the Nuraveda voice sidecar (ai-voice-agent). Tests only; no runtime dependencies.",
+  "scripts": {
+    "test": "node --test test/"
+  }
+}

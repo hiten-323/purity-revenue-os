@@ -180,7 +180,7 @@ def _next_action(outcome: str, *, callback_window: str | None, lead,
         return "SEND_CATALOGUE", None
     if outcome == "INTERESTED":
         return "FOUNDER_FOLLOW_UP", None
-    if outcome in {"NO_ANSWER", "BUSY", "VOICEMAIL", "FAILED"}:
+    if outcome in {"NO_ANSWER", "BUSY", "VOICEMAIL", "FAILED", "DISPATCH_FAILED"}:
         return "RETRY_PER_POLICY", getattr(lead, "ai_retry_after", None)
     return "FOUNDER_REVIEW", None
 

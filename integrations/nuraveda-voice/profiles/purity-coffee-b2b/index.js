@@ -19,6 +19,18 @@ export function classifyReason(reason, disposition) {
   const r = String(reason || '').toLowerCase();
   const d = String(disposition || '').toLowerCase();
   const sip = (r.match(/\b([4-6]\d\d)\b/) || [])[1];
+  // Never rang (scheduler dispatch_guard): not an attempt; the backend
+  // releases it and labels it DISPATCH_FAILED (never NO_ANSWER).
+  if (r.startsWith('credits_exhausted') || d === 'credits_exhausted'
+      || /insufficient[ _-]?credit|no credits|insufficient_quota|\b4030\b/.test(r)
+      || (sip === '402')) {
+    return { reason: 'CREDITS_EXHAUSTED', sip_status_code: sip ? Number(sip) : null };
+  }
+  if (r.startsWith('agent_not_joined') || r.includes('did not join room')) {
+    return { reason: 'AGENT_NOT_JOINED', sip_status_code: null };
+  }
+  if (r.startsWith('pre_ring_failure')) return { reason: 'PRE_RING_FAILURE', sip_status_code: sip ? Number(sip) : null };
+  if (d === 'dispatch_failed' || r.startsWith('dispatch_failed')) return { reason: 'DISPATCH_FAILED', sip_status_code: null };
   if (r.includes('stuck-dispatch')) return { reason: 'STUCK_DISPATCH', sip_status_code: null };
   if (d === 'busy' || /\bbusy\b/.test(r) || sip === '486' || sip === '600') {
     return { reason: 'BUSY', sip_status_code: sip ? Number(sip) : null };

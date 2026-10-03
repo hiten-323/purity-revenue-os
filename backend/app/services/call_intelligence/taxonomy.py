@@ -15,6 +15,10 @@ RESULT_OUTCOMES = (
     "NO_ANSWER", "BUSY", "VOICEMAIL", "FAILED", "WRONG_PERSON",
     "NOT_INTERESTED", "CALLBACK_REQUESTED", "INTERESTED", "SAMPLE_REQUESTED",
     "CATALOGUE_REQUESTED", "DO_NOT_CALL", "UNKNOWN",
+    # The call never rang the business: the agent never joined the room, the
+    # trunk refused the INVITE before ringing, or the provider ran out of
+    # credit. Not an attempt on the lead; never a no-answer.
+    "DISPATCH_FAILED",
 )
 
 # Outcomes that mean a person picked up and a conversation happened.
@@ -22,7 +26,7 @@ CONNECTED_OUTCOMES = frozenset({
     "WRONG_PERSON", "NOT_INTERESTED", "CALLBACK_REQUESTED", "INTERESTED",
     "SAMPLE_REQUESTED", "CATALOGUE_REQUESTED", "DO_NOT_CALL",
 })
-NOT_CONNECTED_OUTCOMES = frozenset({"NO_ANSWER", "BUSY", "VOICEMAIL", "FAILED"})
+NOT_CONNECTED_OUTCOMES = frozenset({"NO_ANSWER", "BUSY", "VOICEMAIL", "FAILED", "DISPATCH_FAILED"})
 # "Interest" for learning: the lead asked for a next step.
 POSITIVE_OUTCOMES = frozenset({
     "INTERESTED", "SAMPLE_REQUESTED", "CATALOGUE_REQUESTED", "CALLBACK_REQUESTED",
@@ -55,6 +59,7 @@ _FSM_TO_RESULT = {
     "BUSY": "BUSY",
     "VOICEMAIL": "VOICEMAIL",
     "FAILED": "FAILED",
+    "DISPATCH_FAILED": "DISPATCH_FAILED",
     # A connected conversation the model could not classify.
     "OTHER": "UNKNOWN",
     # Result-enum values accepted verbatim (founder corrections, reconciler).
@@ -91,7 +96,21 @@ ENGINE_TERMINATIONS = {
     # the CallResult keeps connected=True and whatever the transcript shows.
     "HANGUP_NO_OUTCOME": "FAILED",
     "COMPLETED_NO_OUTCOME": "FAILED",
+    # Never rang (see NEVER_RANG_TERMINATIONS). The FSM key is only used for
+    # validation; the status endpoint releases the attempt instead of
+    # recording an FSM outcome for these.
+    "DISPATCH_FAILED": "FAILED",
+    "AGENT_NOT_JOINED": "FAILED",
+    "PRE_RING_FAILURE": "FAILED",
+    "CREDITS_EXHAUSTED": "FAILED",
 }
+
+# Terminations where the business's phone never rang. These do not count as
+# an attempt on the lead (the attempt is released) and are labelled
+# DISPATCH_FAILED, never NO_ANSWER.
+NEVER_RANG_TERMINATIONS = frozenset({
+    "DISPATCH_FAILED", "AGENT_NOT_JOINED", "PRE_RING_FAILURE", "CREDITS_EXHAUSTED",
+})
 
 # SIP final response codes -> termination reason.
 _SIP = {
@@ -122,6 +141,8 @@ SIDECAR_DISPOSITIONS = {
     "busy": "BUSY",
     "failed": "FAILED",
     "dispatch_error": "DISPATCH_ERROR",
+    "dispatch_failed": "DISPATCH_FAILED",
+    "credits_exhausted": "CREDITS_EXHAUSTED",
     "timeout": "TIMEOUT",
     "voicemail": "VOICEMAIL",
 }

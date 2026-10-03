@@ -31,6 +31,22 @@ jobs:
           SYSTEM_INTEGRITY: "0"
         run: python -m pytest -q --tb=short
 
+  # Purity-owned files installed into the Nuraveda voice sidecar: dispatch
+  # guard (volume caps, pause, wedge detection, credit/never-rang handling).
+  # node:test only; stubs replace LiveKit and Prisma, nothing dials.
+  voice-sidecar:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/nuraveda-voice
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Unit tests
+        run: node --test test/
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
