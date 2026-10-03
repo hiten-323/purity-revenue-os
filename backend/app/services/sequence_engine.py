@@ -51,6 +51,49 @@ def _now() -> datetime:
     return datetime.utcnow()
 
 
+def _ledger_sent_markers(lead, db) -> list[tuple[datetime, str]]:
+    try:
+        from app.services.email_send_ledger import sent_markers
+        return sent_markers(db, lead)
+    except Exception as exc:
+        # A ledger we cannot read is not "no sends". Refuse upstream rather
+        # than scheduling the intro again.
+        raise RuntimeError(f"email send ledger unreadable: {exc}") from exc
+
+
+def _stage_occupied(lead, db, stage: str) -> bool:
+    try:
+        from app.services.email_send_ledger import stage_occupied
+        return stage_occupied(db, lead, stage)
+    except Exception as exc:
+        raise RuntimeError(f"email send ledger unreadable: {exc}") from exc
+
+
+def _coalesced_sends(workflow_sends, ledger_marks: list[tuple[datetime, str]]) -> list[datetime]:
+    """One instant per real delivery, whether it lives in the event log or the ledger."""
+    seen: set[str] = set()
+    instants: list[datetime] = []
+    for event in workflow_sends:
+        payload = event.payload or {}
+        mid = ""
+        if isinstance(payload, dict):
+            mid = str(payload.get("message_id") or "")
+        if mid:
+            if mid in seen:
+                continue
+            seen.add(mid)
+        instants.append(event.occurred_at or _now())
+    for occurred_at, mid in ledger_marks:
+        mid = str(mid or "")
+        if mid:
+            if mid in seen:
+                continue
+            seen.add(mid)
+        instants.append(occurred_at or _now())
+    instants.sort()
+    return instants
+
+
 def state(lead, db) -> dict:
     """
     Where is this contact in its sequence, computed from the event log rather
@@ -63,7 +106,11 @@ def state(lead, db) -> dict:
         WorkflowEvent.lead_id == lead.id).order_by(
         WorkflowEvent.occurred_at.asc()).all()
 
-    sends = [e for e in evs if e.event_type == "EMAIL_SENT"]
+    workflow_sends = [e for e in evs if e.event_type == "EMAIL_SENT"]
+    # Ledger rows survive a caller rollback that drops the workflow event.
+    # Counting only EMAIL_SENT is how a successful SMTP send looked like
+    # "never emailed" on the next worker cycle.
+    sends = _coalesced_sends(workflow_sends, _ledger_sent_markers(lead, db))
     replies = [e for e in evs if e.event_type in REPLY_EVENTS]
     bounced = [e for e in evs if e.event_type in ("EMAIL_BOUNCED", "HARD_BOUNCE")]
     unsub = [e for e in evs if e.event_type == "UNSUBSCRIBED"]
@@ -95,20 +142,33 @@ def state(lead, db) -> dict:
         # — silently skipped every contact that had never been emailed. The
         # queue showed 2 when 31 were due. A never-contacted verified lead is
         # the most ready thing in the system, not the least.
+        #
+        # An unresolved claim (SMTP may already have accepted) must not look
+        # like "never emailed" either. Hold this stage instead of repeating it.
+        if _stage_occupied(lead, db, CADENCE[0][1]):
+            return {"active": True, "reason": "already_recorded", "touches": 0,
+                    "next_touch": CADENCE[0][1], "purpose": CADENCE[0][2],
+                    "due": _now() + timedelta(days=2), "overdue_days": 0,
+                    "ready": False,
+                    "note": "this template is already sent or in flight — not sending it again"}
         return {"active": True, "reason": "not_started", "touches": 0,
                 "next_touch": CADENCE[0][1], "purpose": CADENCE[0][2],
                 "due": _now(), "overdue_days": 0, "ready": True}
 
-    first = sends[0].occurred_at or _now()
-    last = sends[-1].occurred_at or _now()
+    first = sends[0]
+    last = sends[-1]
     offset, name, purpose = CADENCE[n]
     due = first + timedelta(days=offset)
     # Never stack two touches in one day even if the schedule slipped.
     due = max(due, last + timedelta(days=2))
+    ready = _now() >= due
+    if _stage_occupied(lead, db, name):
+        ready = False
+        due = max(due, _now() + timedelta(days=2))
     return {"active": True, "reason": "in_sequence", "touches": n,
             "next_touch": name, "purpose": purpose, "due": due,
             "overdue_days": max(0, (_now() - due).days),
-            "ready": _now() >= due}
+            "ready": ready}
 
 
 def due_now(db, limit: int = 0) -> list[dict]:
