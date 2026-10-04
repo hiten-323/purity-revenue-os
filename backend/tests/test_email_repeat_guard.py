@@ -139,6 +139,30 @@ def _backdate_proof(db, hours=3):
     db.commit()
 
 
+def test_ledger_read_keeps_an_email_captured_on_the_same_session(db):
+    """Cadence may consult the ledger while a call is still uncommitted.
+
+    Reading the ledger used to roll that transaction back, so EMAIL_COLLECTED
+    stored nothing and the address was not sendable.
+    """
+    from app.services import sequence_engine as se
+    from app.services.email_send_ledger import sent_markers, table_ready
+
+    lead = _lead(db, email="")
+    lead.email = "purchase@bigtraders.in"
+    lead.email_trust = "VERIFIED"
+    lead.email_confidence = 80
+    db.flush()
+
+    assert table_ready(db) is True
+    assert sent_markers(db, lead) == []
+    assert se.state(lead, db)["reason"] == "not_started"
+
+    db.commit()
+    db.refresh(lead)
+    assert lead.email == "purchase@bigtraders.in"
+
+
 def test_second_send_is_refused_after_success_even_if_caller_rolls_back(db):
     lead = _lead(db)
     first = _send(_email(lead))

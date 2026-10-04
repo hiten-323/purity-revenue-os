@@ -131,21 +131,27 @@ def _begin_immediate(db: Session) -> None:
 def table_ready(db: Session) -> bool:
     """True when this process can read the ledger. A missing table is not an error.
 
-    Uses a fresh connection so a missing-table probe cannot abort the
-    caller's transaction.
+    Probe ``sqlite_master`` on the caller's connection. That catalog always
+    exists, so the check cannot abort the open transaction the way a SELECT
+    against a missing ledger table would.
+
+    A second ``engine.connect()`` is not safe here. The test suite's in-memory
+    engine uses one shared SQLite connection. Closing that extra handle rolls
+    the caller's transaction back after SQLAlchemy has already flushed, so an
+    address just taken on a call disappears while the session still believes
+    it was saved.
     """
     try:
         bind = db.get_bind()
         if bind is None:
             return False
         if bind.dialect.name == "sqlite":
-            with bind.connect() as conn:
-                found = conn.execute(
-                    text(
-                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=:name"
-                    ),
-                    {"name": EmailSendLedger.__tablename__},
-                ).first()
+            found = db.connection().execute(
+                text(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=:name"
+                ),
+                {"name": EmailSendLedger.__tablename__},
+            ).first()
             return found is not None
         return inspect(bind).has_table(EmailSendLedger.__tablename__)
     except Exception:
