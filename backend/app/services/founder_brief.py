@@ -321,3 +321,26 @@ Purity Beans AI Revenue OS
         return {"sent": True, "to": recipient}
     except Exception as e:
         return {"sent": False, "reason": str(e)}
+
+
+def send_founder_system_email(subject: str, body: str) -> dict:
+    """Plain-text operational alert to Hiten's own inbox (same Zoho path and
+    fixed recipient as the daily brief; never a prospect). Used by
+    founder_alert for provider-credit / voice-agent emergencies."""
+    import smtplib
+    from email.mime.text import MIMEText
+
+    sender    = os.getenv("SENDER_EMAIL", "connect@purepantryprovisions.com")
+    password  = os.getenv("ZOHO_APP_PASSWORD", "")
+    recipient = "hitenjain.12@gmail.com"
+    if not password or password.strip() in ("", "your_zoho_app_password_here"):
+        return {"sent": False, "reason": "ZOHO_APP_PASSWORD not configured"}
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = sender
+    msg["To"] = recipient
+    with smtplib.SMTP("smtp.zoho.in", 587, timeout=30) as smtp:
+        smtp.starttls()
+        smtp.login(sender, password)
+        smtp.sendmail(sender, [recipient], msg.as_string())
+    return {"sent": True}

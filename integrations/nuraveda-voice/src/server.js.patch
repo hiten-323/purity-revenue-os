@@ -1,0 +1,33 @@
+--- a/src/server.js	2026-10-03 17:10:32.748319472 +0530
++++ b/src/server.js	2026-10-03 17:10:32.756319477 +0530
+@@ -37,6 +37,7 @@
+ import { computeScheduledAt, isDnd } from './lib/dnd.js';
+ import { isShopAllowed, ALLOWED_SHOPS, ALLOWLIST_ACTIVE, getShopBranding } from './lib/shops.js';
+ import { startScheduler, markScheduledCallOutcome, DISPATCH_MODE } from './lib/scheduler.js';
++import { getPause, limits as dispatchLimits } from './lib/dispatch_guard.js';
+ import { getProfile, listProfiles, getRegistry } from './lib/profiles.js';
+ import { createToolAuth } from './lib/tool-auth.js';
+ import { pathToFileURL } from 'node:url';
+@@ -159,6 +160,8 @@
+     allowed_shops: ALLOWLIST_ACTIVE ? ALLOWED_SHOPS : 'open',
+     shopify_sessions: sessions,
+     queue: { queued, dispatching, doneToday, failedToday },
++    dispatch_pause: getPause(),
++    dispatch_limits: dispatchLimits(),
+     rejects: rejectCount,
+     in_dnd_now: isDnd(new Date()),
+   });
+@@ -192,6 +195,13 @@
+ // Auth: shared LIVEKIT_TOOL_SECRET via X-COD-Tool-Secret. The endpoint
+ // initiates real PSTN calls, so it fails closed.
+ app.post('/calls/dispatch', requireToolAuth, async (req, res) => {
++  // Purity guard: while dispatch is paused (provider credit exhausted, agent
++  // wedged, or manual) refuse new work so the caller releases its attempt
++  // instead of counting a call that will not be placed.
++  const pause = getPause();
++  if (pause) {
++    return res.status(503).json({ ok: false, error: `dispatch paused (${pause.kind}): ${pause.reason}`, paused: pause });
++  }
+   const b = req.body || {};
+   const profileId = b.profile;
+   if (!profileId) return res.status(400).json({ ok: false, error: 'missing profile' });
