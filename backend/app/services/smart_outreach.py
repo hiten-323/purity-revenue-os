@@ -864,6 +864,28 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
             _record(db, lead, profile, "email", decision["action"], "BLOCKED", "missing_email")
             db.commit()
             return {**decision, "status": "BLOCKED", "reason": "missing email"}
+        stage = "catalogue" if decision["action"] == "SEND_CATALOGUE" else (touch_name or "intro")
+        from app.services.email_send_ledger import repeat_block_reason
+        already = repeat_block_reason(
+            db,
+            lead_id=lead.id,
+            to_email=lead.email,
+            stage=stage,
+            body=body,
+        )
+        if already:
+            return {**decision, "status": "SKIPPED", "reason": already}
+        # Release the write transaction before SMTP. classify_lead flushed
+        # profile changes above; holding that lock across the network send is
+        # what made the post-send commit hit "database is locked" and roll
+        # the EMAIL_SENT record back after Zoho had already accepted.
+        from app.database.database import commit_with_retry
+        try:
+            commit_with_retry(db)
+        except Exception as exc:
+            return {**decision, "status": "FAILED",
+                    "reason": "database locked before send; email not sent "
+                              f"({exc.__class__.__name__})"}
         email = build_outreach_email(
             lead.email or "",
             lead.contact_name or "",
@@ -871,6 +893,7 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
             subject,
             body,
             lead_id=lead.id,
+            stage=stage,
         )
         result = send_email(email)
         status = "SENT" if result.status == "sent" else result.status.upper()
@@ -891,7 +914,15 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
             message_id=result.message_id,
             learning=learning,
         )
-        db.commit()
+        try:
+            commit_with_retry(db)
+        except Exception as exc:
+            # SMTP already happened. The ledger commit inside send_email is
+            # the record that blocks a repeat; losing this touch row must not
+            # be reported as "not sent" or the next cycle will try again.
+            db.rollback()
+            print(f"[smart_outreach] touch commit failed after send for lead "
+                  f"{lead.id}: {exc.__class__.__name__}: {exc}")
         return {**decision, "status": status, "error": result.error, "message_id": result.message_id}
 
     if decision["channel"] == "whatsapp":

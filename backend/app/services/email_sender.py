@@ -127,6 +127,10 @@ class OutreachEmail:
     # but was used only for the tracking pixel and never stored here, so any
     # guard reading email.lead_id silently saw None and never fired.
     lead_id: int | None = None
+    # Cadence touch or template identity (intro, nudge, proof, ask, breakup,
+    # catalogue, …). The send ledger refuses a second send of the same stage
+    # even when the body was edited slightly. Empty means "dedupe on body only".
+    stage: str = ""
 
 
 def domain_is_deliverable(email_addr: str, timeout: float = 5.0) -> bool:
@@ -331,10 +335,12 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
     #
     # Seven call sites reach SMTP and five write EMAIL_SENT. Fixing them one by
     # one is what left two paths ungated the last time, so this lives at the
-    # chokepoint every caller must pass. Cadence is deliberately NOT enforced
-    # here — a reply response is not a scheduled touch, and blocking it would
-    # silence us exactly when a buyer is talking. Cadence stays in the queue,
-    # which knows the difference.
+    # chokepoint every caller must pass. WHEN the next touch is due stays in
+    # sequence_engine — a reply response is not a scheduled touch, and blocking
+    # it on the calendar would silence us exactly when a buyer is talking.
+    # WHAT must not be transmitted twice (the same template/stage, or an
+    # identical body, to the same lead or mailbox) is enforced here, because
+    # the callers record the send afterwards on a session that can roll back.
     if not _is_self and getattr(email, "lead_id", None):
         try:
             from app.database.database import SessionLocal
@@ -430,6 +436,34 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
     msg.attach(MIMEText(email.body_text, "plain", "utf-8"))
     msg.attach(MIMEText(email.body_html or _text_to_html(email.body_text), "html", "utf-8"))
 
+    # Claim BEFORE SMTP and commit on a session the caller does not own.
+    # Founder previews to our own inbox are not outreach and are not ledgered.
+    claim = None
+    if not _is_self:
+        try:
+            from app.services.email_send_ledger import begin_send
+            claim = begin_send(
+                lead_id=getattr(email, "lead_id", None),
+                to_email=email.to_email,
+                stage=getattr(email, "stage", "") or "",
+                body=email.body_text,
+                subject=email.subject,
+            )
+        except Exception as _exc:
+            return _gate_failure(
+                email,
+                "send ledger unavailable; email not sent",
+                _exc,
+            )
+        if not claim.proceed:
+            email.status = "failed"
+            email.error = f"BLOCKED: {claim.reason}"
+            _log.warning("email repeat blocked: %s to=%s lead=%s",
+                         claim.reason, email.to_email, getattr(email, "lead_id", None))
+            return email
+
+    accepted = False
+    smtp_error = ""
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as smtp:
             smtp.ehlo()
@@ -437,10 +471,38 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
             smtp.ehlo()
             smtp.login(sender_email, SENDER_PASSWORD)
             smtp.sendmail(sender_email, email.to_email, msg.as_string())
+            # Acceptance is sendmail returning, not the connection closing.
+            # quit()/__exit__ raising after a 250 used to mark the send failed
+            # and the worker would transmit the same email again.
+            accepted = True
+    except smtplib.SMTPAuthenticationError:
+        smtp_error = "Zoho auth failed — use App Password from accounts.zoho.in, not your login password"
+    except smtplib.SMTPException as e:
+        smtp_error = str(e)
+    except Exception as e:
+        smtp_error = str(e)
+
+    if accepted:
         email.status = "sent"
         email.sent_at = datetime.utcnow().isoformat()
         email.smtp_response = "250 OK - Accepted for delivery"
+        email.error = ""
         print(f"SMTP sent successfully. MsgID: {msg_id}")
+        if claim is not None:
+            try:
+                from app.services.email_send_ledger import mark_sent
+                mark_sent(
+                    claim.key,
+                    message_id=msg_id,
+                    lead_id=getattr(email, "lead_id", None),
+                    to_email=email.to_email,
+                    stage=getattr(email, "stage", "") or "",
+                    subject=email.subject,
+                )
+            except Exception as _exc:
+                # The claim row stays CLAIMED, which blocks a resend. Do not
+                # report this as a failed send — SMTP already accepted it.
+                _log.error("SMTP accepted but send ledger mark failed: %s", _exc)
         # Record the consent-request context only after SMTP accepts the message.
         if not _is_self and getattr(email, "lead_id", None):
             try:
@@ -454,15 +516,17 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
                 _db.close()
             except Exception as _exc:
                 _log.warning("WhatsApp consent request audit failed: %s", _exc)
-    except smtplib.SMTPAuthenticationError:
+    else:
         email.status = "failed"
-        email.error = "Zoho auth failed — use App Password from accounts.zoho.in, not your login password"
-    except smtplib.SMTPException as e:
-        email.status = "failed"
-        email.error = str(e)
-    except Exception as e:
-        email.status = "failed"
-        email.error = str(e)
+        email.error = smtp_error or "send failed"
+        if claim is not None:
+            try:
+                from app.services.email_send_ledger import mark_failed
+                mark_failed(claim.key, email.error)
+            except Exception as _exc:
+                # Leave CLAIMED in place so an automatic retry cannot treat an
+                # unknown outcome as "never sent".
+                _log.error("failed to record email send failure: %s", _exc)
 
     return email
 
@@ -496,6 +560,7 @@ def build_outreach_email(
     subject: str,
     body: str,
     lead_id: int | None = None,
+    stage: str = "",
 ) -> OutreachEmail:
     # SENDER_NAME is "Hiten Jain | Pure Pantry Provisions", so a hardcoded
     # company line repeated it in every email:
@@ -556,6 +621,7 @@ def build_outreach_email(
         body_text=body_text,
         body_html=html_body,
         lead_id=lead_id,
+        stage=stage or "",
     )
 
 

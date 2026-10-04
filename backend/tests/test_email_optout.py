@@ -47,20 +47,16 @@ class _CapturedSMTP:
         _CapturedSMTP.sent.append(body)
 
 
-class _NoDB:
-    """send_email opens a session for its governance gates. These tests are
-    about the message that gets built, so no database is touched at all."""
-
-    def close(self):
-        pass
-
-
 @pytest.fixture
 def captured(monkeypatch):
     import types
 
     import app.database.database as dbmod
+    import app.services.email_send_ledger  # noqa: F401  — register the table
+    from app.database.database import Base
     from app.services import deliverability as deliv
+    from conftest import memory_engine
+    from sqlalchemy.orm import sessionmaker
 
     _CapturedSMTP.sent = []
     monkeypatch.setattr(es.smtplib, "SMTP", _CapturedSMTP)
@@ -69,8 +65,12 @@ def captured(monkeypatch):
     # The NXDOMAIN gate does a real DNS lookup; this suite must not.
     monkeypatch.setattr(es, "domain_is_deliverable", lambda addr: True)
     # Gate B (volume/pace/provider health) fails closed without a database,
-    # which is correct and not what these tests are measuring.
-    monkeypatch.setattr(dbmod, "SessionLocal", lambda: _NoDB())
+    # which is correct and not what these tests are measuring. The send
+    # ledger still needs a real session, or the chokepoint refuses every
+    # prospect send (fail closed) and these tests never see a message.
+    engine = memory_engine()
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(dbmod, "SessionLocal", sessionmaker(bind=engine))
     monkeypatch.setattr(
         deliv, "check_send_allowed",
         lambda db: types.SimpleNamespace(allowed=True, reason="stubbed for test"))

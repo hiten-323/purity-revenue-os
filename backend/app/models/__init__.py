@@ -12,3 +12,8 @@ try:
     import app.services.smart_outreach  # noqa: F401
 except Exception as _e:
     print(f"[models] smart_outreach models not applied: {_e.__class__.__name__}: {_e}")
+
+try:
+    import app.services.email_send_ledger  # noqa: F401
+except Exception as _e:
+    print(f"[models] email_send_ledger not applied: {_e.__class__.__name__}: {_e}")

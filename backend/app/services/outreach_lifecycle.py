@@ -43,6 +43,7 @@ MACHINE_INTENTS = {"OUT_OF_OFFICE", "MACHINE_REPLY"}
 def ensure_schema() -> None:
     from app.database.database import Base, engine
     import app.services.smart_outreach  # noqa: F401
+    import app.services.email_send_ledger  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
 
