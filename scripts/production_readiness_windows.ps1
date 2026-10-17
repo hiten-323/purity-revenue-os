@@ -46,25 +46,36 @@ if (Test-Path $BackendEnv) {
     Record 'B-env-file' 'FAIL' 'backend/.env missing'
 }
 
-# C-F -- committed flags OFF in ecosystem (string check only)
+# C-G -- verify the actual single-worker authority, not just string presence.
+# The API must never run autonomous outreach. The worker is the sole email
+# executor; calling and WhatsApp stay disabled in BOTH processes.
 if (Test-Path $Ecosystem) {
     $eco = Get-Content $Ecosystem -Raw
-    foreach ($pair in @(
-        @{ Id = 'C-smart-outreach-off'; Needle = 'SMART_OUTREACH_ENABLED: "0"' },
-        @{ Id = 'D-auto-outreach-off'; Needle = 'AUTO_OUTREACH_ENABLED: "0"' },
-        @{ Id = 'E-aisensy-off'; Needle = 'AISENSY_ENABLED: "0"' },
-        @{ Id = 'F-ai-calling-off'; Needle = 'AI_CALLING_ENABLED: "0"' }
-    )) {
-        if ($eco -match [regex]::Escape($pair.Needle)) {
-            Record $pair.Id 'PASS' $pair.Needle
-        } else {
-            Record $pair.Id 'FAIL' "expected $($pair.Needle)"
-        }
-    }
-    if ($eco -match 'AI_CALLING_ENABLED:\s*"1"' -or $eco -match 'AISENSY_ENABLED:\s*"1"') {
-        Record 'G-no-armed-defaults' 'FAIL' 'ecosystem arms calling or WhatsApp by default'
+    $apiMatch = [regex]::Match($eco, '(?s)name:\s*"purity-api".*?(?=name:\s*"purity-worker")')
+    $workerMatch = [regex]::Match($eco, '(?s)name:\s*"purity-worker".*?(?=name:\s*"purity-beans")')
+    $apiBlock = $apiMatch.Value
+    $workerBlock = $workerMatch.Value
+
+    if (-not $apiMatch.Success -or -not $workerMatch.Success) {
+        Record 'C-single-worker-authority' 'FAIL' 'could not parse API and worker app blocks'
     } else {
-        Record 'G-no-armed-defaults' 'PASS' 'no AI_CALLING/AISENSY =1 defaults in ecosystem'
+        foreach ($pair in @(
+            @{ Id = 'C-api-smart-outreach-off'; Block = $apiBlock; Needle = 'SMART_OUTREACH_ENABLED: "0"' },
+            @{ Id = 'D-api-auto-outreach-off'; Block = $apiBlock; Needle = 'AUTO_OUTREACH_ENABLED: "0"' },
+            @{ Id = 'E-api-whatsapp-off'; Block = $apiBlock; Needle = 'AISENSY_ENABLED: "0"' },
+            @{ Id = 'F-api-calling-off'; Block = $apiBlock; Needle = 'AI_CALLING_ENABLED: "0"' },
+            @{ Id = 'G-worker-smart-outreach-off'; Block = $workerBlock; Needle = 'SMART_OUTREACH_ENABLED: "0"' },
+            @{ Id = 'H-worker-auto-email-on'; Block = $workerBlock; Needle = 'AUTO_OUTREACH_ENABLED: "1"' },
+            @{ Id = 'I-worker-whatsapp-off'; Block = $workerBlock; Needle = 'AISENSY_ENABLED: "0"' },
+            @{ Id = 'J-worker-calling-off'; Block = $workerBlock; Needle = 'AI_CALLING_ENABLED: "0"' },
+            @{ Id = 'K-worker-legacy-calling-off'; Block = $workerBlock; Needle = 'AUTO_AI_CALLING_ENABLED: "0"' }
+        )) {
+            if ($pair.Block -match [regex]::Escape($pair.Needle)) {
+                Record $pair.Id 'PASS' $pair.Needle
+            } else {
+                Record $pair.Id 'FAIL' "expected $($pair.Needle) in the correct PM2 app block"
+            }
+        }
     }
 }
 
