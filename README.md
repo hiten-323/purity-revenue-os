@@ -2,11 +2,15 @@
 
 A B2B sales operating system for Pure Pantry Provisions (premium instant coffee,
 Abohar, Punjab). It discovers business buyers, resolves them into accounts,
-governs how often each account may be contacted, drafts outreach for founder
-approval, records replies and calls, and decides the next action per account.
+governs contact frequency, records replies and calls, and decides the next action
+per account. The separate worker can autonomously send eligible email when
+`AUTO_OUTREACH_ENABLED=1`; each send must pass the contact-trust, suppression,
+frequency, idempotency, business-hour, and send-proof gates. This is distinct
+from founder-approved/manual actions and does not authorize other channels.
 
-Nothing in this system sends on its own. Every outbound communication requires
-explicit founder approval.
+AI voice calling and AiSensy WhatsApp are disabled by default and remain behind
+separate provider, per-lead permission, and consent gates. A running process or
+successful CI suite does not by itself prove production readiness.
 
 ## Stack
 
@@ -142,7 +146,7 @@ or `Authorization: Bearer <API_ADMIN_SECRET>`. The service returns `503` until
 the secret is configured; reads remain public. Provider webhooks use their
 dedicated secrets and also fail closed when unset.
 
-Health check: `GET /api/v1/health` (returns `503` when the database or required
+Health check: `GET /health` (returns `503` when the database or required
 Redis dependency is unavailable).
 
 ## Data
