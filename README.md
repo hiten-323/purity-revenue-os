@@ -143,9 +143,10 @@ pm2 start ecosystem.config.js
 ```
 
 All state-changing `/api/v1` routes require `X-API-Admin-Secret: <API_ADMIN_SECRET>`
-or `Authorization: Bearer <API_ADMIN_SECRET>`. The service returns `503` until
-the secret is configured; reads remain public. Provider webhooks use their
-dedicated secrets and also fail closed when unset.
+or `Authorization: Bearer <API_ADMIN_SECRET>`. The service returns `503` for protected routes until the secret is configured.
+Health and explicitly public routes remain accessible; sensitive CRM, founder,
+marketplace, Shopify, outreach, and settings reads require admin authentication.
+Provider webhooks use their dedicated secrets and also fail closed when unset.
 
 Health check: `GET /health` (returns `503` when the database or required
 Redis dependency is unavailable).
