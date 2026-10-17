@@ -111,11 +111,11 @@ on a single scraping provider.
 
 ## Setup
 
-Requires Python 3.11 and Node 18+.
+Requires Python 3.12 and Node.js 20+. These are the versions exercised by the repository CI workflow.
 
 ```bash
-cd backend && pip install -r requirements.txt
-cd ../frontend && npm install && npm run build
+cd backend && python -m pip install -r requirements.txt
+cd ../frontend && corepack enable && pnpm install --frozen-lockfile && pnpm build
 ```
 
 Create `backend/.env` — it is gitignored and must never be committed:
