@@ -54,6 +54,11 @@ if (Test-Path $BackendEnv) {
         Record 'B2-dnc-registry' 'FAIL' 'DND_SUPPRESSION_FILE is missing from backend/.env'
     } else {
         $dndPath = ($dndLine -split '=', 2)[1].Trim().Trim('"').Trim("'")
+        $dndPath = [Environment]::ExpandEnvironmentVariables($dndPath)
+        # Resolve relative paths against the repository, not the caller's current directory.
+        if ($dndPath -and -not [IO.Path]::IsPathRooted($dndPath)) {
+            $dndPath = Join-Path $Repo $dndPath
+        }
         if (-not $dndPath -or -not (Test-Path -LiteralPath $dndPath -PathType Leaf)) {
             Record 'B2-dnc-registry' 'FAIL' 'DND suppression file is not configured or does not exist'
         } else {
