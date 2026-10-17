@@ -46,6 +46,27 @@ if (Test-Path $BackendEnv) {
     Record 'B-env-file' 'FAIL' 'backend/.env missing'
 }
 
+# B2 -- DNC suppression registry must be configured and readable.
+# Never print the path or contents; an empty file is valid only when deliberately provisioned.
+if (Test-Path $BackendEnv) {
+    $dndLine = Get-Content $BackendEnv | Where-Object { $_ -match '^\s*DND_SUPPRESSION_FILE\s*=' } | Select-Object -First 1
+    if (-not $dndLine) {
+        Record 'B2-dnc-registry' 'FAIL' 'DND_SUPPRESSION_FILE is missing from backend/.env'
+    } else {
+        $dndPath = ($dndLine -split '=', 2)[1].Trim().Trim('"').Trim("'")
+        if (-not $dndPath -or -not (Test-Path -LiteralPath $dndPath -PathType Leaf)) {
+            Record 'B2-dnc-registry' 'FAIL' 'DND suppression file is not configured or does not exist'
+        } else {
+            try {
+                $null = Get-Content -LiteralPath $dndPath -TotalCount 1 -ErrorAction Stop
+                Record 'B2-dnc-registry' 'PASS' 'DND suppression file exists and is readable (contents hidden)'
+            } catch {
+                Record 'B2-dnc-registry' 'FAIL' 'DND suppression file exists but is not readable'
+            }
+        }
+    }
+}
+
 # C-G -- verify the actual single-worker authority, not just string presence.
 # The API must never run autonomous outreach. The worker is the sole email
 # executor; calling and WhatsApp stay disabled in BOTH processes.
