@@ -29,7 +29,7 @@ function Record([string]$Id, [string]$Status, [string]$Detail) {
 
 Write-Host "=== Purity production readiness (READ-ONLY) ===" -ForegroundColor Cyan
 Write-Host "Repo: $Repo"
-Write-Host "Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') IST-label-local"
+Write-Host "Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') (host-local time; timezone not inferred)"
 Write-Host ""
 
 # A -- ecosystem present
@@ -185,5 +185,13 @@ $fail = @($Results | Where-Object Status -eq 'FAIL').Count
 $unv = @($Results | Where-Object Status -eq 'UNVERIFIED').Count
 $pass = @($Results | Where-Object Status -eq 'PASS').Count
 Write-Host "PASS=$pass FAIL=$fail UNVERIFIED=$unv"
-if ($fail -gt 0) { exit 1 }
+if ($fail -gt 0) {
+    Write-Host 'READINESS FAILED: one or more required checks failed.' -ForegroundColor Red
+    exit 1
+}
+if ($unv -gt 0) {
+    Write-Host 'READINESS NOT VERIFIED: unresolved checks prevent a ready verdict.' -ForegroundColor Yellow
+    exit 2
+}
+Write-Host 'READINESS VERIFIED: all checks passed.' -ForegroundColor Green
 exit 0
