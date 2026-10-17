@@ -84,12 +84,12 @@ $ptc = Join-Path $Repo 'backend\scripts\personal_test_call.py'
 if (Test-Path $ptc) {
     $src = Get-Content $ptc -Raw
     if ($src -match '9855593323' -and $src -match 'ALLOWED_TAILS' -and $src -match 'i-am-the-founder') {
-        Record 'H-personal-test-guard' 'PASS' 'allowlist + founder flags present'
+        Record 'L-personal-test-guard' 'PASS' 'allowlist + founder flags present'
     } else {
-        Record 'H-personal-test-guard' 'FAIL' 'personal_test_call.py guard incomplete'
+        Record 'L-personal-test-guard' 'FAIL' 'personal_test_call.py guard incomplete'
     }
 } else {
-    Record 'H-personal-test-guard' 'FAIL' 'personal_test_call.py missing'
+    Record 'L-personal-test-guard' 'FAIL' 'personal_test_call.py missing'
 }
 
 # I -- Nuraveda sidecar path (existence only)
