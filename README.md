@@ -150,6 +150,24 @@ dedicated secrets and also fail closed when unset.
 Health check: `GET /health` (returns `503` when the database or required
 Redis dependency is unavailable).
 
+### Read-only Windows production gate
+
+Before deployment or enabling a new outbound channel, run this from the repository
+root in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\production_readiness_windows.ps1
+$LASTEXITCODE
+```
+
+The script never starts PM2 or sends anything. It checks the API/worker authority
+split, confirms calling and WhatsApp remain off, and checks that the DNC registry
+is present and readable without printing its contents. Exit codes are strict:
+`0` means every check passed, `1` means a required check failed, and `2` means
+at least one check is unverified. Treat both `1` and `2` as **not ready**.
+A passing script still does not replace a production database migration review,
+provider checks, or an end-to-end test on the actual host.
+
 ## Data
 
 The lead database is **not** included in this repository. It holds contact
