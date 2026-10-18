@@ -45,3 +45,20 @@ def test_ecosystem_resolves_nuraveda_dir_deterministically():
     assert "NURAVEDA_DIR" in text
     assert "mustExist" in text
     assert "LIVEKIT_INIT_TIMEOUT_MS" in text
+
+
+def test_readiness_gate_checks_effective_calling_flags_in_env_file():
+    text = _read("scripts/production_readiness_windows.ps1")
+    # The PM2 ecosystem can say "off" while the backend .env arms a legacy
+    # or canonical flag consumed by application code. Readiness must catch it.
+    assert "AI_CALLING_ENABLED" in text
+    assert "AUTO_AI_CALLING_ENABLED" in text
+    assert "K2-env-" in text
+    assert "enabled or non-false in backend/.env" in text
+
+
+def test_worker_calling_flags_are_explicitly_off_in_ecosystem():
+    text = _read("ecosystem.config.js")
+    worker = text[text.index('name: "purity-worker"'):text.index('name: "purity-beans"')]
+    assert 'AI_CALLING_ENABLED: "0"' in worker
+    assert 'AUTO_AI_CALLING_ENABLED: "0"' in worker
