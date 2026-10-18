@@ -418,6 +418,12 @@ async def startup():
     finally:
         db.close()
 
+    # SQLite's legacy additive migrations above are best-effort per column.
+    # Never accept a partial migration and then serve requests against an
+    # incompatible schema: startup must fail closed if any model table/column
+    # is still missing after the migration pass.
+    assert_schema_compatible(engine, Base.metadata)
+
     _start_auto_warm()
 
 app.add_middleware(

@@ -2,11 +2,15 @@
 
 A B2B sales operating system for Pure Pantry Provisions (premium instant coffee,
 Abohar, Punjab). It discovers business buyers, resolves them into accounts,
-governs how often each account may be contacted, drafts outreach for founder
-approval, records replies and calls, and decides the next action per account.
+governs contact frequency, records replies and calls, and decides the next action
+per account. The separate worker can autonomously send eligible email when
+`AUTO_OUTREACH_ENABLED=1`; each send must pass the contact-trust, suppression,
+frequency, idempotency, business-hour, and send-proof gates. This is distinct
+from founder-approved/manual actions and does not authorize other channels.
 
-Nothing in this system sends on its own. Every outbound communication requires
-explicit founder approval.
+AI voice calling and AiSensy WhatsApp are disabled by default and remain behind
+separate provider, per-lead permission, and consent gates. A running process or
+successful CI suite does not by itself prove production readiness.
 
 ## Stack
 
@@ -107,11 +111,11 @@ on a single scraping provider.
 
 ## Setup
 
-Requires Python 3.11 and Node 18+.
+Requires Python 3.12 and Node.js 20+. These are the versions exercised by the repository CI workflow.
 
 ```bash
-cd backend && pip install -r requirements.txt
-cd ../frontend && npm install && npm run build
+cd backend && python -m pip install -r requirements.txt
+cd ../frontend && corepack enable && pnpm install --frozen-lockfile && pnpm build
 ```
 
 Create `backend/.env` — it is gitignored and must never be committed:
@@ -122,6 +126,7 @@ CEREBRAS_API_KEY=
 SHOPIFY_TOKEN=
 SHOPIFY_WEBHOOK_SECRET=
 API_ADMIN_SECRET=
+DND_SUPPRESSION_FILE=C:\\path\\to\\dnd_suppression.txt
 VAPI_WEBHOOK_SECRET=
 GOOGLE_MAPS_API_KEY=
 AISENSY_API_KEY=
@@ -138,12 +143,31 @@ pm2 start ecosystem.config.js
 ```
 
 All state-changing `/api/v1` routes require `X-API-Admin-Secret: <API_ADMIN_SECRET>`
-or `Authorization: Bearer <API_ADMIN_SECRET>`. The service returns `503` until
-the secret is configured; reads remain public. Provider webhooks use their
-dedicated secrets and also fail closed when unset.
+or `Authorization: Bearer <API_ADMIN_SECRET>`. The service returns `503` for protected routes until the secret is configured.
+Health and explicitly public routes remain accessible; sensitive CRM, founder,
+marketplace, Shopify, outreach, and settings reads require admin authentication.
+Provider webhooks use their dedicated secrets and also fail closed when unset.
 
-Health check: `GET /api/v1/health` (returns `503` when the database or required
+Health check: `GET /health` (returns `503` when the database or required
 Redis dependency is unavailable).
+
+### Read-only Windows production gate
+
+Before deployment or enabling a new outbound channel, run this from the repository
+root in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\production_readiness_windows.ps1
+$LASTEXITCODE
+```
+
+The script never starts PM2 or sends anything. It checks the API/worker authority
+split, confirms calling and WhatsApp remain off, and checks that the DNC registry
+is present and readable without printing its contents. Exit codes are strict:
+`0` means every check passed, `1` means a required check failed, and `2` means
+at least one check is unverified. Treat both `1` and `2` as **not ready**.
+A passing script still does not replace a production database migration review,
+provider checks, or an end-to-end test on the actual host.
 
 ## Data
 
