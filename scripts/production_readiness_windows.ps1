@@ -102,6 +102,125 @@ if (Test-Path $Ecosystem) {
                 Record $pair.Id 'FAIL' "expected $($pair.Needle) in the correct PM2 app block"
             }
         }
+
+        # A flag in ecosystem.config.js is not the only effective source:
+        # worker.py and process-manager/OS environment can inherit a prior 1.
+        # Check backend/.env too, without ever printing values other than 0/1.
+        if (Test-Path $BackendEnv) {
+            $envRows = Get-Content $BackendEnv
+            foreach ($key in @('AI_CALLING_ENABLED', 'AUTO_AI_CALLING_ENABLED')) {
+                $row = $envRows | Where-Object { $_ -match ("^\s*" + [regex]::Escape($key) + "\s*=") } | Select-Object -Last 1
+                if (-not $row) {
+                    Record ("K2-env-" + $key) 'PASS' "$key not set in backend/.env; default-off applies"
+                    continue
+                }
+                $value = (($row -split '=', 2)[1]).Trim().Trim('"').Trim("'")
+                if ($value -match '^(0|false|no|off)
+    }
+}
+
+# H -- personal_test_call allowlist
+$ptc = Join-Path $Repo 'backend\scripts\personal_test_call.py'
+if (Test-Path $ptc) {
+    $src = Get-Content $ptc -Raw
+    if ($src -match '9855593323' -and $src -match 'ALLOWED_TAILS' -and $src -match 'i-am-the-founder') {
+        Record 'L-personal-test-guard' 'PASS' 'allowlist + founder flags present'
+    } else {
+        Record 'L-personal-test-guard' 'FAIL' 'personal_test_call.py guard incomplete'
+    }
+} else {
+    Record 'L-personal-test-guard' 'FAIL' 'personal_test_call.py missing'
+}
+
+# I -- Nuraveda sidecar path (existence only)
+$candidates = @()
+if ($env:NURAVEDA_DIR) { $candidates += $env:NURAVEDA_DIR }
+$candidates += @(
+    (Join-Path (Split-Path $Repo -Parent) 'ai-voice-agent'),
+    (Join-Path (Split-Path $Repo -Parent) 'ai-voice-agent-purity'),
+    (Join-Path $Repo 'ai-voice-agent')
+)
+$found = $null
+foreach ($c in $candidates) {
+    if (-not $c) { continue }
+    $server = Join-Path $c 'src\server.js'
+    $agent = Join-Path $c 'src\livekit-agent.js'
+    if ((Test-Path $server) -or (Test-Path $agent)) { $found = $c; break }
+}
+if ($found) {
+    Record 'I-nuraveda-cwd' 'PASS' "sidecar at $found"
+} else {
+    Record 'I-nuraveda-cwd' 'UNVERIFIED' 'NURAVEDA_DIR not found on this host -- set before pm2 start'
+}
+
+# J -- pm2 present?
+try {
+    $pm2 = & pm2 -v 2>$null
+    if ($LASTEXITCODE -eq 0 -or $pm2) {
+        Record 'J-pm2' 'PASS' "pm2 $pm2"
+    } else {
+        Record 'J-pm2' 'UNVERIFIED' 'pm2 not on PATH'
+    }
+} catch {
+    Record 'J-pm2' 'UNVERIFIED' 'pm2 not on PATH'
+}
+
+# K -- API health (if listening)
+try {
+    $health = Invoke-RestMethod -Uri 'http://127.0.0.1:8003/health' -TimeoutSec 5
+    if ($health.status -eq 'healthy') {
+        Record 'K-api-health' 'PASS' 'API /health healthy'
+    } else {
+        Record 'K-api-health' 'UNVERIFIED' ($health | ConvertTo-Json -Compress)
+    }
+} catch {
+    Record 'K-api-health' 'UNVERIFIED' 'API not answering on :8003 (may be stopped -- OK for read-only check)'
+}
+
+# L -- LiveKit / voice process (host-only)
+try {
+    $list = & pm2 jlist 2>$null | ConvertFrom-Json
+    $voice = @($list | Where-Object { $_.name -match 'nuraveda|voice' })
+    if ($voice.Count -gt 0) {
+        $online = @($voice | Where-Object { $_.pm2_env.status -eq 'online' }).Count
+        Record 'L-voice-pm2' 'UNVERIFIED' "$online/$($voice.Count) voice apps online (DNS/audio not proven)"
+    } else {
+        Record 'L-voice-pm2' 'UNVERIFIED' 'no nuraveda/voice pm2 apps listed'
+    }
+} catch {
+    Record 'L-voice-pm2' 'UNVERIFIED' 'could not query pm2 process list'
+}
+
+# M -- personal live call
+Record 'M-personal-live-call' 'UNVERIFIED' 'not executed by this script; run personal_test_call.py manually'
+
+# N -- Windows host end-to-end
+Record 'N-windows-e2e' 'UNVERIFIED' 'full Windows runtime (LiveKit DNS, SIP trunk, audio) not verified here'
+
+Write-Host ""
+Write-Host "=== Summary ===" -ForegroundColor Cyan
+$Results | Format-Table -AutoSize
+$fail = @($Results | Where-Object Status -eq 'FAIL').Count
+$unv = @($Results | Where-Object Status -eq 'UNVERIFIED').Count
+$pass = @($Results | Where-Object Status -eq 'PASS').Count
+Write-Host "PASS=$pass FAIL=$fail UNVERIFIED=$unv"
+if ($fail -gt 0) {
+    Write-Host 'READINESS FAILED: one or more required checks failed.' -ForegroundColor Red
+    exit 1
+}
+if ($unv -gt 0) {
+    Write-Host 'READINESS NOT VERIFIED: unresolved checks prevent a ready verdict.' -ForegroundColor Yellow
+    exit 2
+}
+Write-Host 'READINESS VERIFIED: all checks passed.' -ForegroundColor Green
+exit 0
+) {
+                    Record ("K2-env-" + $key) 'PASS' "$key is disabled in backend/.env"
+                } else {
+                    Record ("K2-env-" + $key) 'FAIL' "$key is enabled or non-false in backend/.env"
+                }
+            }
+        }
     }
 }
 
