@@ -1,0 +1,328 @@
+"""
+WhatsApp Business API sender via AiSensy (Meta BSP) on +91 90849 58495.
+
+WHY THE CONSENT GATE IS NOT OPTIONAL
+------------------------------------
+Meta's WhatsApp Business Messaging Policy requires opt-in before ANY
+business-initiated message. Our leads are scraped from Google Maps / IndiaMART /
+TradeIndia — consent_status is UNKNOWN for 736 of 737. Sending template messages
+to those numbers is a policy violation, and the practical consequence is not a
+fine: recipients block/report -> quality rating drops -> messaging limits ->
+the number gets banned. That is the same number our email + outreach copy tells
+prospects to call, so losing it costs more than the channel.
+
+So this module refuses to send to a lead without recorded consent. Cold
+first-touch stays on wa.me (the founder's own phone, manual send) via the
+WhatsApp Send Queue. This API path is for people who have opted in, recorded by
+whatsapp_consent with the number it covers. Replying to an email is not that:
+a reply on one channel is not permission on another.
+
+CONFIG (dormant until set — nothing sends without these):
+  AISENSY_API_KEY        API key from the AiSensy dashboard
+  AISENSY_CAMPAIGN_NAME  campaign wired to a Meta-approved template
+
+Business-initiated messages must use an approved template; AiSensy's campaign API
+maps a campaign -> template. Inside the 24h window free-form text is allowed.
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Optional
+
+import httpx
+
+# The endpoint constant is gone: whatsapp_aisensy owns where a message goes,
+# and a constant here is what let a second transport appear.
+
+# Consent values we treat as a real opt-in.
+CONSENT_OK = {"EXPLICIT", "OPTED_IN"}
+
+# Statuses reached after the lead replied to us on SOME channel. Read only by
+# in_service_window(). A reply is not WhatsApp consent -- see consent_check.
+ENGAGED = {"REPLIED", "MEETING_BOOKED", "MEETING_COMPLETED", "SAMPLE_SENT",
+           "FEEDBACK_PENDING", "FEEDBACK_RECEIVED", "PROPOSAL_SENT",
+           "NEGOTIATION", "ORDER_WON", "ONBOARDED"}
+
+SERVICE_WINDOW_HOURS = 24
+
+
+@dataclass
+class WaResult:
+    # `sent` is provider acceptance for AiSensy; Klaviyo uses queued_to_klaviyo.
+    # Neither means delivered/read without a provider delivery callback.
+    status: str                      # sent | queued_to_klaviyo | blocked | failed | unknown | not_configured
+    reason: str = ""
+    message_id: str = ""
+    response: str = ""
+    provider_accepted: bool = False
+    delivery_confirmed: bool = False
+
+
+def provider() -> str:
+    """Which transport: 'aisensy' (legacy, AISENSY_ENABLED stays 0) or
+    'klaviyo' (28 Oct founder decision). Default stays aisensy so nothing
+    changes until WHATSAPP_PROVIDER=klaviyo is set deliberately."""
+    return (os.getenv("WHATSAPP_PROVIDER", "klaviyo") or "klaviyo").strip().lower()
+
+
+def is_configured() -> bool:
+    # Asks the one transport rather than looking for a provider key of its
+    # own — two answers to "can we send" is how three transports happened.
+    if provider() == "klaviyo":
+        from app.services import whatsapp_klaviyo
+        return whatsapp_klaviyo.config_status()[0]
+    from app.services import whatsapp_aisensy as transport
+    return transport.config_status()[0]
+
+
+def consent_check(lead) -> tuple[bool, str]:
+    """
+    May we send this lead a WhatsApp message via the API?
+
+    Returns (allowed, reason). Deliberately strict: an unknown consent state is
+    a NO, never a maybe.
+    """
+    status = (getattr(lead, "consent_status", None) or "UNKNOWN").upper()
+    if getattr(lead, "do_not_call", False):
+        return False, "lead is on do-not-contact"
+    from app.services.supplier_guard import is_supplier as _is_sup
+    if _is_sup(lead)[0]:
+        return False, "supplier/vendor"
+    if status == "REVOKED":
+        return False, "WhatsApp consent was revoked — the business asked us to stop"
+    if status in CONSENT_OK:
+        # Consent is granted for a NUMBER, recorded at consent_phone; the row
+        # can still drift (re-enrichment, a manual fix, a corruption bug) so
+        # that phone/whatsapp_number no longer match what actually opted in.
+        # Only enforced when consent_phone was captured -- NULL means this
+        # consent predates the field or came from a provenance that doesn't
+        # set it (e.g. phone_intelligence's FOUNDER_CALL), and those keep
+        # behaving exactly as before.
+        bound_to = (getattr(lead, "consent_phone", None) or "").strip()
+        if bound_to:
+            from app.services.identity import digits_only
+
+            current = getattr(lead, "whatsapp_number", None) or getattr(lead, "phone", "") or ""
+            if digits_only(current) != digits_only(bound_to):
+                return False, (
+                    "consent was recorded for a different number than the one on "
+                    "file now (consent_phone=%r, current=%r) — an opt-in does not "
+                    "carry over to a changed number" % (bound_to, current)
+                )
+        return True, f"consent recorded: {status}"
+    # There used to be a shortcut here: any lead whose status was REPLIED (or
+    # further along) passed as "opt-in + 24h window open". Nothing checked the
+    # window or the channel, so an EMAIL reply -- "not interested" included --
+    # licensed WhatsApp, and a business that replied "stop" and was REVOKED
+    # still passed. A real WhatsApp reply records EXPLICIT consent through
+    # whatsapp_consent.capture_whatsapp_inbound, bound to its number, so the
+    # shortcut granted nothing a genuine reply needs.
+    return False, (
+        f"no opt-in on record (consent_status={status}). Meta requires opt-in before "
+        f"business-initiated WhatsApp. Use the wa.me Send Queue for cold first touch."
+    )
+
+
+def in_service_window(lead) -> bool:
+    """
+    True if the lead messaged us within the last 24h — inside Meta's
+    customer-service window, where free-form (non-template) text is allowed.
+    Outside it, only an approved template may be sent.
+    """
+    last = getattr(lead, "last_reply_at", None) or getattr(lead, "last_updated", None)
+    if not last or (getattr(lead, "status", "") or "") not in ENGAGED:
+        return False
+    return (datetime.utcnow() - last) < timedelta(hours=SERVICE_WINDOW_HOURS)
+
+
+def _normalise_msisdn(raw: str) -> str:
+    """AiSensy wants a country-coded number without + or separators."""
+    d = "".join(ch for ch in (raw or "") if ch.isdigit())
+    if len(d) == 10:            # bare Indian mobile
+        d = "91" + d
+    return d
+
+
+def _extract_provider_message_id(response_text: str, headers) -> str:
+    """Extract a provider message identifier without assuming one transport shape."""
+    header_id = str(headers.get("x-message-id") or headers.get("x-messageid") or "").strip()
+    if header_id:
+        return header_id
+
+    try:
+        import json
+        body = json.loads(response_text or "{}")
+    except Exception:
+        return ""
+
+    if not isinstance(body, dict):
+        return ""
+    for key in ("messageId", "message_id", "id", "data"):
+        value = body.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            for nested in ("messageId", "message_id", "id"):
+                nested_value = value.get(nested)
+                if isinstance(nested_value, str) and nested_value.strip():
+                    return nested_value.strip()
+    return ""
+
+
+# A second send to the same lead minutes after the first is a double-click or
+# a retried request, never a cadence: the shortest real follow-up gap is days.
+DUPLICATE_WINDOW_MINUTES = 10
+
+
+def recent_send(db, lead, minutes: int = DUPLICATE_WINDOW_MINUTES) -> bool:
+    """True if a WhatsApp to this lead was sent inside the window. Every send
+    path -- the manual endpoint, the reminder executor, Smart Outreach --
+    records WHATSAPP_SENT, so one ledger answers for all three."""
+    from app.models.models import WorkflowEvent
+
+    since = datetime.utcnow() - timedelta(minutes=minutes)
+    return db.query(WorkflowEvent.id).filter(
+        WorkflowEvent.lead_id == lead.id,
+        WorkflowEvent.event_type.in_(("WHATSAPP_SENT", "WHATSAPP_SEND_UNCONFIRMED")),
+        WorkflowEvent.occurred_at >= since,
+    ).first() is not None
+
+
+def send_whatsapp(lead, message: str, campaign_name: Optional[str] = None,
+                  template_params: Optional[list[str]] = None,
+                  timeout: float = 20.0, db=None,
+                  approved_draft_id: Optional[str] = None) -> WaResult:
+    """
+    The single WhatsApp send path. Consent first, then the one transport.
+
+    Consent is checked here and nowhere below, on purpose, so no future caller
+    can bypass it by passing the right arguments — and so the transport cannot
+    grow a second opinion about who may be messaged.
+
+    The transport is AiSensy's API campaign endpoint. It was three modules
+    each defining AISENSY_URL and each transmitting -- one of them, the
+    connector, with no consent check at all until it was fixed mid-audit.
+    Then it was Evolution driving Meta's Cloud API. It is AiSensy again now,
+    for a reason that is not preference: the business number already lives in
+    a WhatsApp Business Account under AiSensy, a number belongs to exactly one
+    WABA, and moving it would have broken seven Live campaigns carrying real
+    orders.
+
+    What has not changed through any of that is the shape: ONE transport,
+    reached from here, with consent decided before it is called.
+
+    A successful response means PROVIDER_ACCEPTED only. Delivery and read must
+    be established from webhooks, never inferred from the send call.
+    """
+    allowed, reason = consent_check(lead)
+    if not allowed:
+        return WaResult(status="blocked", reason=reason)
+    from app.services import business_hours
+    if not business_hours.is_open():
+        return WaResult(status="blocked", reason="outside business hours (09:30-18:30 IST Mon-Sat) — WhatsApp dispatch blocked")
+    if provider() == "klaviyo":
+        return _send_via_klaviyo(lead, db, approved_draft_id, timeout)
+    # AiSensy takes no idempotency key, so a repeat is refused before it can
+    # reach the provider. Callers pass db; without it there is no ledger to read.
+    if db is not None and recent_send(db, lead):
+        return WaResult(status="blocked", reason=(
+            f"a WhatsApp was sent to this lead in the last "
+            f"{DUPLICATE_WINDOW_MINUTES} minutes — not sending a duplicate"))
+
+    from app.services import whatsapp_aisensy as transport
+    from app.services.gate1_holds import evidence_refusal
+    held = evidence_refusal(lead, db)
+    if held:
+        return WaResult(status="blocked", reason=held)
+
+    phone = getattr(lead, "whatsapp_number", None) or getattr(lead, "phone", "") or ""
+    # WHATSAPP_TEMPLATE names a LIVE AiSensy API campaign, which is itself a
+    # binding to one Meta-approved template. AISENSY_CAMPAIGN_NAME is the
+    # older name for the same thing and is still read by the transport.
+    template = (campaign_name
+                or os.getenv("WHATSAPP_TEMPLATE")
+                or os.getenv("AISENSY_CAMPAIGN_NAME") or "").strip()
+    params = template_params if template_params is not None else [
+        (getattr(lead, "contact_name", None) or getattr(lead, "company", "") or "there")
+    ]
+
+    result = transport.send_template(phone, template, params=params,
+                                     timeout=timeout)
+    if result.status == "unknown" and db is not None:
+        # Possibly delivered. Recorded so the duplicate guard treats it as a
+        # send; the founder reconciles it against the AiSensy log.
+        from app.models.models import WorkflowEvent
+        db.add(WorkflowEvent(
+            lead_id=lead.id, event_type="WHATSAPP_SEND_UNCONFIRMED",
+            actor="SYSTEM", channel="whatsapp",
+            payload={"to": phone, "template": template, "reason": result.reason[:300]},
+            occurred_at=datetime.utcnow()))
+    return WaResult(
+        status=result.status,
+        reason=result.reason,
+        message_id=result.message_id,
+        response=result.response,
+        provider_accepted=result.provider_accepted,
+        delivery_confirmed=result.delivery_confirmed,
+    )
+
+
+def _send_via_klaviyo(lead, db, approved_draft_id, timeout) -> WaResult:
+    """Klaviyo-as-BSP path (28 Oct). Needs: a founder-approved draft for THIS
+    lead, the pacer's eligibility + free slot, and the one-at-a-time lock.
+    Klaviyo then sends the approved template from its live flow. AiSensy is
+    never touched on this path."""
+    from app.services import whatsapp_drafts, whatsapp_klaviyo, whatsapp_pacer as pacer
+    ok, why = whatsapp_klaviyo.config_status()
+    if not ok:
+        return WaResult(status="not_configured", reason=why)
+    if db is None:
+        return WaResult(status="blocked", reason="no db session — the pacer cannot check the ledger")
+    draft = whatsapp_drafts.approved_for(approved_draft_id, lead.id)
+    if not draft:
+        return WaResult(status="blocked", reason="no founder-approved draft for this lead")
+    ok, why = pacer.eligible(db, lead)
+    if not ok:
+        return WaResult(status="blocked", reason=why)
+    # 29 Oct: the consent must be one recorded on an AI call (time + call id);
+    # emit() subscribes the Klaviyo profile from it and sends only once subscribed.
+    consent, why = whatsapp_klaviyo.call_consent(db, lead)
+    if consent is None:
+        return WaResult(status="blocked", reason=f"no usable AI-call consent record: {why}")
+    from app.services.gate1_holds import evidence_refusal
+    held = evidence_refusal(lead, db)
+    if held:
+        return WaResult(status="blocked", reason=held)
+    try:
+        with pacer.OneAtATime():
+            ok, why = pacer.slot_free(db)
+            if not ok:
+                return WaResult(status="blocked", reason=why)
+            res = whatsapp_klaviyo.emit(lead, approved_draft_id, draft.get("template_key") or "",
+                                        draft.get("params") or {}, timeout=timeout,
+                                        consent=consent)
+            if res.status in ("queued_to_klaviyo", "failed") and res.message_id:
+                # 'failed' may still have reached Klaviyo; recorded so the gap,
+                # the hourly cap and the 7-day rule count it. Never auto-retried.
+                from app.models.models import WorkflowEvent
+                db.add(WorkflowEvent(
+                    lead_id=lead.id,
+                    event_type=("WHATSAPP_QUEUED_TO_KLAVIYO" if res.status == "queued_to_klaviyo"
+                                else "WHATSAPP_SEND_UNCONFIRMED"),
+                    actor="SYSTEM", channel="whatsapp",
+                    payload={"to": pacer.mask(getattr(lead, "consent_phone", "")),
+                             "provider": "klaviyo", "draft_id": approved_draft_id,
+                             "template_key": draft.get("template_key"),
+                             "unique_id": res.message_id, "reason": res.reason[:200]},
+                    occurred_at=datetime.utcnow()))
+                db.commit()
+                whatsapp_drafts.mark_sent(approved_draft_id, res.message_id)
+            # Klaviyo 202 means the event was accepted, not that WhatsApp was
+            # sent/delivered. Preserve the explicit queued state end-to-end.
+            return WaResult(status=res.status, reason=res.reason, message_id=res.message_id,
+                            provider_accepted=res.provider_accepted,
+                            delivery_confirmed=res.delivery_confirmed)
+    except BlockingIOError:
+        return WaResult(status="blocked", reason="another WhatsApp send is in progress")

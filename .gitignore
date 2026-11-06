@@ -1,0 +1,12 @@
+.env
+**/.env
+*.db
+*.db-wal
+*.db-shm
+.venv/
+**/__pycache__/
+logs/
+recordings/
+backups/
+*.pem
+*.key
