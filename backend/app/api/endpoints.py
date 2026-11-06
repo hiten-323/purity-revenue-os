@@ -463,6 +463,10 @@ _sample_pipeline: list[dict] = []
 @router.post("/samples/dispatch")
 def dispatch_sample(req: dict):
     """Dispatch a coffee sample and generate all follow-up communications."""
+    from app.services.gate1_holds import provider_armed
+    if not provider_armed("sample"):
+        return {"status": "blocked", "sent": False,
+                "reason": "sample dispatch is not armed"}
     sample_req = SampleRequest(**req)
     record = _sample_agent.create_sample_record(sample_req)
     note = _sample_agent.dispatch_note(sample_req, record.tracking_id)

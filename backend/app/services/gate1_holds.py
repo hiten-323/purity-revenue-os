@@ -18,6 +18,14 @@ UNMATCHED_REASONS = frozenset({
 })
 RECORDED_CONSENT = frozenset({"EXPLICIT", "OPTED_IN"})
 REVOKED_CONSENT = frozenset({"REVOKED", "OPT_OUT", "REFUSED", "UNSUBSCRIBED"})
+UNBOUND_REASON = "a later WHATSAPP_CONSENT_UNBOUND event exists"
+BLOCKED_PROVIDER_CONSENT_REASON = (
+    "an existing BLOCKED_PROVIDER_CONSENT row conflicts with the current subscription lookup"
+)
+BLOCKED_NO_PROVIDER_EVENT_REASON = (
+    "an existing BLOCKED_NO_PROVIDER_EVENT row must not be requeued"
+)
+DRAFT_VOID_REASON = "lead is DO_NOT_CONTACT; draft must not be sent."
 
 
 def _consent(lead) -> str:
@@ -204,16 +212,141 @@ def provider_subscription_allows(phone: str) -> tuple[bool, str]:
     return False, state or "not subscribed"
 
 
+def later_unbound_consent(lead, db=None) -> bool:
+    """True when an unbound event is newer than the latest recorded consent."""
+    if bool(getattr(lead, "later_whatsapp_consent_unbound", False)):
+        return True
+    lead_id = getattr(lead, "id", None)
+    if not _queryable(db) or not lead_id:
+        return False
+    from app.models.models import WorkflowEvent
+    rows = db.query(WorkflowEvent).filter(
+        WorkflowEvent.lead_id == lead_id,
+        WorkflowEvent.event_type.in_(("WHATSAPP_CONSENT_RECORDED", "WHATSAPP_CONSENT_UNBOUND")),
+    ).order_by(WorkflowEvent.id).all()
+    last_recorded = None
+    for row in rows:
+        if row.event_type == "WHATSAPP_CONSENT_RECORDED":
+            last_recorded = row
+            continue
+        if last_recorded is None:
+            continue
+        recorded_at = last_recorded.occurred_at
+        unbound_at = row.occurred_at
+        if row.id > last_recorded.id or (recorded_at and unbound_at and unbound_at > recorded_at):
+            return True
+    return False
+
+
+def uncleared_blocked_provider_consent(lead, db=None) -> bool:
+    """True while a BLOCKED_PROVIDER_CONSENT row is still stored for this lead."""
+    if bool(getattr(lead, "blocked_provider_consent", False)):
+        return True
+    return _blocked_outbound(lead, db, "BLOCKED_PROVIDER_CONSENT")
+
+
+def uncleared_blocked_no_provider_event(lead, db=None) -> bool:
+    """True while a BLOCKED_NO_PROVIDER_EVENT row is still stored for this lead."""
+    if bool(getattr(lead, "blocked_no_provider_event", False)):
+        return True
+    return _blocked_outbound(lead, db, WA_BLOCKED_STATUS)
+
+
+def _queryable(db) -> bool:
+    return db is not None and hasattr(db, "query")
+
+
+def _blocked_outbound(lead, db, status: str) -> bool:
+    lead_id = getattr(lead, "id", None)
+    if not _queryable(db) or not lead_id:
+        return False
+    from app.models.models import OutboundWhatsApp
+    return db.query(OutboundWhatsApp.id).filter(
+        OutboundWhatsApp.lead_id == lead_id,
+        OutboundWhatsApp.status == status,
+    ).first() is not None
+
+
+def _flag_on(name: str, default: str = "0") -> bool:
+    import os
+    return (os.getenv(name, default) or default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _explicitly_off(name: str) -> bool:
+    import os
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return False
+    return str(raw).strip().lower() not in {"1", "true", "yes", "on"}
+
+
+def provider_armed(channel: str) -> bool:
+    """True only when that channel's own outbound flag is on.
+
+    SMS and samples have no arming flag among the ten, so they stay disarmed.
+    An explicit zero on every draft channel returns before a draft is written.
+    """
+    channel = (channel or "").lower()
+    if channel == "email":
+        return _flag_on("EMAIL_SENDING_ENABLED")
+    if channel == "whatsapp":
+        return _flag_on("KLAVIYO_WA_ENABLED") or _flag_on("AISENSY_ENABLED")
+    if channel in {"call", "ai_call"}:
+        return _flag_on("AI_CALLING_ENABLED")
+    if channel == "draft":
+        watched = ("EMAIL_SENDING_ENABLED", "KLAVIYO_WA_ENABLED", "AISENSY_ENABLED",
+                   "WHATSAPP_PACER_ENABLED", "AUTO_OUTREACH_ENABLED")
+        return not all(_explicitly_off(name) for name in watched)
+    return False
+
+
+def nudge_blocked(lead, db=None) -> str | None:
+    """Why a follow-up draft must not be created. Does not call a provider."""
+    if (getattr(lead, "contact_status", "") or "").upper() == "DO_NOT_CONTACT":
+        return DRAFT_VOID_REASON
+    if bool(getattr(lead, "do_not_call", False)):
+        return "do_not_call"
+    status = (getattr(lead, "status", "") or "").upper()
+    if status == CLOSED_STATUS:
+        return f"status={CLOSED_STATUS}"
+    if status == "WRONG_NUMBER":
+        return "status=WRONG_NUMBER"
+    consent = _consent(lead)
+    if consent in REVOKED_CONSENT:
+        return f"consent_status={consent}"
+    if status in {"OPT_OUT", "UNSUBSCRIBED"}:
+        return "opt-out"
+    if later_unbound_consent(lead, db):
+        return UNBOUND_REASON
+    if uncleared_blocked_provider_consent(lead, db):
+        return BLOCKED_PROVIDER_CONSENT_REASON
+    if uncleared_blocked_no_provider_event(lead, db):
+        return BLOCKED_NO_PROVIDER_EVENT_REASON
+    return None
+
+
 def evidence_gaps(lead, *, evidence_hash_present: bool, provider_allows: bool,
-                  provider_detail: str = "") -> list[str]:
+                  provider_detail: str = "", later_unbound: bool = False,
+                  blocked_provider_consent: bool = False,
+                  blocked_no_provider_event: bool = False) -> list[str]:
     """Missing facts that keep a lead from being dispatched. No contact is invented."""
     gaps = []
+    if (getattr(lead, "contact_status", "") or "").upper() == "DO_NOT_CONTACT":
+        gaps.append(DRAFT_VOID_REASON)
+    if later_unbound:
+        gaps.append(UNBOUND_REASON)
+    if blocked_provider_consent:
+        gaps.append(BLOCKED_PROVIDER_CONSENT_REASON)
+    if blocked_no_provider_event:
+        gaps.append(BLOCKED_NO_PROVIDER_EVENT_REASON)
     consent = _consent(lead)
     if consent != "EXPLICIT":
         gaps.append(f"consent_status={consent}")
     if consent in REVOKED_CONSENT:
         gaps.append(f"revocation consent_status={consent}")
     status = (getattr(lead, "status", "") or "").upper()
+    if status == CLOSED_STATUS:
+        gaps.append(f"status={CLOSED_STATUS}")
     if status in {"OPT_OUT", "UNSUBSCRIBED"} or consent in {"OPT_OUT", "UNSUBSCRIBED"}:
         gaps.append("opt-out")
     if not consent_phone_matches_destination(lead):
@@ -236,7 +369,11 @@ def evidence_refusal(lead, db=None) -> str | None:
     read-only subscription lookup.
     """
     hash_ok = lead_has_evidence_hash(lead, db)
-    local = evidence_gaps(lead, evidence_hash_present=hash_ok, provider_allows=True)
+    local = evidence_gaps(
+        lead, evidence_hash_present=hash_ok, provider_allows=True,
+        later_unbound=later_unbound_consent(lead, db),
+        blocked_provider_consent=uncleared_blocked_provider_consent(lead, db),
+        blocked_no_provider_event=uncleared_blocked_no_provider_event(lead, db))
     if local:
         return "; ".join(local)
     phone = getattr(lead, "consent_phone", None) or getattr(lead, "whatsapp_number", None) or getattr(lead, "phone", None)
@@ -246,10 +383,13 @@ def evidence_refusal(lead, db=None) -> str | None:
     return None
 
 
-def reminder_may_dispatch(lead, channel: str, reminder_status: str = "SCHEDULED") -> tuple[bool, str]:
+def reminder_may_dispatch(lead, channel: str, reminder_status: str = "SCHEDULED", db=None) -> tuple[bool, str]:
     """Reject a scheduled reminder. Outbound flags are not an input."""
     if (reminder_status or "").upper() != "SCHEDULED":
         return False, "reminder is not scheduled"
+    held = nudge_blocked(lead, db)
+    if held:
+        return False, held
     channel = (channel or "").lower()
     consent = _consent(lead)
     if channel == "whatsapp" and consent not in RECORDED_CONSENT:
