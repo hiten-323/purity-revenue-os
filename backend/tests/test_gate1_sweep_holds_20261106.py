@@ -288,6 +288,7 @@ def test_flag_on_dispatch_rejects_holds_before_any_provider(monkeypatch):
                         lambda db, lead: (SimpleNamespace(ok=True), "ok"))
     monkeypatch.setenv("WHATSAPP_PROVIDER", "klaviyo")
     monkeypatch.setenv("KLAVIYO_PRIVATE_KEY", "test-key")
+    monkeypatch.setattr("app.services.outbound_cohort.allow_list_ids", lambda: frozenset({9}))
 
     phone = "+919876543210"
     ready = dict(phone=phone, whatsapp_number=phone, consent_phone=phone,

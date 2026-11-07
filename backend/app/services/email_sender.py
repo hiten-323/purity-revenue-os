@@ -537,6 +537,20 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
     msg.attach(MIMEText(email.body_text, "plain", "utf-8"))
     msg.attach(MIMEText(email.body_html or _text_to_html(email.body_text), "html", "utf-8"))
 
+    if not _is_self:
+        try:
+            from app.database.database import SessionLocal as _CohortSession
+            from app.services.outbound_cohort import email_refusal
+            _cdb = _CohortSession()
+            try:
+                _email_why = email_refusal(email, _cdb)
+            finally:
+                _cdb.close()
+        except Exception as _exc:
+            return _gate_failure(email, "email allow-list check unavailable; email not sent", _exc)
+        if _email_why:
+            return _gate_failure(email, _email_why)
+
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as smtp:
             smtp.ehlo()

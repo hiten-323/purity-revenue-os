@@ -1,0 +1,298 @@
+"""Allow-list and cap ceilings. Flags are forced on only inside this fixture."""
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from types import SimpleNamespace
+
+from sqlalchemy.orm import sessionmaker
+
+from app.models.models import B2BLead, Base, OutboundWhatsApp, WorkflowEvent
+from app.services import outbound_cohort as cohort
+from conftest import memory_engine
+
+
+def _db():
+    engine = memory_engine()
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)(), engine
+
+
+def _lead(db, **kw):
+    base = dict(company="Cohort Cafe", city="Mohali", status="DISCOVERED",
+                contact_status="CONTACTABLE", consent_status="EXPLICIT",
+                consent_source="AI_CALL_WHATSAPP_REQUEST", do_not_call=False,
+                phone="+919876543210", whatsapp_number="+919876543210",
+                consent_phone="+91 98765 43210", email="cohort@example.in")
+    base.update(kw)
+    lead = B2BLead(**base)
+    db.add(lead)
+    db.commit()
+    return lead
+
+
+def _hash_event(db, lead):
+    db.add(WorkflowEvent(
+        lead_id=lead.id, event_type="WHATSAPP_CONSENT_RECORDED", actor="SYSTEM",
+        channel="phone", occurred_at=datetime(2026, 10, 1, 8, 0, 0),
+        payload=json.dumps({
+            "source": "AI_CALL_WHATSAPP_REQUEST",
+            "evidence_sha256": "b" * 64,
+            "consent_phone": lead.consent_phone,
+        })))
+    db.commit()
+
+
+def _open(monkeypatch):
+    monkeypatch.setattr("app.services.whatsapp_pacer.in_hours", lambda now=None: True)
+    monkeypatch.setattr("app.services.whatsapp_pacer.slot_free", lambda db, now=None: (True, "slot free"))
+
+
+def test_caps_cannot_be_raised(monkeypatch):
+    from app.services.outbound_limits import effective
+    monkeypatch.setenv("AI_CALL_CYCLE_MAX_DIALS", "9")
+    monkeypatch.setenv("AI_CALL_MAX_INFLIGHT", "4")
+    monkeypatch.setenv("WA_MAX_PER_HOUR", "50")
+    monkeypatch.setenv("WA_DAILY_CAP", "100")
+    assert effective("AI_CALL_CYCLE_MAX_DIALS") == 1
+    assert effective("AI_CALL_MAX_INFLIGHT") == 1
+    assert effective("WA_MAX_PER_HOUR") == 5
+    assert effective("WA_DAILY_CAP") == 20
+
+
+def test_environment_cannot_add_to_the_allow_list(monkeypatch):
+    monkeypatch.setenv("OUTREACH_ALLOW_LIST", "1,550,999999")
+    assert cohort.allow_list_ids() == frozenset({550})
+
+
+def test_dialer_refuses_everyone_except_a_call_authorization(monkeypatch):
+    from app.services import ai_call_cycle
+    db, engine = _db()
+    try:
+        outsider = _lead(db, company="Outsider")
+        whatsapp_only = _lead(db, company="WhatsApp Only")
+        _hash_event(db, whatsapp_only)
+        authorized = _lead(db, company="Authorized", phone="+919111122233")
+        from tests.cohort_fixture import authorize_call
+        authorize_call(db, authorized)
+        monkeypatch.setattr(cohort, "allow_list_ids",
+                            lambda: frozenset({outsider.id, whatsapp_only.id, authorized.id}))
+        names = [lead.company for lead in ai_call_cycle.select_call_candidates(db)]
+        assert names == ["Authorized"]
+        assert cohort.call_refusal(whatsapp_only, db).startswith("consent_source AI_CALL_WHATSAPP_REQUEST")
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_place_call_stops_before_the_provider_when_the_flag_is_on(monkeypatch):
+    from app.services import founder_call_pipeline as fcp
+    from app.services import voice_router
+    db, engine = _db()
+    try:
+        lead = _lead(db)
+        _hash_event(db, lead)
+        monkeypatch.setattr(cohort, "allow_list_ids", lambda: frozenset({lead.id}))
+        monkeypatch.setenv("AI_CALLING_ENABLED", "1")
+        monkeypatch.delenv("AI_CALLING_KILL_SWITCH", raising=False)
+        monkeypatch.setattr(fcp, "call_hours_open", lambda lead=None, now=None: (True, "test"))
+        monkeypatch.setattr(voice_router, "config_status", lambda: (True, "ok"))
+        monkeypatch.setattr("app.services.gate1_holds.provider_subscription_allows",
+                            lambda phone: (True, "SUBSCRIBED"))
+        monkeypatch.setattr("app.services.gate1_holds.evidence_refusal", lambda *a, **k: None)
+        called = []
+        monkeypatch.setattr(voice_router, "_adapter", lambda *a, **k: called.append("dial"))
+        result = voice_router.place_call(lead, dry_run=False, db=db)
+        assert result.placed is False
+        assert "WhatsApp request" in result.error
+        assert called == []
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_pacer_and_single_send_refuse_outside_the_list_and_failed_rows(monkeypatch):
+    from app.services import whatsapp_klaviyo as klaviyo
+    db, engine = _db()
+    try:
+        _open(monkeypatch)
+        outsider = _lead(db, company="Outside WA")
+        failed = _lead(db, company="Failed WA", phone="+919222233344",
+                       whatsapp_number="+919222233344", consent_phone="+919222233344")
+        _hash_event(db, failed)
+        db.add(OutboundWhatsApp(lead_id=failed.id, status="FAILED", delivered_at=None))
+        ok_lead = _lead(db, company="One WA", phone="+919333344455",
+                        whatsapp_number="+919333344455", consent_phone="+919333344455")
+        _hash_event(db, ok_lead)
+        db.commit()
+        monkeypatch.setattr(cohort, "allow_list_ids",
+                            lambda: frozenset({outsider.id, failed.id, ok_lead.id}))
+        assert "outside the WhatsApp allow-list" in cohort.whatsapp_refusal(
+            _lead(db, company="Never Listed"), db)
+        assert cohort.whatsapp_refusal(failed, db).startswith("a failed or blocked")
+        posts = []
+
+        def _post(url, json=None, headers=None, timeout=None):
+            posts.append(url)
+            if "/flows" in url or "subscription" in url:
+                raise AssertionError(url)
+            class _R:
+                status_code = 202
+            return _R()
+
+        monkeypatch.setattr(klaviyo.httpx, "post", _post)
+        monkeypatch.setattr(klaviyo, "wa_status", lambda phone, timeout=15.0: ("p", True, "SUBSCRIBED"))
+        monkeypatch.setenv("KLAVIYO_PRIVATE_KEY", "pk_test")
+        monkeypatch.setenv("KLAVIYO_WA_FLOW_LIVE", "0")
+        monkeypatch.setenv("KLAVIYO_WA_ENABLED", "0")
+        refused = klaviyo.send_one_recipient(outsider, db, draft_id="x")
+        assert refused.status == "blocked"
+        assert posts == []
+        accepted = klaviyo.send_one_recipient(ok_lead, db, draft_id="one", params={"name": "A"})
+        assert accepted.status == "queued_to_klaviyo"
+        assert accepted.provider_accepted is True
+        assert accepted.delivery_confirmed is False
+        assert posts == ["https://a.klaviyo.com/api/events"]
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_email_aisensy_and_warm_refuse_before_the_provider_when_flags_are_on(monkeypatch):
+    from app.services import warm_followup as wf
+    from app.services import whatsapp_aisensy as transport
+    db, engine = _db()
+    try:
+        lead = _lead(db)
+        monkeypatch.setenv("EMAIL_SENDING_ENABLED", "1")
+        monkeypatch.setenv("AUTO_WARM_ENABLED", "1")
+        monkeypatch.setenv("AISENSY_ENABLED", "1")
+        monkeypatch.setenv("AISENSY_API_KEY", "k")
+        monkeypatch.setenv("WHATSAPP_TEMPLATE", "Purity Outreach")
+        monkeypatch.setenv("WHATSAPP_CAMPAIGN_LIVE", "1")
+        called = []
+
+        class _Client:
+            def post(self, *a, **k):
+                called.append("aisensy")
+                raise AssertionError("AiSensy was called")
+
+        result = transport.send_template("9876543210", "Purity Outreach", client=_Client(), db=db)
+        assert result.status == "blocked"
+        assert called == []
+        draft = wf.create_draft(lead, db, "MAYBE")
+        assert draft["approvable"] is False
+        assert "allow-list" in draft["why"]
+        email = SimpleNamespace(lead_id=lead.id, to_email="cohort@example.in", status="", error="")
+        why = cohort.email_refusal(email, db)
+        assert why == "lead is outside the email allow-list"
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_each_flag_on_still_refuses_the_held_classes(monkeypatch):
+    """Every outbound flag is forced on. Nothing here dials or contacts Klaviyo."""
+    from app.services import ai_call_cycle, voice_router, whatsapp_aisensy, whatsapp_klaviyo
+    from app.services import warm_followup
+    from app.services.smart_outreach import select_candidates
+    from app.services.whatsapp_sender import send_whatsapp
+    flags = (
+        "AUTO_WARM_ENABLED", "SMART_OUTREACH_ENABLED", "AUTO_OUTREACH_ENABLED",
+        "AI_CALLING_ENABLED", "AUTO_AI_CALLING_ENABLED", "AISENSY_ENABLED",
+        "EMAIL_SENDING_ENABLED", "KLAVIYO_WA_ENABLED", "KLAVIYO_WA_FLOW_LIVE",
+        "WHATSAPP_PACER_ENABLED",
+    )
+    for name in flags:
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setenv("KLAVIYO_PRIVATE_KEY", "pk_test")
+    monkeypatch.setenv("AISENSY_API_KEY", "k")
+    monkeypatch.setenv("WHATSAPP_TEMPLATE", "Purity Outreach")
+    monkeypatch.setenv("WHATSAPP_CAMPAIGN_LIVE", "1")
+    monkeypatch.setenv("WHATSAPP_PROVIDER", "klaviyo")
+    _open(monkeypatch)
+    called = []
+    monkeypatch.setattr(whatsapp_klaviyo.httpx, "post", lambda *a, **k: called.append("klaviyo") or (_ for _ in ()).throw(AssertionError("Klaviyo was called")))
+    monkeypatch.setattr(whatsapp_klaviyo.httpx, "get", lambda *a, **k: called.append("klaviyo-get") or (_ for _ in ()).throw(AssertionError("Klaviyo was called")))
+    monkeypatch.setattr(voice_router, "_adapter", lambda *a, **k: called.append("dial"))
+    monkeypatch.setattr("app.services.gate1_holds.evidence_refusal", lambda *a, **k: None)
+    monkeypatch.setattr("app.services.founder_call_pipeline.call_hours_open", lambda lead=None, now=None: (True, "test"))
+    monkeypatch.setattr(voice_router, "config_status", lambda: (True, "ok"))
+
+    db, engine = _db()
+    try:
+        outsider = _lead(db, company="Outside Hold")
+        whatsapp_only = _lead(db, company="WhatsApp Consent Only", phone="+919100000001",
+                              whatsapp_number="+919100000001", consent_phone="+919100000001")
+        _hash_event(db, whatsapp_only)
+        failed = _lead(db, company="Failed Row", phone="+919100000002",
+                       whatsapp_number="+919100000002", consent_phone="+919100000002")
+        _hash_event(db, failed)
+        db.add(OutboundWhatsApp(lead_id=failed.id, status="FAILED"))
+        recent = _lead(db, company="Inside Seven Days", phone="+919100000003",
+                       whatsapp_number="+919100000003", consent_phone="+919100000003")
+        _hash_event(db, recent)
+        db.add(WorkflowEvent(lead_id=recent.id, event_type="WHATSAPP_QUEUED_TO_KLAVIYO",
+                             actor="SYSTEM", channel="whatsapp", occurred_at=datetime.utcnow(),
+                             payload="{}"))
+        dnc_contact = _lead(db, company="Do Not Contact", phone="+919100000004",
+                            whatsapp_number="+919100000004", consent_phone="+919100000004",
+                            contact_status="DO_NOT_CONTACT")
+        _hash_event(db, dnc_contact)
+        dnc_flag = _lead(db, company="Do Not Call Flag", phone="+919100000005",
+                         whatsapp_number="+919100000005", consent_phone="+919100000005",
+                         do_not_call=True)
+        _hash_event(db, dnc_flag)
+        closed = _lead(db, company="Closed Unrecoverable", phone="+919100000006",
+                       whatsapp_number="+919100000006", consent_phone="+919100000006",
+                       status="CLOSED_UNRECOVERABLE")
+        _hash_event(db, closed)
+        unbound = _lead(db, company="Later Unbound", phone="+919100000007",
+                        whatsapp_number="+919100000007", consent_phone="+919100000007")
+        _hash_event(db, unbound)
+        db.add(WorkflowEvent(lead_id=unbound.id, event_type="WHATSAPP_CONSENT_UNBOUND",
+                             actor="SYSTEM", channel="whatsapp", occurred_at=datetime.utcnow(),
+                             payload="{}"))
+        blocked = _lead(db, company="Blocked Provider Consent", phone="+919100000008",
+                        whatsapp_number="+919100000008", consent_phone="+919100000008")
+        _hash_event(db, blocked)
+        db.add(OutboundWhatsApp(lead_id=blocked.id, status="BLOCKED_PROVIDER_CONSENT"))
+        db.commit()
+        admitted = {whatsapp_only.id, failed.id, recent.id, dnc_contact.id, dnc_flag.id,
+                    closed.id, unbound.id, blocked.id}
+        monkeypatch.setattr(cohort, "allow_list_ids", lambda: frozenset(admitted))
+
+        chosen = [lead.id for lead in ai_call_cycle.select_call_candidates(db)]
+        assert outsider.id not in chosen
+        assert whatsapp_only.id not in chosen
+        assert "WhatsApp request" in cohort.call_refusal(whatsapp_only, db)
+        dial = voice_router.place_call(whatsapp_only, dry_run=False, db=db)
+        assert dial.placed is False and "WhatsApp request" in dial.error
+
+        assert "outside the WhatsApp allow-list" in cohort.whatsapp_refusal(outsider, db)
+        assert cohort.whatsapp_refusal(failed, db).startswith("a failed or blocked")
+        assert "7 days" in cohort.whatsapp_refusal(recent, db)
+        assert "DO_NOT_CONTACT" in cohort.whatsapp_refusal(dnc_contact, db)
+        assert "do_not_call" in cohort.whatsapp_refusal(dnc_flag, db)
+        assert "CLOSED_UNRECOVERABLE" in cohort.whatsapp_refusal(closed, db)
+        assert "WHATSAPP_CONSENT_UNBOUND" in cohort.whatsapp_refusal(unbound, db)
+        assert "BLOCKED_PROVIDER_CONSENT" in cohort.whatsapp_refusal(blocked, db)
+        for lead in (outsider, failed, recent, dnc_contact, dnc_flag, closed, unbound, blocked):
+            result = send_whatsapp(lead, "hello", db=db, approved_draft_id="draft")
+            assert result.status == "blocked"
+        assert "outside the email allow-list" in cohort.email_refusal(
+            SimpleNamespace(lead_id=outsider.id, to_email="outside@example.in"), db)
+        picked = [lead.id for lead in select_candidates(db)]
+        assert outsider.id not in picked
+        assert set(picked) <= admitted
+        draft = warm_followup.create_draft(outsider, db, "MAYBE")
+        assert draft["approvable"] is False
+        transport = whatsapp_aisensy.send_template(
+            "9876543210", "Purity Outreach",
+            client=SimpleNamespace(post=lambda *a, **k: called.append("aisensy")),
+            db=db)
+        assert transport.status == "blocked"
+        assert called == []
+    finally:
+        db.close()
+        engine.dispose()

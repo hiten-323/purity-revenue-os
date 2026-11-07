@@ -1,0 +1,294 @@
+// Credentials come from backend/.env, never from this file.
+const fs = require("fs");
+const path = require("path");
+
+function loadEnv(file) {
+  const out = {};
+  try {
+    for (const raw of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      const i = line.indexOf("=");
+      if (i < 1) continue;
+      out[line.slice(0, i).trim()] = line.slice(i + 1).trim().replace(/^["']|["']$/g, "");
+    }
+  } catch (e) {
+    throw new Error(`[ecosystem] could not read ${file}: ${e.message}`);
+  }
+  return out;
+}
+
+const ROOT = __dirname;
+const ENV = loadEnv(path.join(ROOT, "backend", ".env"));
+const need = (k) => {
+  const v = ENV[k] || process.env[k] || "";
+  if (!v || !v.trim()) {
+    throw new Error(`[ecosystem] critical secret ${k} is missing from backend/.env`);
+  }
+  return v.trim();
+};
+
+const PYTHON = process.env.PYTHON_BIN || "python";
+const CLOUDFLARED = process.env.CLOUDFLARED_BIN || "cloudflared";
+const BACKEND_DIR = path.join(ROOT, "backend");
+const FRONTEND_DIR = path.join(ROOT, "frontend");
+const OUTBOUND_LIMITS = JSON.parse(fs.readFileSync(path.join(BACKEND_DIR, "config", "outbound_limits.json"), "utf8"));
+function ownedCap(name) {
+  const value = OUTBOUND_LIMITS[name];
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error("[ecosystem] outbound cap " + name + " is missing");
+  }
+  return String(value);
+}
+
+function resolveNuravedaDir() {
+  const candidates = [
+    process.env.NURAVEDA_DIR,
+    ENV.NURAVEDA_DIR,
+    path.resolve(ROOT, "..", "ai-voice-agent"),
+    path.resolve(ROOT, "..", "ai-voice-agent-purity"),
+    path.join(ROOT, "ai-voice-agent"),
+  ].filter(Boolean);
+  for (const c of candidates) {
+    const abs = path.resolve(c);
+    if (fs.existsSync(path.join(abs, "src", "server.js"))) return abs;
+    if (fs.existsSync(path.join(abs, "src", "livekit-agent.js"))) return abs;
+  }
+  return null;
+}
+
+const NURAVEDA_DIR = resolveNuravedaDir();
+
+function mustExist(label, filePath) {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`[ecosystem] ${label} missing at ${filePath}`);
+  }
+  return filePath;
+}
+
+mustExist("backend run_server.py", path.join(BACKEND_DIR, "run_server.py"));
+mustExist("backend worker.py", path.join(BACKEND_DIR, "worker.py"));
+mustExist("backend report_bridge.py", path.join(BACKEND_DIR, "report_bridge.py"));
+if (NURAVEDA_DIR) {
+  mustExist("nuraveda server", path.join(NURAVEDA_DIR, "src", "server.js"));
+  mustExist("nuraveda livekit agent", path.join(NURAVEDA_DIR, "src", "livekit-agent.js"));
+} else {
+  console.warn(
+    "[ecosystem] NURAVEDA_DIR not found -- omitting nuraveda-voice apps. " +
+      "Set NURAVEDA_DIR to enable LiveKit. Purity API/worker still start."
+  );
+}
+
+const apps = [
+    {
+      name: "purity-api",
+      script: PYTHON,
+      args: "run_server.py",
+      cwd: BACKEND_DIR,
+      interpreter: "none",
+      autorestart: true,
+      restart_delay: 1000,
+      max_restarts: 50,
+      min_uptime: 3000,
+      env: {
+        PYTHONUNBUFFERED: "1",
+        API_ADMIN_SECRET: need("API_ADMIN_SECRET"),
+        DND_SUPPRESSION_FILE: need("DND_SUPPRESSION_FILE"),
+        AUTO_WARM_ENABLED: "0",
+        SMART_OUTREACH_ENABLED: "0",
+        AUTO_OUTREACH_ENABLED: "0",
+        WHATSAPP_PACER_ENABLED: "0",
+        WHATSAPP_PROVIDER: ENV.WHATSAPP_PROVIDER || "klaviyo",
+        KLAVIYO_WA_ENABLED: "0",
+        KLAVIYO_WA_FLOW_LIVE: "0",
+        AISENSY_ENABLED: "0",
+        WHATSAPP_TEMPLATE: ENV.WHATSAPP_TEMPLATE || "",
+        SENDER_EMAIL: ENV.SENDER_EMAIL || "connect@purepantryprovisions.com",
+        SENDER_NAME: ENV.SENDER_NAME || "Hiten Jain | Pure Pantry Provisions",
+        ZOHO_APP_PASSWORD: need("ZOHO_APP_PASSWORD"),
+        CEREBRAS_API_KEY: need("CEREBRAS_API_KEY"),
+        SHOPIFY_STORE: ENV.SHOPIFY_STORE || "",
+        SHOPIFY_TOKEN: need("SHOPIFY_TOKEN"),
+        GOOGLE_MAPS_API_KEY: need("GOOGLE_MAPS_API_KEY"),
+        AI_CALLING_ENABLED: "0",
+        AUTO_AI_CALLING_ENABLED: "0",
+        AI_CALL_CYCLE_MAX_DIALS: ownedCap("AI_CALL_CYCLE_MAX_DIALS"),
+        AI_CALL_MAX_INFLIGHT: ownedCap("AI_CALL_MAX_INFLIGHT"),
+        WA_MAX_PER_HOUR: ownedCap("WA_MAX_PER_HOUR"),
+        WA_DAILY_CAP: ownedCap("WA_DAILY_CAP"),
+      CALL_OPENER_VARIANTS_APPROVED: ENV.CALL_OPENER_VARIANTS_APPROVED || "e4_micro",
+        CALL_OPENER_PRIMARY: ENV.CALL_OPENER_PRIMARY || "e4_micro",
+        CALL_OPENER_PRIMARY_SHARE: ENV.CALL_OPENER_PRIMARY_SHARE || "1.00",
+      CALL_VARIANT_EPSILON: ENV.CALL_VARIANT_EPSILON || "0.0",
+        CALL_RECONCILER_MODE: "write",
+        CALL_RECONCILER_STALE_MINUTES: "240",
+        EMAIL_SENDING_ENABLED: "0",
+      },
+    },
+    {
+      name: "purity-worker",
+      script: PYTHON,
+      args: "worker.py",
+      cwd: BACKEND_DIR,
+      interpreter: "none",
+      autorestart: true,
+      restart_delay: 5000,
+      max_restarts: 20,
+      min_uptime: 5000,
+      env: {
+        PYTHONUNBUFFERED: "1",
+        DND_SUPPRESSION_FILE: need("DND_SUPPRESSION_FILE"),
+        AUTO_WARM_ENABLED: "0",
+        SMART_OUTREACH_ENABLED: "0",
+        AUTO_OUTREACH_ENABLED: "0",
+        WHATSAPP_PACER_ENABLED: "0",
+        WHATSAPP_PROVIDER: ENV.WHATSAPP_PROVIDER || "klaviyo",
+        KLAVIYO_WA_ENABLED: "0",
+        KLAVIYO_WA_FLOW_LIVE: "0",
+        AISENSY_ENABLED: "0",
+        AI_CALLING_ENABLED: "0",
+        AUTO_AI_CALLING_ENABLED: "0",
+        AI_CALL_CYCLE_MAX_DIALS: ownedCap("AI_CALL_CYCLE_MAX_DIALS"),
+        AI_CALL_MAX_INFLIGHT: ownedCap("AI_CALL_MAX_INFLIGHT"),
+        WA_MAX_PER_HOUR: ownedCap("WA_MAX_PER_HOUR"),
+        WA_DAILY_CAP: ownedCap("WA_DAILY_CAP"),
+        AI_CALL_TICK_SECONDS: ENV.AI_CALL_TICK_SECONDS || "120",
+      CALL_OPENER_VARIANTS_APPROVED: ENV.CALL_OPENER_VARIANTS_APPROVED || "e4_micro",
+        CALL_OPENER_PRIMARY: ENV.CALL_OPENER_PRIMARY || "e4_micro",
+        CALL_OPENER_PRIMARY_SHARE: ENV.CALL_OPENER_PRIMARY_SHARE || "1.00",
+      CALL_VARIANT_EPSILON: ENV.CALL_VARIANT_EPSILON || "0.0",
+        CALL_RECONCILER_MODE: "write",
+        CALL_RECONCILER_STALE_MINUTES: "240",
+        SENDER_EMAIL: ENV.SENDER_EMAIL || "connect@purepantryprovisions.com",
+        SENDER_NAME: ENV.SENDER_NAME || "Hiten Jain | Pure Pantry Provisions",
+        ZOHO_APP_PASSWORD: need("ZOHO_APP_PASSWORD"),
+        CEREBRAS_API_KEY: need("CEREBRAS_API_KEY"),
+        GOOGLE_MAPS_API_KEY: need("GOOGLE_MAPS_API_KEY"),
+        EMAIL_SENDING_ENABLED: "0",
+      },
+    },
+    {
+      name: "purity-beans",
+      script: "node",
+      args: "node_modules/next/dist/bin/next start -p 3001 -H 0.0.0.0",
+      cwd: FRONTEND_DIR,
+      autorestart: true,
+      restart_delay: 3000,
+      max_restarts: 20,
+      env: {
+        NODE_ENV: "production",
+        API_ADMIN_SECRET: need("API_ADMIN_SECRET"),
+      },
+    },
+    {
+      name: "purity-tunnel",
+      script: CLOUDFLARED,
+      args: `tunnel --config ${process.env.CLOUDFLARED_CONFIG || path.join(process.env.USERPROFILE || process.env.HOME || "", ".cloudflared", "config.yml")} run purity-beans`,
+      interpreter: "none",
+      autorestart: true,
+      restart_delay: 5000,
+      max_restarts: 20,
+    },
+    {
+      name: "purity-outreach-report-bridge",
+      script: PYTHON,
+      args: "report_bridge.py",
+      cwd: BACKEND_DIR,
+      interpreter: "none",
+      autorestart: true,
+      restart_delay: 2000,
+      max_restarts: 50,
+      min_uptime: 2000,
+      env: {
+        PYTHONUNBUFFERED: "1",
+        REPORT_BRIDGE_PORT: "8010",
+        BACKEND_API_BASE: "http://127.0.0.1:8003",
+        OUTREACH_STATUS_API_TOKEN: need("API_ADMIN_SECRET"),
+      },
+    },
+];
+
+if (NURAVEDA_DIR) {
+  apps.push(
+    {
+      name: "nuraveda-voice",
+      script: "src/server.js",
+      cwd: NURAVEDA_DIR,
+      autorestart: true,
+      restart_delay: 5000,
+      max_restarts: 20,
+      min_uptime: 5000,
+      env: {
+        NODE_ENV: "production",
+        LIVEKIT_INIT_TIMEOUT_MS: "120000",
+        // 17 Oct: founder wants ONE AI call at a time (worker caps are 1/1 too)
+        SCHEDULER_MAX_INFLIGHT: "1",
+        DISPATCH_PAUSED_PROFILES: "purity-coffee-b2b",
+      },
+    },
+    {
+      name: "nuraveda-voice-agent",
+      script: "src/livekit-agent.js",
+      args: "start",
+      cwd: NURAVEDA_DIR,
+      autorestart: true,
+      restart_delay: 5000,
+      max_restarts: 20,
+      min_uptime: 5000,
+      env: {
+        NODE_ENV: "production",
+        LIVEKIT_INIT_TIMEOUT_MS: "120000",
+        TTS_PACE: ENV.TTS_PACE || "0.98",
+        TTS_TEMPERATURE: ENV.TTS_TEMPERATURE || "0.6",
+        TTS_STREAMING: ENV.TTS_STREAMING || "1",
+        GREETING_DELAY_MS: ENV.GREETING_DELAY_MS || "0",
+        ENDPOINTING_MIN_MS: ENV.ENDPOINTING_MIN_MS || "150",
+        ENDPOINTING_MAX_MS: ENV.ENDPOINTING_MAX_MS || "350",
+        VAD_MIN_SILENCE_MS: ENV.VAD_MIN_SILENCE_MS || "200",
+        MIN_INTERRUPTION_MS: ENV.MIN_INTERRUPTION_MS || "350",
+        MIN_INTERRUPTION_WORDS: ENV.MIN_INTERRUPTION_WORDS || "1",
+        AEC_WARMUP_MS: ENV.AEC_WARMUP_MS || "1000",
+        MAX_AGENT_RESPONSE_WORDS: ENV.MAX_AGENT_RESPONSE_WORDS || "15",
+      },
+    }
+  );
+}
+
+const CART_RECOVERY_DIR = path.resolve(ROOT, "..", "abandoned_cart");
+if (fs.existsSync(path.join(CART_RECOVERY_DIR, "sarvam_cart_recovery.py"))) {
+  apps.push({
+    name: "purity-cart-recovery",
+    script: "sarvam_cart_recovery.py",
+    args: "--daemon --interval 900",
+    cwd: CART_RECOVERY_DIR,
+    interpreter: PYTHON,
+    autorestart: true,
+    restart_delay: 10000,
+    max_restarts: 30,
+    min_uptime: 5000,
+    env: {
+      PYTHONUNBUFFERED: "1",
+    },
+  });
+}
+
+if (fs.existsSync(path.join(CART_RECOVERY_DIR, "sarvam_cod_verifier.py"))) {
+  apps.push({
+    name: "purity-cod-verifier",
+    script: "sarvam_cod_verifier.py",
+    args: "--daemon --interval 900",
+    cwd: CART_RECOVERY_DIR,
+    interpreter: PYTHON,
+    autorestart: true,
+    restart_delay: 10000,
+    max_restarts: 30,
+    min_uptime: 5000,
+    env: {
+      PYTHONUNBUFFERED: "1",
+    },
+  });
+}
+
+module.exports = { apps };
+
+

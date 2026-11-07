@@ -27,6 +27,7 @@ import httpx
 from app.models.models import B2BLead, WorkflowEvent
 
 FLAG_VARS = ("WHATSAPP_PROVIDER", "KLAVIYO_WA_ENABLED", "KLAVIYO_WA_FLOW_LIVE", "KLAVIYO_PRIVATE_KEY")
+_TEST_ALLOW = set()
 
 
 class NetworkTouched(AssertionError):
@@ -106,6 +107,11 @@ def klaviyo_on(monkeypatch, tmp_path, script=None, subscribed=True):
                         lambda phone: (True, "SUBSCRIBED") if subscribed else (False, "UNSUBSCRIBED"))
     rec = KlaviyoRecorder(script)
     monkeypatch.setattr(k.httpx, "post", rec.post)
+    _TEST_ALLOW.clear()
+    monkeypatch.setattr(
+        "app.services.outbound_cohort.allow_list_ids",
+        lambda: frozenset(_TEST_ALLOW),
+    )
     return rec
 
 
@@ -127,6 +133,7 @@ def ai_call_consented(db, *, phone="9876543210", call_ref="call-test-1", minutes
                                   "evidence": evidence,
                                   "evidence_sha256": hashlib.sha256(evidence.encode("utf-8")).hexdigest()}))
     db.commit()
+    _TEST_ALLOW.add(lead.id)
     return lead
 
 

@@ -125,7 +125,7 @@ def kill_switch_engaged() -> bool:
 
 
 def place_call(lead, *, context: dict[str, Any] | None = None,
-               dry_run: bool = False, scheduled_at=None) -> CallResult:
+               dry_run: bool = False, scheduled_at=None, db=None) -> CallResult:
     """Dial through whichever provider is configured.
 
     The lead is used for context and for the idempotency key. It is NOT used
@@ -220,6 +220,11 @@ def place_call(lead, *, context: dict[str, Any] | None = None,
     if not (ctx.get("opening") or "").strip():
         from app.services import founder_call_pipeline as pipeline
         ctx["opening"] = pipeline.opening_for(lead)
+
+    from app.services.outbound_cohort import call_refusal
+    refused = call_refusal(lead, db)
+    if refused:
+        return CallResult(placed=False, error=refused)
 
     mod = _adapter(name)
     return mod.place_call(phone, context=ctx, dry_run=dry_run,

@@ -232,6 +232,10 @@ def send_whatsapp(lead, message: str, campaign_name: Optional[str] = None,
             f"{DUPLICATE_WINDOW_MINUTES} minutes — not sending a duplicate"))
 
     from app.services import whatsapp_aisensy as transport
+    from app.services.outbound_cohort import whatsapp_refusal
+    refused = whatsapp_refusal(lead, db)
+    if refused:
+        return WaResult(status="blocked", reason=refused)
     from app.services.gate1_holds import evidence_refusal
     held = evidence_refusal(lead, db)
     if held:
@@ -249,7 +253,7 @@ def send_whatsapp(lead, message: str, campaign_name: Optional[str] = None,
     ]
 
     result = transport.send_template(phone, template, params=params,
-                                     timeout=timeout)
+                                     timeout=timeout, lead=lead, db=db)
     if result.status == "unknown" and db is not None:
         # Possibly delivered. Recorded so the duplicate guard treats it as a
         # send; the founder reconciles it against the AiSensy log.
@@ -278,6 +282,10 @@ def _send_via_klaviyo(lead, db, approved_draft_id, timeout) -> WaResult:
     ok, why = whatsapp_klaviyo.config_status()
     if not ok:
         return WaResult(status="not_configured", reason=why)
+    from app.services.outbound_cohort import whatsapp_refusal
+    refused = whatsapp_refusal(lead, db)
+    if refused:
+        return WaResult(status="blocked", reason=refused)
     if db is None:
         return WaResult(status="blocked", reason="no db session — the pacer cannot check the ledger")
     draft = whatsapp_drafts.approved_for(approved_draft_id, lead.id)
