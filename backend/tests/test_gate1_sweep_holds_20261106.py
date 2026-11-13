@@ -200,8 +200,9 @@ def test_later_unbound_and_uncleared_provider_block_reject_before_lookup(monkeyp
 
 def test_place_call_rejects_unknown_consent_while_the_calling_flag_is_on(monkeypatch):
     from app.services import founder_call_pipeline as fcp
-    from app.services import voice_router
+    from app.services import voice_router, outbound_cohort
 
+    monkeypatch.setattr(outbound_cohort, "allow_list_ids", lambda: frozenset({3}))
     monkeypatch.setenv("AI_CALLING_ENABLED", "1")
     monkeypatch.delenv("AI_CALLING_KILL_SWITCH", raising=False)
     monkeypatch.setattr(fcp, "call_hours_open", lambda lead=None: (True, "test"))
@@ -218,7 +219,7 @@ def test_place_call_rejects_unknown_consent_while_the_calling_flag_is_on(monkeyp
                            whatsapp_number=None, consent_phone=None)
     result = voice_router.place_call(lead, dry_run=False)
     assert result.placed is False
-    assert "consent_status=UNKNOWN" in result.error
+    assert "call-authorizing consent record" in result.error.lower()
 
 
 _TEN = (

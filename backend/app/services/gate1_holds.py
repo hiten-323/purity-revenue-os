@@ -302,8 +302,11 @@ def provider_armed(channel: str) -> bool:
 
 def nudge_blocked(lead, db=None) -> str | None:
     """Why a follow-up draft must not be created. Does not call a provider."""
-    if (getattr(lead, "contact_status", "") or "").upper() == "DO_NOT_CONTACT":
+    contact_status = (getattr(lead, "contact_status", "") or "").upper()
+    if contact_status == "DO_NOT_CONTACT":
         return DRAFT_VOID_REASON
+    if contact_status in {"SUPPRESSED", "QUARANTINED", "OPTED_OUT"}:
+        return f"contact_status={contact_status}"
     if bool(getattr(lead, "do_not_call", False)):
         return "do_not_call"
     status = (getattr(lead, "status", "") or "").upper()
@@ -331,8 +334,11 @@ def evidence_gaps(lead, *, evidence_hash_present: bool, provider_allows: bool,
                   blocked_no_provider_event: bool = False) -> list[str]:
     """Missing facts that keep a lead from being dispatched. No contact is invented."""
     gaps = []
-    if (getattr(lead, "contact_status", "") or "").upper() == "DO_NOT_CONTACT":
+    contact_status = (getattr(lead, "contact_status", "") or "").upper()
+    if contact_status == "DO_NOT_CONTACT":
         gaps.append(DRAFT_VOID_REASON)
+    elif contact_status in {"SUPPRESSED", "QUARANTINED", "OPTED_OUT"}:
+        gaps.append(f"contact_status={contact_status}")
     if later_unbound:
         gaps.append(UNBOUND_REASON)
     if blocked_provider_consent:

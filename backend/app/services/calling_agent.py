@@ -168,7 +168,7 @@ class CallingAgentService:
             dry_run=dry_run,
         )
         if not result.placed:
-            pipeline.release_ai_call_attempt(db, lead)
+            pipeline.release_ai_call_attempt(db, lead, reason=result.error)
             db.commit()
             return False, f"provider_refused: {result.error}"
 

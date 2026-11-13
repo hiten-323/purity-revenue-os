@@ -62,8 +62,23 @@ class Sku:
                 f"100 g Rs {self.mrp_100}, glass jar")
 
 
+
+def margin_line(division_or_lead) -> str:
+    '''Only the founder-approved lines (CALL_CONSTRAINTS, 21 Oct). Other segments get no figure.'''
+    if hasattr(division_or_lead, 'division') or hasattr(division_or_lead, 'category'):
+        div = (getattr(division_or_lead, 'division', '') or getattr(division_or_lead, 'category', '') or '').lower()
+    else:
+        div = str(division_or_lead or '').lower()
+    if any(k in div for k in ('distributor', 'wholesale')):
+        return 'For distributors and wholesalers the 30% margin (25% trade discount + 5% cash discount).'
+    if 'retail' in div or 'kirana' in div or 'supermarket' in div:
+        return 'For retail the 30% margin (25% trade discount + 5% cash discount).'
+    if 'corporate' in div or 'pantry' in div:
+        return 'Corporate pricing: up to 30% off.'
+    return ''
+
 SKUS = {
-    "ultra_blend": Sku("Ultra Blend", "signature", "agglomerated", 209, 309),
+    "ultra_blend": Sku("Ultra Blend", "coffee-chicory", "agglomerated", 209, 309),
     "bold":        Sku("Bold", "pure coffee", "agglomerated", 239, 369),
     "purista":     Sku("Purista", "robusta", "freeze-dried", 319, 509),
     "purica":      Sku("Purica", "arabica", "freeze-dried", 329, 559),
@@ -71,72 +86,11 @@ SKUS = {
 
 # Verified claims from the catalogue, usable in any draft.
 CLAIMS = {
-    "no_chicory": "Most Indian instant coffee carries 40–60% chicory filler. Purica, Purista, Bold and Prima have no chicory - only coffee.",
+    "no_chicory": "Most Indian instant coffee carries 40–60% chicory filler. Ours is only coffee.",
     "glass": "Sealed in a lead-free, food-grade glass jar — recyclable, not plastic.",
     "shelf": "Two-year shelf life.",
     "dissolve": "Dissolves in about 30 seconds in hot, cold or milk.",
 }
-
-
-# ── 3 Nov 2026 copy rules (Hiten, relayed by B-B OUTREACH) ───────────────────
-# * No giveaway or trial-pack offers in any copy (the send-path guards enforce it).
-# * Retail and distributors keep the 30% margin line (margin_line).
-# * HoReCa, offices, facility management, hospitals, schools, government,
-#   gifting and institutional buyers get "up to 30% off" (discount_line).
-#   The flat-25%-on-MRP line is not used anywhere.
-# * Say "pure coffee"; the hundred-percent claim is never used.
-# RESELLER_DIVS, retail_by_name, margin_line and FULL_RANGE_LINES are imported
-# by email_sender (lines ~920 and ~1050); the 30 Oct 14:35 copy had dropped them.
-import re as _re
-
-RESELLER_DIVS = {"distributor", "wholesaler", "wholesale", "wholesaler_agglo", "retail",
-                 "retail_kirana", "kirana_store", "grocery", "supermarket", "modern_trade",
-                 "grocery_chain", "retail_chain"}
-_RETAIL_NAME_RX = _re.compile(
-    r"\b(store|stores|grocery|grocer|grocers|groceries|kirana|karyana|mart|supermart|"
-    r"supermarket|hypermarket|departmental|general\s+store|provision\s+store)\b", _re.I)
-
-
-def retail_by_name(company: str) -> bool:
-    """A shop named as a shop gets the retail intro, whatever the directory said."""
-    return bool(_RETAIL_NAME_RX.search(company or ""))
-
-
-def margin_line(div: str) -> str:
-    d = (div or "").lower().strip()
-    if d in ("distributor", "wholesaler", "wholesale", "wholesaler_agglo"):
-        return ("Distributors and wholesalers earn a 30% margin (25% trade discount + 5% cash discount) on Purity Beans, and the MRP "
-                "is the same in every channel, so that margin is protected.")
-    if d in RESELLER_DIVS:
-        return ("Stores stocking Purity Beans earn a 30% margin (25% trade discount + 5% cash discount), and the MRP is the same in "
-                "every channel, so no one can undercut your shelf price.")
-    return ""
-
-
-# Direct buyers (they consume, they do not resell): up to 30% off.
-DIRECT_BUYER_DIVS = {"hotel", "restaurant", "cafe", "horeca", "hotel_canteen",
-                     "corporate", "corporate_office", "office_pantry", "facility_management",
-                     "hospital", "school", "college", "education_mess", "government",
-                     "gifting", "corporate_gifting", "institutional_buyer", "tender"}
-DIRECT_30_OFF_LINE = "When bought directly from us, you get up to 30% off MRP."
-
-
-def discount_line(div: str) -> str:
-    d = (div or "").lower().strip()
-    if d in RESELLER_DIVS:
-        return ""
-    return DIRECT_30_OFF_LINE if d in DIRECT_BUYER_DIVS else ""
-
-
-FULL_RANGE_LINES = [
-    "• Purica (arabica, freeze-dried): pure coffee, no chicory",
-    "• Purista (robusta, freeze-dried): pure coffee, no chicory",
-    "• Bold (agglomerated): pure coffee, no chicory",
-    "• Prima (agglomerated): pure coffee, no chicory",
-    "• Gourmet Duo: pure coffee, no chicory",
-    "• Ultra Blend (agglomerated): our coffee-chicory blend, it contains chicory",
-    "• Variety Box: an assortment from the range, it contains chicory",
-]
 
 
 @dataclass
@@ -156,34 +110,34 @@ PITCHES: dict[str, Pitch] = {
         "Distributor",
         "We understand {company} manages distribution channels where FMCG margins are key.",
         ["FMCG trade margins", "Uniform MRP across channels", "No supply lag"],
-        ["purista", "ultra_blend"],
+        ["purista", "bold"],
         "Shall I send pricing?",
         forbid=["employee pantry", "retail shelf"]),
     "wholesaler": Pitch(
         "Wholesaler",
         "We understand {company} handles wholesale trade where volume and margin protect the deal.",
         ["Bulk trading margins", "Uniform pricing to protect wholesale", "No supply lag"],
-        ["purista", "ultra_blend"],
+        ["purista", "bold"],
         "Shall I send pricing?",
         forbid=["employee pantry", "retail shelf"]),
     "modern_trade": Pitch(
         "Modern Trade",
         "We understand {company} manages high-visibility retail premises where premium assortments and reliable stock levels drive customer loyalty.",
-        ["Attractive margins on premium freeze-dried glass jars", "Uniform MRP across all channels protects your retail price", "Clean label: pure coffee, no chicory (Purica, Purista, Bold, Prima)", "Eye-catching packaging designed for premium shelf appeal"],
+        ["Attractive margins on premium freeze-dried glass jars", "Uniform MRP across all channels protects your retail price", "Clean label: pure coffee, zero chicory", "Eye-catching packaging designed for premium shelf appeal"],
         ["purica", "purista", "bold"],
         "Shall we share our commercial catalog for modern retail channels?",
         forbid=["employee pantry"]),
     "supermarket": Pitch(
         "Supermarket",
         "We understand {company} operates premium supermarket operations with high FMCG product rotation.",
-        ["Attractive margins on premium freeze-dried glass jars", "Uniform MRP across all channels protects your retail price", "Clean label: pure coffee, no chicory (Purica, Purista, Bold, Prima)", "Eye-catching packaging designed for premium shelf appeal"],
+        ["Attractive margins on premium freeze-dried glass jars", "Uniform MRP across all channels protects your retail price", "Clean label: pure coffee, zero chicory", "Eye-catching packaging designed for premium shelf appeal"],
         ["purica", "purista", "bold"],
         "Shall we share our commercial catalog for modern retail channels?",
         forbid=["employee pantry"]),
     "grocery_chain": Pitch(
         "Grocery Chain",
         "We understand {company} manages grocery chains where high retail shelf velocity is key.",
-        ["Attractive margins on premium freeze-dried glass jars", "Uniform MRP across all channels protects your retail price", "Clean label: pure coffee, no chicory (Purica, Purista, Bold, Prima)", "Eye-catching packaging designed for premium shelf appeal"],
+        ["Attractive margins on premium freeze-dried glass jars", "Uniform MRP across all channels protects your retail price", "Clean label: pure coffee, zero chicory", "Eye-catching packaging designed for premium shelf appeal"],
         ["purica", "purista", "bold"],
         "Shall we share our commercial catalog for modern retail channels?",
         forbid=["employee pantry"]),
@@ -199,54 +153,54 @@ PITCHES: dict[str, Pitch] = {
         "We understand {company} provides workspace facilities where quality coffee drives employee energy.",
         ["Direct contract pricing", "Pantry dispensing optimization", "Reliable delivery"],
         ["bold", "ultra_blend"],
-        "Shall I send our pantry price list?",
+        "Shall I send catalogue and pricing?",
         forbid=["retail shelf", "trade margins"]),
     "office_pantry": Pitch(
         "Office Pantry",
         "We understand {company} coordinates workplace refreshment solutions where consistent quality and simple procurement keep employees satisfied.",
-        ["Direct institutional pricing for office volumes", "Scheduled dispatch so your pantry is never out of stock", "Pure coffee with no chicory (Purica, Purista, Bold, Prima) for a clean taste"],
+        ["Direct institutional pricing for office volumes", "Scheduled dispatch so your pantry is never out of stock", "pure coffee — zero chicory filler for a clean taste"],
         ["purica", "purista", "bold"],
-        "Would you like the range and pantry pricing for your admin team?",
+        "Would you like office pantry sample kits for your admin team to try?",
         forbid=["retail shelf", "trade margins"]),
     "manufacturing": Pitch(
         "Manufacturing",
         "We understand {company} operates manufacturing facilities where canteen/staff pantry refreshments keep the workforce productive.",
-        ["Direct contract supply", "Pure coffee, no chicory (Purica, Purista, Bold, Prima)", "Pace and delivery commitments you can rely on"],
+        ["Direct contract supply with official trade invoicing", "pure coffee, zero chicory", "Pace and delivery commitments you can rely on"],
         ["bold", "ultra_blend"],
         "Shall I send volume pricing for canteen procurement?",
         forbid=["retail shelf", "trade margins"]),
     "facility_management": Pitch(
         "Facility Management",
         "We understand {company} provides client facility management services where pantry and refreshment operations require consistent partners.",
-        ["Direct factory contract supply", "Scheduled replenishment", "High-quality pure coffee to elevate client canteens"],
+        ["Aggregated contract rates for multi-site supply", "Reliable logistics and delivery tracking", "High-quality pure coffee to elevate client canteens"],
         ["purista", "bold"],
         "Shall we set up a brief call to discuss corporate client terms?",
         forbid=["retail shelf", "premium glass"]),
     "hotel": Pitch(
         "Hotel",
         "We understand {company} runs premium hospitality spaces where beverage quality matters.",
-        ["Premium freeze-dried coffee", "Pure coffee, no chicory (Purica, Purista, Bold, Prima)", "Volume pricing"],
+        ["Premium freeze-dried coffee", "pure coffee, no chicory", "Volume pricing"],
         ["ultra_blend", "purista"],
         "Shall I send the range?",
         forbid=["retail shelf", "employee pantry"]),
     "restaurant": Pitch(
         "Restaurant",
         "We understand {company} operates premium food service venues.",
-        ["Premium freeze-dried coffee", "Pure coffee, no chicory (Purica, Purista, Bold, Prima)", "Volume pricing"],
+        ["Premium freeze-dried coffee", "pure coffee, no chicory", "Volume pricing"],
         ["ultra_blend", "purista"],
         "Shall I send the range?",
         forbid=["retail shelf", "employee pantry"]),
     "cafe": Pitch(
         "Cafe",
         "We understand {company} operates cafe operations where taste consistency is key.",
-        ["Premium freeze-dried coffee", "Pure coffee, no chicory (Purica, Purista, Bold, Prima)", "Volume pricing"],
+        ["Premium freeze-dried coffee", "pure coffee, no chicory", "Volume pricing"],
         ["ultra_blend", "purista"],
-        "Shall I send the range?",
+        "Would you like to review our trade pricing?",
         forbid=["retail shelf", "employee pantry"]),
     "hospital": Pitch(
         "Hospital",
         "We understand {company} coordinates canteen refreshments for staff and patients.",
-        ["Direct factory supply", "FSSAI licensed", "Pure coffee, no chicory (Purica, Purista, Bold, Prima)", "Consistent dispatch"],
+        ["Bulk institutional rates", "pure coffee, zero chicory", "Consistent dispatch"],
         ["bold", "ultra_blend"],
         "Shall I send pricing?",
         forbid=["retail shelf", "premium glass"]),
@@ -267,14 +221,14 @@ PITCHES: dict[str, Pitch] = {
     "government": Pitch(
         "Government Office",
         "We understand {company} runs staff canteens.",
-        ["Bulk institutional rates", "Consistent cup profile", "Clear institutional billing"],
+        ["Bulk institutional rates", "Consistent cup profile", "GST billing"],
         ["bold"],
         "Shall I send pricing?",
         forbid=["retail shelf", "premium glass"]),
     "corporate_gifting": Pitch(
         "Corporate Gifting",
         "We understand {company} curates gifts where product quality is the point.",
-        ["Premium freeze-dried coffee", "Pure coffee, no chicory (Purica, Purista, Bold, Prima)", "Volume pricing"],
+        ["Premium freeze-dried coffee", "pure coffee, no chicory", "Volume pricing"],
         ["ultra_blend", "purista"],
         "Shall I send the range?",
         forbid=["employee pantry", "shelf space"]),
@@ -288,28 +242,28 @@ PITCHES: dict[str, Pitch] = {
     "exporter": Pitch(
         "Exporter",
         "We understand {company} manages export shipments of premium agricultural and packaged goods.",
-        ["Premium freeze-dried coffee suited for international export", "Food-grade glass jars (lead-free) with a 2-year shelf life", "FOB/CIF terms with documented specification"],
+        ["Premium freeze-dried coffee suited for international export", "Lead-free glass jar packaging with 2-year shelf life", "FOB/CIF terms with documented specification"],
         ["purica", "purista"],
         "Shall we provide catalog details and export quotation terms?",
         forbid=["employee pantry", "retail shelf"]),
     "institutional_buyer": Pitch(
         "Institutional Buyer",
         "We understand {company} procures volume consumables against structured buyer specifications.",
-        ["Direct factory supply", "FSSAI licensed", "Pure coffee, no chicory (Purica, Purista, Bold, Prima)", "Consistent delivery against procurement contracts"],
+        ["official trade invoicing with competitive bulk pricing", "pure coffee without chicory filler", "Consistent delivery against procurement contracts"],
         ["bold", "ultra_blend"],
         "Can we register as a vendor and send a quote against your monthly requirements?",
         forbid=["retail shelf", "premium glass"]),
     "needs_reclassification": Pitch(
         "General Wholesale",
         "We understand {company} values quality beverages and reliable partners.",
-        ["Premium freeze-dried coffee", "Pure coffee, no chicory (Purica, Purista, Bold, Prima)", "Volume pricing"],
+        ["Premium freeze-dried coffee", "pure coffee, no chicory", "Volume pricing"],
         ["bold", "purica"],
         "Shall I send some information regarding our wholesale range?",
         forbid=["employee pantry", "shelf space"]),
     "unknown": Pitch(
         "General Wholesale",
         "We understand {company} values quality beverages and reliable partners.",
-        ["Premium freeze-dried coffee", "Pure coffee, no chicory (Purica, Purista, Bold, Prima)", "Volume pricing"],
+        ["Premium freeze-dried coffee", "pure coffee, no chicory", "Volume pricing"],
         ["bold", "purica"],
         "Shall I send some information regarding our wholesale range?",
         forbid=["employee pantry", "shelf space"]),
@@ -335,7 +289,18 @@ def pitch_for(division: str) -> Pitch:
         "corporate": "corporate_office",
         "tender": "institutional_buyer",
         "horeca": "needs_reclassification",
-        "education_mess": "needs_reclassification"
+        "education_mess": "needs_reclassification",
+        "caterer": "restaurant",
+        "catering": "restaurant",
+        "catering_contractor": "restaurant",
+        "event_catering": "restaurant",
+        "banquet": "restaurant",
+        "bakery": "restaurant",
+        "manufacturer": "institutional_buyer",
+        "coffee_ingredient_manufacturers": "institutional_buyer",
+        "coworking": "corporate_office",
+        "co-working": "corporate_office",
+        "it_park": "corporate_office",
     }
     if key in legacy_map:
         key = legacy_map[key]
@@ -378,8 +343,8 @@ def choose_stage(sent_count: int, replied: bool, days_since_last: int | None) ->
 _ANGLE = {
     "followup_1": "Since coffee is bought again every few weeks, it tends to be judged on "
                   "repeat demand rather than a single order.",
-    "followup_2": "If it helps, I can send the catalogue so you can look through the range "
-                  "at your own pace.",
+    "followup_2": "If it helps, we can start with a sample so nothing is committed before "
+                  "you have tasted it.",
     "founder_note": "I will stop writing after this — if it is ever useful, my number is below.",
 }
 
@@ -395,9 +360,9 @@ def build_draft(lead, memory: dict | None, sent_count: int, replied: bool,
     p = pitch_for(getattr(lead, "division", "") or "")
     stage = choose_stage(sent_count, replied, days_since_last)
     # Customer-facing name, never the raw directory string. Nine subject
-    # templates across four modules interpolate this, and one produced a
-    # subject carrying the whole directory string ("... WrkPod | Coworking Space
-    # in Coimbatore | Shared Office Space?") as a live subject. Cleaning at each derivation keeps the raw
+    # templates across four modules interpolate this, and one produced
+    # "A sample for WrkPod | Coworking Space in Coimbatore | Shared Office
+    # Space?" as a live subject. Cleaning at each derivation keeps the raw
     # value on the record for provenance while nothing customer-facing sees it.
     from app.services.lead_quality import display_name
     company = display_name(lead.company or "")
@@ -439,7 +404,7 @@ def build_draft(lead, memory: dict | None, sent_count: int, replied: bool,
                 cta = "May I share our institutional range for consideration?"
             elif div in ("hotel", "restaurant", "cafe", "horeca"):
                 why_line = f"I came across {company}{city_part} while researching hospitality and F&B venues in your region."
-                prop_line = "We wanted to explore whether Purity Beans could be relevant to your instant coffee requirements."
+                prop_line = "We wanted to explore whether Purity Beans could be relevant to your beverage requirements."
                 cta = "Would you be open to reviewing our range and trade pricing?"
             else:
                 why_line = f"I came across {company}{city_part} while researching businesses in your region."
@@ -450,7 +415,14 @@ def build_draft(lead, memory: dict | None, sent_count: int, replied: bool,
             prop_line = "We are reaching out to explore whether our instant coffee portfolio is relevant to your operations."
             cta = "Would you be open to reviewing our catalogue and trade pricing?"
 
-        _offer_line = margin_line(div) or discount_line(div)
+        starter_carton_lines = [
+            "You can also order our Starter Cartons directly for evaluation:",
+            "• Variety Box (Rs 877): https://www.p3online.in/products/variety-box",
+            "• Gourmet Duo Mini (Rs 570): https://www.p3online.in/products/gourmet-duo-mini",
+            "",
+            "If WhatsApp is more convenient, reply with your WhatsApp number and we can share trade rates there.",
+        ]
+
         body_lines = [
             greet,
             "",
@@ -458,13 +430,11 @@ def build_draft(lead, memory: dict | None, sent_count: int, replied: bool,
             "",
             f"{why_line} {prop_line}",
             "",
-        ] + ([_offer_line, ""] if _offer_line else []) + [
-            # 3 Nov: the 30 Oct 14:35 sentence put Bold next to "freeze-dried", so wording_gate
-            # blocked every intro at send. Back to the 29 Oct approved range block.
-            "Purity Beans is the premium instant coffee range from Pure Pantry Provisions, with zero artificial additives. The full range:",
-        ] + FULL_RANGE_LINES + [
+            "Purity Beans is a premium instant coffee brand of Pure Pantry Provisions. We offer pure coffee with zero artificial additives.",
             "",
-            "We're FSSAI Licensed and MSME Registered, with reliable PAN-India supply.",
+            "We are FSSAI licensed and MSME registered, with reliable PAN-India supply.",
+            "",
+            *starter_carton_lines,
             "",
             cta,
             "",
@@ -500,22 +470,14 @@ def build_draft(lead, memory: dict | None, sent_count: int, replied: bool,
         elif "100g" in all_text_lower or "100 g" in all_text_lower:
             requirement_text = "Regarding your requirement for 100 g pack sizes, our full range (Purica, Purista, Bold, Ultra Blend) is available in lead-free 100 g glass jars."
         elif "margin" in all_text_lower or "commission" in all_text_lower or "distributor margin" in all_text_lower:
-            if (getattr(lead, "division", "") or "").lower().strip() in RESELLER_DIVS:
-                requirement_text = "Regarding your question about trade margins, we offer distributors and wholesalers 30% margin (25% trade discount + 5% cash discount)."
-            else:   # 3 Nov: direct buyers get the 30%-off line below, never the reseller margin
-                requirement_text = "Regarding your question about pricing, I have set out our direct-buyer terms below."
+            requirement_text = "Regarding your question about trade margins, we offer distributors a competitive margin of 35% to 42% on MRP, depending on volume commitments."
         elif "sample" in all_text_lower or "try" in all_text_lower:
-            # 3 Nov: never offered in copy; the founder handles any request personally.
-            requirement_text = "We would be happy to share our catalogue and range details for your evaluation."
+            requirement_text = "We would be happy to share our range for your evaluation. Please let us know your requirements."
 
         if requirement_text:
             lines += [requirement_text, ""]
             used.append("progressive personalization: requirement matched")
 
-        _div = (getattr(lead, "division", "") or "").lower().strip()
-        _offer_line = margin_line(_div) or discount_line(_div)
-        if _offer_line:
-            lines += [_offer_line, ""]
         lines += ["I am writing from Pure Pantry Provisions about Purity Beans instant coffee.", ""]
         lines += [b if b.startswith("•") else f"• {b}" for b in p.focus]
         lines.append("")
@@ -551,6 +513,17 @@ def build_draft(lead, memory: dict | None, sent_count: int, replied: bool,
         if when:
             cta += f" I will keep to {when}, as you asked."
             used.append(f"preferred contact time: {when}")
+
+        lines += [
+            "",
+            "You can also order our Starter Cartons directly for evaluation:",
+            "• Variety Box (Rs 877): https://www.p3online.in/products/variety-box",
+            "• Gourmet Duo Mini (Rs 570): https://www.p3online.in/products/gourmet-duo-mini",
+            "",
+            "If WhatsApp is more convenient, reply with your WhatsApp number and we can share trade rates there.",
+            ""
+        ]
+
         lines += [cta, "", signature]
         body = "\n".join(lines)
 
@@ -562,7 +535,7 @@ def build_draft(lead, memory: dict | None, sent_count: int, replied: bool,
         "intro": f"Purity Beans instant coffee — {company}",
         "reply": f"Re: Purity Beans instant coffee — {company}",
         "followup_1": f"Following up — Purity Beans for {company}",
-        "followup_2": f"Purity Beans for {company}?",
+        "followup_2": f"Purity Beans range for {company}",
         "founder_note": f"Last note from me — Purity Beans, {company}",
     }[stage]
 
@@ -595,8 +568,7 @@ def channels_for(lead) -> list[str]:
     """Verified channels only, best first. Unverified contact is not a channel."""
     out = []
     from app.services.contact_trust import sendable
-    from app.services.gate1_holds import is_send_ready
-    if sendable(lead)[0] and is_send_ready(lead)[0]:
+    if sendable(lead)[0]:
         out.append("email")
     phone = (getattr(lead, "whatsapp_number", "") or lead.phone or "").strip()
     if phone and bool(getattr(lead, "phone_verified", False)):
@@ -667,7 +639,7 @@ def continuity_line(rel: dict, mem: dict) -> str:
     if ch in ("meeting",):
         return f"Thank you for meeting{on}."
     if ch in ("sample",):
-        return f"Following up on our last contact{on}."
+        return f"Following up on the sample we sent{on}."
     if ch == "email":
         return ""      # handled by the follow-up stage wording
     return f"Following up on our last contact{on}."
@@ -684,7 +656,7 @@ def as_whatsapp(draft: dict, lead, mem: dict) -> str:
     if draft.get("continuity"):
         bits.append(draft["continuity"])
     bits.append("")
-    bits.append("In a glass jar (Purica, Purista, Bold, Prima: pure coffee, no chicory):")
+    bits.append("pure coffee, zero chicory, in a glass jar:")
     for k in p.skus[:2]:
         s = SKUS[k]
         bits.append(f"• {s.name} — {'100 g' if p.pack == '100' else '50 g / 100 g'}")
@@ -708,7 +680,7 @@ def as_call_brief(lead, mem: dict, rel: dict) -> dict:
     return {
         "who": mem.get("decision_maker") or "decision maker not yet known — ask for the owner",
         "business": f"{lead.company} · {p.label} · {lead.city or 'city unknown'}",
-        "why_they_buy": p.context.format(company=lead.company, city=(lead.city or "your city")),  # 3 Nov: kirana context has {city}; was KeyError
+        "why_they_buy": p.context.format(company=lead.company),
         "history": (f"{rel['touches']} previous contact(s) via {', '.join(rel['channels_used'])}"
                     if rel["touches"] else "no previous contact"),
         "opening": (f"Namaste, am I speaking with {mem['decision_maker']}?"

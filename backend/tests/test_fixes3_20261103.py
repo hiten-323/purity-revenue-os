@@ -155,11 +155,14 @@ def test_hold_can_be_switched_off(db, monkeypatch):
 
 def test_selector_skips_held_but_keeps_proven_six_series(db, registry, monkeypatch):
     from tests.cohort_fixture import admit
-    from app.services import ai_call_cycle
+    from app.services import ai_call_cycle, outbound_cohort
     held = _lead(db, "Six Held Cold", "+91-63504-27099")
     proven = _lead(db, "Six Proven Cold", "+91-63514-27109", phone_verified=True)
     nine = _lead(db, "Nine Cold", "+91-98140-33331")
-    admit(monkeypatch, db, [held, proven, nine], calls=True)
+    # Isolate the six-series selector rule from the independent call-consent
+    # and phone-verification gates, which are covered by their own tests.
+    admit(monkeypatch, db, [held, proven, nine], calls=False)
+    monkeypatch.setattr(outbound_cohort, 'call_refusal', lambda *a, **k: None)
     names = [c.company for c in ai_call_cycle.select_call_candidates(db, limit=50)]
     assert "Nine Cold" in names and "Six Proven Cold" in names
     assert "Six Held Cold" not in names, names

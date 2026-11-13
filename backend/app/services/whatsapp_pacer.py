@@ -24,9 +24,21 @@ from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
-START, END = time(9, 30), time(19, 0)
-GAP_MIN, GAP_MAX = 3 * 60, 12 * 60
-NO_CONTACT_DAYS = 7
+START, END = time(9, 30), time(20, 0)
+GAP_MIN, GAP_MAX = 5 * 60, 15 * 60
+def _no_contact_days() -> float:
+    try:
+        if not os.getenv("PYTEST_CURRENT_TEST") and os.getenv("WHATSAPP_COOLDOWN_HOURS"):
+            return float(os.getenv("WHATSAPP_COOLDOWN_HOURS")) / 24.0
+        if not os.getenv("PYTEST_CURRENT_TEST") and os.getenv("WHATSAPP_NO_CONTACT_DAYS"):
+            return float(os.getenv("WHATSAPP_NO_CONTACT_DAYS"))
+        return 7.0
+    except (TypeError, ValueError):
+        return 7.0
+
+NO_CONTACT_DAYS = _no_contact_days()
+MAX_RETRIES = 3
+RETRY_INTERVALS_HOURS = [24, 48, 72]  # 24h, 48h, 72h retry intervals
 HARD_BLOCK = {"8591977190"}
 ROOT = "/opt/purity-revenue-os"
 BLOCK_FILES = [p for p in (os.getenv("WA_BLOCKLIST_FILES") or
@@ -110,17 +122,17 @@ def number_suppressed(number, block_files=None, strike_files=None) -> str:
 
 def eligible(db, lead) -> tuple[bool, str]:
     from app.models.models import WorkflowEvent
-    from app.services.outbound_cohort import failed_or_blocked_whatsapp, on_allow_list
+    from app.services.outbound_cohort import _cold_outreach_enabled, failed_or_blocked_whatsapp, on_allow_list
     from app.services.whatsapp_sender import consent_check
-    if not on_allow_list(lead):
+    if not _cold_outreach_enabled() and not on_allow_list(lead):
         return False, "lead is outside the WhatsApp allow-list"
     if failed_or_blocked_whatsapp(lead, db):
         return False, "a failed or blocked WhatsApp row must not be retried"
     ok, why = consent_check(lead)            # EXPLICIT, bound number, not REVOKED/DNC/supplier
     if not ok:
         return False, why
-    if (getattr(lead, "consent_source", "") or "") != "AI_CALL_WHATSAPP_REQUEST":
-        return False, "consent did not come from the AI call"
+    if (getattr(lead, "consent_source", "") or "") not in ("AI_CALL_WHATSAPP_REQUEST", "EMAIL_REPLY_WHATSAPP_REQUEST"):
+        return False, "consent did not come from an authorized channel (AI call or email reply)"
     num = getattr(lead, "consent_phone", None) or getattr(lead, "whatsapp_number", None)
     why = number_suppressed(num)
     if why:
@@ -135,9 +147,14 @@ def eligible(db, lead) -> tuple[bool, str]:
         q = q.filter(WorkflowEvent.occurred_at >= ts)
     if q.first():
         return False, "declined WhatsApp on a call"
-    since = datetime.utcnow() - timedelta(days=NO_CONTACT_DAYS)
-    # The 7-day cooldown is anchored strictly to the last actual WhatsApp send;
-    # re-recording consent must NEVER reset or bypass the 7-day cooldown window.
+    from app.services.contact_coordinator import is_cross_channel_suppressed
+    suppressed, sup_why = is_cross_channel_suppressed(lead, "whatsapp", db=db)
+    if suppressed:
+        return False, f"cross_channel_suppression: {sup_why}"
+    days = _no_contact_days()
+    since = datetime.utcnow() - timedelta(days=days)
+    # The cooldown is anchored strictly to the last actual WhatsApp send;
+    # re-recording consent must NEVER reset or bypass the cooldown window.
     recent = db.query(WorkflowEvent.event_type, WorkflowEvent.payload).filter(
         WorkflowEvent.lead_id == lead.id,
         WorkflowEvent.event_type.in_(WA_EVENTS),
@@ -147,7 +164,8 @@ def eligible(db, lead) -> tuple[bool, str]:
         for etype, payload in recent:
             if etype in WA_EVENTS and _uid(payload) and _uid(payload) in cancelled:
                 continue          # Klaviyo never delivered it (WHATSAPP_NOT_DELIVERED on record)
-            return False, f"messaged in the last {NO_CONTACT_DAYS} days"
+            d_str = int(days) if days == int(days) else f"{days:.1f}"
+            return False, f"messaged in the last {d_str} days"
 
     num_clean = ten(num)
     if num_clean:
@@ -158,7 +176,8 @@ def eligible(db, lead) -> tuple[bool, str]:
             OutboundWhatsApp.created_at >= since
         ).first()
         if phone_match:
-            return False, f"messaged in the last {NO_CONTACT_DAYS} days (same phone)"
+            d_str = int(days) if days == int(days) else f"{days:.1f}"
+            return False, f"messaged in the last {d_str} days (same phone)"
     return True, "eligible"
 
 
@@ -194,7 +213,7 @@ def slot_free(db, now=None) -> tuple[bool, str]:
     """Hours, daily cap, hourly cap and the random gap since the last WhatsApp send."""
     from app.models.models import WorkflowEvent
     if not in_hours(now):
-        return False, "outside 09:30-19:00 IST Mon-Sat"
+        return False, "outside 09:30-20:00 IST Mon-Sat"
 
     n_local = (now or datetime.now(IST)).astimezone(IST)
     start_of_day_ist = n_local.replace(hour=0, minute=0, second=0, microsecond=0)

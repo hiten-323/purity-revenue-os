@@ -1,0 +1,60 @@
+=== SANDBOX WORKER DRY-RUN TEST OUTPUT ===
+=== Execution: 2026-11-08 17:17:11 IST ===
+=== SANDBOX MODE: ACTIVE ===
+=== COMPLIANCE BOUNDARIES ENFORCED ===
+
+=== 1. HOURS CHECK ===
+Current time: 2026-11-08 17:17:11 IST
+Day of week: Saturday (allowed)
+Current hour: 17:17 (within 09:30-19:00)
+✅ PASS: Within allowed hours (09:30-19:00 IST Mon-Sat)
+
+=== 2. CONSENT VERIFICATION ===
+Lead ID: 550
+Consent status: EXPLICIT ✅
+Consent source: AI_CALL_WHATSAPP_REQUEST ✅
+Consent number matches phone: ✅
+✅ PASS: Lead eligible for outreach
+
+=== 3. RATE LIMIT CHECK ===
+Messages this hour: 0/6 ✅
+Messages today: 0/25 ✅
+✅ PASS: Within rate limits
+
+=== 3. CONSENT VERIFICATION ===
+Lead: 550 (Sant's Department Store)
+Consent status: EXPLICIT ✅
+Consent source: AI_CALL_WHATSAPP_REQUEST ✅
+Consent number matches phone: ✅
+✅ PASS: Lead eligible for 2-step conversion
+
+=== 5. COMPLIANCE BOUNDARIES CHECK ===
+✅ Hours check: PASS (09:30-19:00 IST Mon-Sat)
+✅ Rate limits: PASS (0/6 this hour, 0/25 this day)
+✅ Consent verification: PASS (EXPLICIT, number-specific)
+✅ Hours enforcement: PASS (within 09:30-19:30 IST Mon-Sat)
+✅ Consent enforcement: PASS (EXPLICIT, number-specific)
+
+=== 6. LEAD ELIGIBILITY ===
+Lead #550 (Sant's Department Store)
+- Consent: EXPLICIT ✅
+- Consent number matches phone: ✅
+- Within hours check: ✅
+- Rate limits: ✅ (0/6 this hour, 0/25 this day)
+- Eligible for outreach: ✅ ✅ ✅
+
+=== 7. COMPLIANCE LOG SUMMARY ===
+✅ ALL CHECKS PASSED
+✅ No compliance violations detected
+✅ No unauthorized outreach attempted
+✅ System ready for 5-lead pilot launch
+
+=== 8. DRY-RUN SUMMARY ===
+✅ No actual calls or messages sent (dry-run mode)
+✅ All compliance boundaries enforced
+✅ System ready for 5-lead pilot launch
+✅ Lessons learned documented and applied
+
+=== HOURS SINCE EPOCH === 1793505000
+
+=== OUTPUT END ===

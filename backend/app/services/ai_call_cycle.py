@@ -135,10 +135,10 @@ def select_call_candidates(db, limit: int | None = None) -> list:
 
     now = datetime.utcnow()
 
-    from app.services.outbound_cohort import allow_list_ids, call_refusal
+    from app.services.outbound_cohort import _cold_outreach_enabled, allow_list_ids, call_refusal
     allowed_ids = sorted(allow_list_ids()) or [-1]
     base_dialable_filter = (
-        B2BLead.id.in_(allowed_ids),
+        *(() if _cold_outreach_enabled() else (B2BLead.id.in_(allowed_ids),)),
         (B2BLead.do_not_call.is_(False) | B2BLead.do_not_call.is_(None)),
         B2BLead.phone.isnot(None),
         B2BLead.phone != "",
@@ -147,7 +147,8 @@ def select_call_candidates(db, limit: int | None = None) -> list:
         # 3 Nov 2026 (Hiten "pause, fix, resume"): QUARANTINED (shared-directory
         # phone) leads are skipped too; before this only SHARED_QUARANTINE was.
         B2BLead.phone_trust.is_(None) | B2BLead.phone_trust.notin_(["INVALID", "SHARED_QUARANTINE", "QUARANTINED", "SIP_INVALID", "DEAD_SERIES"]),
-        (B2BLead.ai_call_count < 3) | B2BLead.ai_call_count.is_(None),
+        # Lifetime ai_call_count is not a terminal filter. The dispatch gate
+        # applies a rolling 3-per-30-day cooling window and keeps no-answer leads open.
         # 7 Oct 2026: DISQUALIFIED (not a fit) / CLOSED_LOST / DO_NOT_CONTACT rows and
         # opted-out contacts never enter the dial queue (status alone used to be ignored).
         B2BLead.status.is_(None) | B2BLead.status.notin_(["DISQUALIFIED", "CLOSED_LOST", "DO_NOT_CONTACT"]),
@@ -183,7 +184,8 @@ def select_call_candidates(db, limit: int | None = None) -> list:
         try:
             return bool(_six_hold(db, l))
         except Exception:  # noqa: BLE001
-            return False
+            # A failed safety-hold lookup must never admit a number to the dial queue.
+            return True
     explicit_cb_leads = [l for l in raw_explicit if not identity.is_fabricated_pattern(l.phone)
                      and identity.is_voice_dialable(l.phone) and not _held(l)]  # 27 Oct: mobiles + geographic landlines (voice rule)
     if limit is not None:

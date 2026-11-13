@@ -199,15 +199,21 @@ def test_any_recorded_whatsapp_since_consent_blocks_a_new_send(db, monkeypatch, 
     assert klaviyo.calls == []
 
 
-def test_a_follow_up_days_later_is_not_mistaken_for_a_duplicate(db):
-    lead = _consented(db)
+def test_a_follow_up_days_later_is_not_mistaken_for_a_duplicate(db, monkeypatch, tmp_path):
+    from wa_klaviyo_harness import klaviyo_on, ai_call_consented, approved_draft, _TEST_ALLOW
+    # Isolate the no-profile branch with a fake provider; never read production .env.
+    klaviyo_on(monkeypatch, tmp_path, subscribed=False)
+    lead = ai_call_consented(db)
+    _TEST_ALLOW.add(lead.id)
+    from app.services import outbound_cohort
+    monkeypatch.setattr(outbound_cohort, "allow_list_ids", lambda: frozenset({lead.id}))
     db.add(WorkflowEvent(lead_id=lead.id, event_type="WHATSAPP_SENT", channel="whatsapp",
-                         occurred_at=datetime.utcnow() - timedelta(days=3)))
+                         occurred_at=datetime.utcnow() - timedelta(days=8)))
     db.commit()
 
-    r = send_whatsapp(lead, "follow-up", db=db)
+    r = send_whatsapp(lead, "follow-up", db=db, approved_draft_id=approved_draft(lead.id))
     assert "duplicate" not in (r.reason or "")
-    assert r.status == "not_configured", "reached the transport, which is switched off"
+    assert r.status == "blocked" and "UNSUBSCRIBED" in (r.reason or ""), r.reason
 
 
 # ── the webhook itself, over HTTP ────────────────────────────────────────────

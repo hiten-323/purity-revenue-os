@@ -1,0 +1,10 @@
+assistant: Namaste Jp ji, main Purity Beans ki AI assistant hoon. Delhi mein kya aap instant coffee rakhte hain? Hum glass jar wali saaf instant coffee distributors ko 30% margin ke saath supply karte hain.
+user: नीचे कॉपी में।
+user: हेलो।
+assistant: Sorry ji, awaaz clear nahi
+assistant: Haan ji, toh... aap abhi koi instant coffee brand distribute ya stock karte hain?
+user: हाँ जी मैडम नेस्ले का
+assistant: Theek hai ji. Hamari glass jar wali saaf instant coffee hai, aur distributors ko 30% margin milta hai. Kya backup brand test karna chahenge?
+user: हाँ।
+assistant: Kya main aapko email pe catalogue aur rate details bhej doon?
+user: भेज दीजिएगा व्हाट्सएप पे इसी पे कर दो।

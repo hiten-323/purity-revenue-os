@@ -28,4 +28,9 @@ def admit(monkeypatch, db, leads, *, calls=False):
     monkeypatch.setattr(cohort, "allow_list_ids", lambda: frozenset(lead.id for lead in leads))
     if calls:
         for lead in leads:
+            # Tests that admit a call candidate model both independent approvals:
+            # destination-number verification and the call-specific authorization event.
+            lead.phone_verified = True
+            lead.phone_trust = "VERIFIED"
+            db.add(lead)
             authorize_call(db, lead)

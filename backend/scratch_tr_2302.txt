@@ -1,0 +1,4 @@
+assistant: Namaste Sushil ji, main Purity Beans ki AI assistant hoon. Lucknow mein kya aap instant coffee rakhte hain? Hum glass jar wali saaf instant coffee distributors ko 30% margin ke saath supply karte hain.
+user: मेरे को व्हाट्सएप करिए कौन सी कॉफी है आपके पास?
+assistant: Ji bilkul, isi number pe bhej doon? Ya koi aur number hai?
+user: हाँ जी।

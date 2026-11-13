@@ -33,7 +33,7 @@ def _lead(db, email="hello@altspaced.com", company="AltSpace"):
 
 def _sent(db, lead, hours_ago, to=None):
     db.add(WorkflowEvent(lead_id=lead.id, event_type="EMAIL_SENT", actor="SMART_OUTREACH",
-                         channel="email", payload={"to": to or lead.email, "message_id": "<m>"},
+                         channel="email", payload={"to": to or lead.email, "message_id": f"<m_{hours_ago}>"},
                          occurred_at=datetime.utcnow() - timedelta(hours=hours_ago)))
     db.commit()
 
@@ -196,6 +196,12 @@ def test_send_email_chokepoint_refuses_repeat(monkeypatch):
     monkeypatch.setenv("EMAIL_HOLD_LEAD_IDS", "")
     import app.services.business_hours as bh
     monkeypatch.setattr(bh, "is_open", lambda *a, **k: True)
+    import datetime as _dt_mod
+    class _FakeDt(_dt_mod.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _dt_mod.datetime(2026, 11, 7, 11, 0, 0, tzinfo=tz)
+    monkeypatch.setattr(_dt_mod, "datetime", _FakeDt)
     monkeypatch.setattr(es, "SENDER_PASSWORD", "x")
     monkeypatch.setattr(es, "domain_is_deliverable", lambda *a, **k: True)
     import app.services.trust_promoter as tp
@@ -210,3 +216,13 @@ def test_send_email_chokepoint_refuses_repeat(monkeypatch):
                          subject="s", body_text="b", lead_id=lid)
     r = es.send_email(e)
     assert r.status == "failed" and "at most one email" in r.error
+
+
+def test_guard_blocks_after_20_sends():
+    db = _db(); lead = _lead(db)
+    # Add 20 past sends
+    for i in range(20):
+        _sent(db, lead, 100 + i)
+    ok, why = rg.check(db, lead.id)
+    assert not ok
+    assert "email send limit reached (20/20 sent)" in why

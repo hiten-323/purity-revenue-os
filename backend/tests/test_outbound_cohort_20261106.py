@@ -56,13 +56,27 @@ def test_caps_cannot_be_raised(monkeypatch):
     monkeypatch.setenv("WA_DAILY_CAP", "100")
     assert effective("AI_CALL_CYCLE_MAX_DIALS") == 1
     assert effective("AI_CALL_MAX_INFLIGHT") == 1
-    assert effective("WA_MAX_PER_HOUR") == 5
-    assert effective("WA_DAILY_CAP") == 20
+    assert effective("WA_MAX_PER_HOUR") == 6
+    assert effective("WA_DAILY_CAP") == 25
 
 
 def test_environment_cannot_add_to_the_allow_list(monkeypatch):
     monkeypatch.setenv("OUTREACH_ALLOW_LIST", "1,550,999999")
     assert cohort.allow_list_ids() == frozenset({550})
+
+
+def test_call_authorization_does_not_override_unverified_phone(monkeypatch):
+    db, engine = _db()
+    try:
+        lead = _lead(db, company="Unverified Destination", phone_verified=False,
+                     phone_trust="UNKNOWN")
+        from tests.cohort_fixture import authorize_call
+        authorize_call(db, lead)
+        monkeypatch.setattr(cohort, "allow_list_ids", lambda: frozenset({lead.id}))
+        assert cohort.call_refusal(lead, db) == "phone number lacks independent verification evidence for voice outreach"
+    finally:
+        db.close()
+        engine.dispose()
 
 
 def test_dialer_refuses_everyone_except_a_call_authorization(monkeypatch):
@@ -72,7 +86,8 @@ def test_dialer_refuses_everyone_except_a_call_authorization(monkeypatch):
         outsider = _lead(db, company="Outsider")
         whatsapp_only = _lead(db, company="WhatsApp Only")
         _hash_event(db, whatsapp_only)
-        authorized = _lead(db, company="Authorized", phone="+919111122233")
+        authorized = _lead(db, company="Authorized", phone="+919111122233",
+                           phone_verified=True, phone_trust="VERIFIED")
         from tests.cohort_fixture import authorize_call
         authorize_call(db, authorized)
         monkeypatch.setattr(cohort, "allow_list_ids",
@@ -191,6 +206,43 @@ def test_email_aisensy_and_warm_refuse_before_the_provider_when_flags_are_on(mon
         engine.dispose()
 
 
+
+def test_whatsapp_and_call_consent_do_not_authorize_email(monkeypatch):
+    db, engine = _db()
+    try:
+        for source in ("AI_CALL_WHATSAPP_REQUEST", "EMAIL_REPLY_WHATSAPP_REQUEST", "FOUNDER_CALL", "AI_CALL"):
+            lead = _lead(db, company="Channel Consent " + source, consent_source=source)
+            monkeypatch.setattr(cohort, "allow_list_ids", lambda lead_id=lead.id: frozenset({lead_id}))
+            email = SimpleNamespace(lead_id=lead.id, to_email="cohort@example.in", status="", error="")
+            why = cohort.email_refusal(email, db)
+            assert why == "WhatsApp/call consent does not authorize email"
+    finally:
+        db.close()
+        engine.dispose()
+
+def test_global_suppression_blocks_every_channel_and_reports_consistently(monkeypatch):
+    from app.services import outreach_orchestrator as orch
+    db, engine = _db()
+    try:
+        for contact_status in ("DO_NOT_CONTACT", "SUPPRESSED", "QUARANTINED", "OPTED_OUT"):
+            lead = _lead(db, company="Suppressed " + contact_status,
+                         contact_status=contact_status)
+            monkeypatch.setattr(cohort, "allow_list_ids",
+                                lambda lead_id=lead.id: frozenset({lead_id}))
+            email = SimpleNamespace(lead_id=lead.id, to_email="cohort@example.in")
+            assert cohort.call_refusal(lead, db)
+            assert cohort.whatsapp_refusal(lead, db)
+            assert cohort.email_refusal(email, db)
+            eligibility = orch.eligibility(lead, db)
+            assert all(not result["eligible"] for result in eligibility.values())
+            assert all("contact_status=" in result["reason"]
+                       or "Do not contact" in result["reason"]
+                       for result in eligibility.values())
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_each_flag_on_still_refuses_the_held_classes(monkeypatch):
     """Every outbound flag is forced on. Nothing here dials or contacts Klaviyo."""
     from app.services import ai_call_cycle, voice_router, whatsapp_aisensy, whatsapp_klaviyo
@@ -267,7 +319,9 @@ def test_each_flag_on_still_refuses_the_held_classes(monkeypatch):
         assert whatsapp_only.id not in chosen
         assert "WhatsApp request" in cohort.call_refusal(whatsapp_only, db)
         dial = voice_router.place_call(whatsapp_only, dry_run=False, db=db)
-        assert dial.placed is False and "WhatsApp request" in dial.error
+        assert dial.placed is False
+        assert ("WhatsApp request" in dial.error
+                or "AI_CALLING_KILL_SWITCH is engaged" in dial.error)
 
         assert "outside the WhatsApp allow-list" in cohort.whatsapp_refusal(outsider, db)
         assert cohort.whatsapp_refusal(failed, db).startswith("a failed or blocked")

@@ -64,12 +64,15 @@ def _callback(db, company, trust, phone):
 
 def test_quarantined_cold_retry_and_callback_leads_are_never_candidates(db, registry, monkeypatch):
     from tests.cohort_fixture import admit
-    from app.services import ai_call_cycle
+    from app.services import ai_call_cycle, outbound_cohort
     cold = _lead(db, "Quarantined Cold", "QUARANTINED", "9814012301")
     retry = _retry(db, "Quarantined Retry", "QUARANTINED", "9814012302")
     callback = _callback(db, "Quarantined Callback", "QUARANTINED", "9814012303")
     clean = _lead(db, "Clean Cold", "UNKNOWN", "9814012304")
-    admit(monkeypatch, db, [cold, retry, callback, clean], calls=True)
+    # Preserve the quarantine state; test the selector's filter independently
+    # from the separate phone-verification and call-authorization gates.
+    admit(monkeypatch, db, [cold, retry, callback, clean], calls=False)
+    monkeypatch.setattr(outbound_cohort, 'call_refusal', lambda *a, **k: None)
     names = [c.company for c in ai_call_cycle.select_call_candidates(db, limit=50)]
     assert "Clean Cold" in names
     assert not any(n.startswith("Quarantined") for n in names), names
@@ -86,10 +89,12 @@ def test_other_trust_values_still_dialable(db, registry, monkeypatch):
 
 def test_existing_blocked_trusts_still_excluded(db, registry, monkeypatch):
     from tests.cohort_fixture import admit
-    from app.services import ai_call_cycle
+    from app.services import ai_call_cycle, outbound_cohort
     leads = []
     for i, t in enumerate(("INVALID", "SHARED_QUARANTINE", "SIP_INVALID", "DEAD_SERIES", "QUARANTINED")):
         leads.append(_lead(db, "Blocked " + t, t, "981401236" + str(i)))
-    admit(monkeypatch, db, leads, calls=True)
+    # Keep each blocked trust value intact while isolating the selector filter.
+    admit(monkeypatch, db, leads, calls=False)
+    monkeypatch.setattr(outbound_cohort, 'call_refusal', lambda *a, **k: None)
     names = [c.company for c in ai_call_cycle.select_call_candidates(db, limit=50)]
     assert not any(n.startswith("Blocked") for n in names), names

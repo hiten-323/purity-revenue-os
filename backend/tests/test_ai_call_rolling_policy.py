@@ -8,10 +8,9 @@ One fleet, one ledger, ── no artificial volume ceiling:
   * every dial opens its ledger row atomically (begin_ai_attempt) BEFORE the
     network call — and the row is released (release_ai_call_attempt) only
     when the provider refused before any PSTN attempt;
-  * a lead may be attempted at most 3 times, and only off a retryable
-    no-answer (NO_ANSWER / VOICEMAIL / FAILED / BUSY), >= 168h after the
-    last call, on a different Asia/Kolkata calendar day, inside the
-    scheduling window, and never after a meaningful conversation;
+  * no-answer leads remain open: at most 3 AI attempts in a rolling 30-day
+    window, then cooling until the window clears; exact requested callbacks
+    are honoured only at/after the requested date and time;
   * dials respect Asia/Kolkata 09:30-19:30 Mon-Sat (AI_CALL_BUSINESS_HOURS,
     fail-closed) in BOTH the eligibility gate and the single dial path;
   * the worker's scheduler dials only when AUTO_AI_CALLING_ENABLED is on
@@ -33,6 +32,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.models.models import B2BLead, Base, CallHistory
+from app.services.call_intelligence.models import CallResult, ensure_for_session
 from app.services import founder_call_pipeline as p
 from app.services import preference_registry as pref
 from conftest import memory_engine
@@ -85,6 +85,23 @@ def _ai_row(db, lead, *, age_h: float = 1.0, status="AI_NO_ANSWER"):
     db.commit()
 
 
+def _call_result(db, lead, *, age_h: float = 1.0, outcome="NO_ANSWER", status="FINAL", termination_reason=None):
+    ensure_for_session(db)
+    db.add(CallResult(
+        call_id=f"test-ai-{lead.id}-{int(age_h * 1000)}",
+        lead_id=lead.id,
+        provider="nuraveda",
+        status=status,
+        started_at=datetime.utcnow() - timedelta(hours=age_h),
+        ended_at=datetime.utcnow() - timedelta(hours=max(0, age_h - 0.02)),
+        outcome=outcome,
+        raw_outcome=outcome,
+        termination_reason=termination_reason,
+        source="voice_agent",
+    ))
+    db.commit()
+
+
 def _retry_lead(db, *, attempts=1, last_call_delta_h=170.0,
                 retry_after_delta_h=None, outcome="NO_ANSWER", **kw):
     now = datetime.utcnow()
@@ -93,11 +110,94 @@ def _retry_lead(db, *, attempts=1, last_call_delta_h=170.0,
     lead.ai_call_count = attempts
     lead.last_call_date = now - timedelta(hours=last_call_delta_h)
     lead.call_outcome_last = outcome
+    for i in range(attempts):
+        _call_result(db, lead, age_h=last_call_delta_h + i * 24, outcome=outcome)
     if retry_after_delta_h is not None:
         lead.ai_retry_after = now + timedelta(hours=retry_after_delta_h)
     db.commit()
     return lead
 
+
+
+def test_ai_retry_after_is_mapped_and_persisted(db):
+    lead = _lead(db, company="Retry Mapping Cafe")
+    due = datetime.utcnow() + timedelta(hours=5)
+    lead.ai_retry_after = due
+    db.commit()
+    db.expire(lead)
+    assert lead.ai_retry_after is not None
+    assert abs((lead.ai_retry_after - due).total_seconds()) < 1
+
+
+def test_voice_router_uses_separate_call_authorization_not_whatsapp_consent(db, registry, monkeypatch):
+    from app.models.models import WorkflowEvent
+    from app.services import voice_router, outbound_cohort, contact_coordinator
+    from app.services.call_intelligence import standing_rules
+
+    lead = _lead(db, company="Channel Specific Call Consent Cafe",
+                 phone="9814012345", consent_status="UNKNOWN",
+                 contact_status="CONTACTABLE", do_not_call=False,
+                 phone_verified=True, phone_trust="VERIFIED")
+    db.add(WorkflowEvent(
+        lead_id=lead.id,
+        event_type="CALL_AUTHORIZATION_RECORDED",
+        channel="call",
+        payload={
+            "source": "FOUNDER_HIGH_INTENT_APPROVAL",
+            "phone": lead.phone,
+            "evidence_sha256": "a" * 64,
+        },
+    ))
+    db.commit()
+
+    monkeypatch.setattr(outbound_cohort, "allow_list_ids", lambda: frozenset({lead.id}))
+    monkeypatch.setenv("AI_CALLING_ENABLED", "1")
+    monkeypatch.setenv("AI_CALLING_KILL_SWITCH", "0")
+    monkeypatch.setattr(p, "call_hours_open", lambda lead=None: (True, "test window"))
+    monkeypatch.setattr(p, "duplicate_phone_reason", lambda lead: None)
+    monkeypatch.setattr(p, "explicit_callback_due", lambda lead: (False, None))
+    monkeypatch.setattr(p, "opening_for", lambda lead: "Hello")
+    monkeypatch.setattr(voice_router, "config_status", lambda: (True, "test provider"))
+    monkeypatch.setattr(contact_coordinator, "is_cross_channel_suppressed",
+                        lambda *args, **kwargs: (False, "not suppressed"))
+    monkeypatch.setattr(standing_rules, "call_blocked", lambda lead: None)
+
+    result = voice_router.place_call(lead, context={}, dry_run=True, db=db)
+    assert result.placed is False
+    assert result.error == "dry run — not dispatched"
+
+
+def test_whatsapp_consent_alone_does_not_authorize_voice_call(db, registry, monkeypatch):
+    from app.services import outbound_cohort
+    lead = _lead(db, company="WhatsApp Only Consent Cafe",
+                 consent_status="EXPLICIT",
+                 consent_source="AI_CALL_WHATSAPP_REQUEST")
+    monkeypatch.setattr(outbound_cohort, "allow_list_ids", lambda: frozenset({lead.id}))
+    reason = outbound_cohort.call_refusal(lead, db)
+    assert reason == "consent_source AI_CALL_WHATSAPP_REQUEST records a WhatsApp request, not a call authorization"
+
+
+def test_call_history_duplicate_outcome_rows_do_not_double_count(db, registry):
+    from app.services.founder_call_pipeline import recent_ai_attempt_count
+    lead = _lead(db, company="Deduplicated Attempt Cafe")
+    _call_result(db, lead, age_h=2.0)
+    # Legacy dispatch and outcome callbacks can create two AI_* history rows
+    # for the same provider call; the structured CallResult remains one attempt.
+    _ai_row(db, lead, age_h=2.0, status="AI_CALL_ATTEMPTED")
+    _ai_row(db, lead, age_h=1.98, status="AI_NO_ANSWER")
+    count, _ = recent_ai_attempt_count(lead)
+    assert count == 1
+
+
+def test_pre_ring_dispatch_failure_does_not_count_as_recipient_contact(db, registry):
+    from app.services.founder_call_pipeline import recent_ai_attempt_count
+    lead = _lead(db, company="Pre Ring Failure Cafe")
+    _call_result(
+        db, lead, age_h=1.0, outcome="DISPATCH_FAILED",
+        status="DISPATCH_FAILED", termination_reason="PRE_RING_FAILURE",
+    )
+    count, _ = recent_ai_attempt_count(lead)
+    assert count == 0
 
 # ── there is NO fleet-wide ceiling ───────────────────────────────────────────
 
@@ -208,11 +308,72 @@ def test_retry_dispatch_advances_from_no_answer(db, registry):
 
 # ── the per-lead retry budget ────────────────────────────────────────────────
 
-def test_three_attempts_is_the_ceiling(db, registry):
+def test_three_attempts_trigger_rolling_cooling_not_lifetime_abandonment(db, registry):
     lead = _retry_lead(db, attempts=3, last_call_delta_h=170.0, company="Ceil Cafe")
     ok, why = p.may_place_ai_call(lead)
     assert ok is False
-    assert "no retry beyond 3" in why
+    assert "rolling retry cooling" in why
+    assert "30 days" in why
+
+
+def test_no_answer_lead_reopens_after_rolling_window_clears(db, registry):
+    lead = _retry_lead(db, attempts=3, last_call_delta_h=31 * 24 + 2,
+                       company="Reopen After Cooling Cafe")
+    # _retry_lead created three structured call-result rows outside the
+    # rolling window; no lifetime cap may permanently abandon this lead.
+    ok, why = p.may_place_ai_call(lead)
+    assert ok is True, why
+
+
+def test_exact_requested_callback_can_be_honoured_during_general_cooling(db, registry):
+    lead = _retry_lead(db, attempts=3, last_call_delta_h=2.0,
+                       company="Explicit Callback Cafe")
+    lead.founder_callback_window = "today 7pm"
+    lead.ai_retry_after = datetime.utcnow() - timedelta(minutes=1)
+    db.commit()
+    ok, why = p.may_place_ai_call(lead)
+    assert ok is True, why
+
+
+def test_callback_without_exact_clock_time_is_not_scheduled(db, registry):
+    lead = _lead(db, company="Ambiguous Callback Cafe")
+    p.record_ai_outcome(lead, db, "CALLBACK_REQUESTED",
+                        callback_window="tomorrow morning")
+    db.commit()
+    assert lead.ai_retry_after is None
+    assert lead.founder_callback_window == "tomorrow morning"
+    assert lead.callback_retry_count == 0
+
+
+def test_day_only_callback_phrases_are_ambiguous_but_exact_times_parse():
+    now = datetime(2026, 11, 9, 6, 0)
+    assert p.parse_callback_datetime("tomorrow morning", now=now) is None
+    assert p.parse_callback_datetime("Monday ko call karna", now=now) is None
+    assert p.parse_callback_datetime("in 3 days", now=now) is None
+    assert p.parse_callback_datetime("tomorrow 8pm", now=now) is not None
+    assert p.parse_callback_datetime("in 3 days at 4pm", now=now) is not None
+
+
+def test_voice_router_final_gate_blocks_early_or_ambiguous_callback(db, registry, monkeypatch):
+    from app.services import voice_router
+    monkeypatch.setenv("AI_CALLING_ENABLED", "1")
+    monkeypatch.delenv("AI_CALLING_KILL_SWITCH", raising=False)
+
+    lead = _lead(db, company="Router Callback Cafe")
+    lead.call_outcome_last = "CALLBACK_REQUESTED"
+    lead.founder_callback_window = "tomorrow 7pm"
+    lead.ai_retry_after = datetime.utcnow() + timedelta(hours=2)
+    db.commit()
+    result = voice_router.place_call(lead, db=db)
+    assert result.placed is False
+    assert "CALLBACK_NOT_DUE" in result.error
+
+    lead.ai_retry_after = None
+    lead.founder_callback_window = "tomorrow morning"
+    db.commit()
+    result = voice_router.place_call(lead, db=db)
+    assert result.placed is False
+    assert "CALLBACK_TIME_UNCONFIRMED" in result.error
 
 
 def test_retry_is_refused_inside_the_cooldown(db, registry):
@@ -362,6 +523,8 @@ def test_check_eligibility_blocks_a_closed_window(db, registry, monkeypatch):
     from app.services.calling_agent import CallingAgentService
 
     monkeypatch.setenv("AI_CALLING_ENABLED", "1")
+    # This case isolates the business-hours gate, not the independent global kill switch.
+    monkeypatch.setenv("AI_CALLING_KILL_SWITCH", "0")
     monkeypatch.setattr(pl, "call_hours_open",
                         lambda *a, **kw: (False, "closed (test)"))
     lead = _lead(db, company="Hours Cafe")
@@ -377,6 +540,8 @@ def test_the_sole_dial_path_blocks_a_closed_window(db, registry, monkeypatch):
     from app.services import voice_router
 
     monkeypatch.setenv("AI_CALLING_ENABLED", "1")
+    # This case isolates the business-hours gate, not the global kill switch.
+    monkeypatch.setenv("AI_CALLING_KILL_SWITCH", "0")
     monkeypatch.setattr(pl, "call_hours_open",
                         lambda *a, **kw: (False, "closed (test)"))
     monkeypatch.setattr(voice_router, "active", lambda: "nuraveda")
@@ -397,6 +562,7 @@ def test_dry_run_releases_the_slot_and_never_rings(db, registry, monkeypatch):
     from app.services.calling_agent import CallingAgentService
 
     monkeypatch.setenv("AI_CALLING_ENABLED", "1")
+    monkeypatch.setenv("AI_CALLING_KILL_SWITCH", "0")
     monkeypatch.setenv("AI_CALL_BUSINESS_HOURS", "0")
     monkeypatch.setenv("VOICE_PROVIDER", "nuraveda")
     monkeypatch.setenv("NURAVEDA_ENABLED", "1")
@@ -575,6 +741,7 @@ def test_b_explicit_callback_outside_business_hours(db, registry, monkeypatch):
     """Test B: Explicit callback outside business hours (e.g. 7 PM IST) overrides normal business hours."""
     from app.services.calling_agent import CallingAgentService
     monkeypatch.setenv("AI_CALLING_ENABLED", "1")
+    monkeypatch.setenv("AI_CALLING_KILL_SWITCH", "0")
     monkeypatch.setenv("AI_CALL_BUSINESS_HOURS", "1")
 
     # 19:00 IST (13:30 UTC) is outside normal 09:00-18:00 IST window

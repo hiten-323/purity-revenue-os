@@ -1,0 +1,243 @@
+"""
+Adapter for the Nuraveda / Mesh Pilot AI Voice Agent.
+
+    https://github.com/Nuraveda-Labs/ai-voice-agent   (MIT)
+
+What it is
+----------
+A separate Node service — LiveKit voice loop, Prisma/Postgres queue, SIP or
+Twilio trunk for the actual PSTN leg. It is not a Python library, so this file
+is a client, not a wrapper: Revenue OS enqueues a call and the Node service
+owns the conversation.
+
+Written against the real source, not against a guess:
+
+    POST /calls/dispatch     enqueue an outbound call     (src/server.js)
+      auth   X-COD-Tool-Secret: <LIVEKIT_TOOL_SECRET>, fails closed
+      body   {profile, phone, lang?, payload?, scheduledAt?, idempotencyKey?}
+      200    {ok, id, profile, scheduledAt, orderId, orderName, reused}
+    GET  /health             dispatch_mode, queue depth, DND, config flags
+    GET  /profiles           which call profiles the service has loaded
+
+Two things the upstream docs get wrong, corrected here:
+
+* .env.example advertises HTTP_PORT=8081; server.js actually reads
+  `process.env.PORT || 3104`. 3104 is the default used below.
+* The service binds 127.0.0.1 only, so it is reachable from this host and
+  nowhere else. That is a feature — treat it as a localhost sidecar.
+
+Permission is decided upstream, not here
+----------------------------------------
+The service has its own DND window and its own idempotency, and both are good.
+Neither knows anything about whether a Purity Beans lead may be called. That is
+founder_call_pipeline.may_place_ai_call()'s job, applied to every AI call by
+calling_agent.trigger_vapi_call. A voice integration that skipped it would be
+the fifth write path in this codebase to route around a gate that already
+exists.
+
+Placing a call is also the least reversible thing this system can do. A wrong
+email is a wrong email; a wrong call is a real phone ringing in a real shop.
+So: disabled by default, dry-run available, and refusal is the default answer
+to every question this module cannot answer with evidence.
+"""
+from __future__ import annotations
+
+import json
+import os
+import urllib.error
+import urllib.request
+from datetime import date
+from typing import Any
+
+# Load .env HERE rather than relying on some other module's import order to
+# have done it first — see email_sender.py for the incident this pattern
+# exists to prevent: a bare os.getenv() only sees NURAVEDA_ENABLED / _URL /
+# _TOOL_SECRET in whichever process happened to import a dotenv-loading
+# module before this one. Placing a call is the least reversible thing this
+# system does (see module docstring); config_status() silently reporting
+# "not configured" — or worse, configured with a stale/missing secret — for
+# no reason but import order is not acceptable here.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "..", ".env"))
+except Exception as _e:
+    print(f"[nuraveda_provider] .env load skipped: {_e}")
+
+from app.services.voice_router import CallResult
+
+DEFAULT_URL = "http://127.0.0.1:3104"
+DEFAULT_PROFILE = "ai-voice-agent"
+DEFAULT_LANG = "hi-IN"
+TIMEOUT = 20
+
+
+# One definition of "the digits that identify this subscriber".
+from app.services.identity import digits_only as digits
+
+
+def enabled() -> bool:
+    """Off unless explicitly switched on. Never defaults to dialling."""
+    return (os.getenv("NURAVEDA_ENABLED", "0") or "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def base_url() -> str:
+    return (os.getenv("NURAVEDA_URL", "") or DEFAULT_URL).strip().rstrip("/")
+
+
+def _secret() -> str:
+    return (os.getenv("NURAVEDA_TOOL_SECRET", "") or "").strip()
+
+
+def profile() -> str:
+    return (os.getenv("NURAVEDA_PROFILE", "") or DEFAULT_PROFILE).strip()
+
+
+def config_status() -> tuple[bool, str]:
+    """What is missing, named precisely, so the answer is actionable."""
+    if not enabled():
+        return False, "NURAVEDA_ENABLED is not set to 1"
+    secret = _secret()
+    if not secret:
+        return False, ("NURAVEDA_TOOL_SECRET is not set. It must equal the "
+                       "LIVEKIT_TOOL_SECRET the Node service runs with, or "
+                       "/calls/dispatch returns 401.")
+    if not secret.isascii():
+        # Caught in real setup: the value was 32 copies of U+2022, the bullet
+        # character — the MASKED display had been copied out of a dashboard
+        # instead of the value behind it. HTTP headers are latin-1, so this
+        # surfaced as "UnicodeEncodeError: 'latin-1' codec can't encode
+        # characters in position 0-31", which tells you nothing about the
+        # actual mistake. Say the actual mistake.
+        return False, ("NURAVEDA_TOOL_SECRET contains non-ASCII characters. "
+                       "The usual cause is copying a masked value (••••) from "
+                       "a dashboard rather than the secret behind it. HTTP "
+                       "headers are latin-1, so this cannot be sent.")
+    return True, f"configured for {base_url()} profile={profile()}"
+
+
+def _request(method: str, path: str, payload: dict | None = None) -> tuple[int, dict]:
+    url = f"{base_url()}{path}"
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    if _secret():
+        req.add_header("X-COD-Tool-Secret", _secret())
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            body = resp.read().decode("utf-8", "replace")
+            try:
+                return resp.status, json.loads(body)
+            except json.JSONDecodeError:
+                return resp.status, {"raw": body[:500]}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        try:
+            return exc.code, json.loads(body)
+        except json.JSONDecodeError:
+            return exc.code, {"raw": body[:500]}
+    except Exception as exc:  # noqa: BLE001 - unreachable is a status, not a crash
+        return 0, {"error": f"{exc.__class__.__name__}: {exc}"}
+
+
+def health() -> dict[str, Any]:
+    """Is the sidecar up, and is it in live or dry-run mode?
+
+    dispatch_mode is the service's own kill switch and is reported verbatim.
+    A caller should not assume 'reachable' means 'will actually dial'.
+    """
+    status, body = _request("GET", "/health")
+    return {
+        "reachable": status == 200,
+        "http_status": status,
+        "dispatch_mode": body.get("dispatch_mode"),
+        "live": bool(body.get("live")),
+        "livekit_configured": bool(body.get("livekit_agent_configured")),
+        "queue": body.get("queue"),
+        "in_dnd_now": body.get("in_dnd_now"),
+        "error": body.get("error"),
+    }
+
+
+def place_call(phone: str, *, context: dict[str, Any] | None = None,
+               lang: str | None = None, dry_run: bool = False,
+               idempotency_key: str = "", scheduled_at=None) -> CallResult:
+    """Enqueue one outbound call, or explain why not.
+
+    Takes a PHONE, not a lead, and that is the point.
+
+    This adapter used to accept a lead and run a consent check on it before
+    dialling. That looked like defence in depth and was actually a second
+    authority: once founder_call_pipeline owns permission for the qualification
+    call, an adapter that re-checks consent_status would refuse every call the
+    pipeline had just authorised — every lead is UNKNOWN — and the two gates
+    would disagree about the same dial.
+
+    With no lead in scope the adapter cannot form an opinion about permission.
+    It places calls; deciding who may be called belongs to
+    founder_call_pipeline.may_place_ai_call(), exactly as voice_router states
+    for every adapter.
+
+    Returns voice_router.CallResult, the one shape every adapter reports.
+    """
+    phone = (phone or "").strip()
+    if not phone:
+        return CallResult(placed=False, error="no phone on record")
+
+    ok, detail = config_status()
+    if not ok:
+        return CallResult(placed=False, error=detail)
+
+    ctx = dict(context or {})
+    # The service enforces uniqueness on (shop, orderId), so a stable key makes
+    # a retry a no-op instead of a second phone call to the same shopkeeper.
+    # The caller supplies it because only the caller knows what "the same call"
+    # means; this default keeps a bare call from deduping across everything.
+    idem = idempotency_key or f"purity-{digits(phone)}-{date.today():%Y%m%d}"
+
+    # LiveKit SIP participant attributes are strings only — trigger-livekit-call.js
+    # coerces every payload value with String(v). String(["a, b", "c"]) silently
+    # comma-joins the array, which corrupts anything (like CALL_CONSTRAINTS) that
+    # itself contains a comma. JSON-encode list/dict values here so the agent
+    # module on the other side gets back exactly what was sent via JSON.parse.
+    safe_ctx = {
+        k: (json.dumps(v) if isinstance(v, (list, dict)) else v)
+        for k, v in ctx.items()
+    }
+
+    payload = {
+        "profile": profile(),
+        "phone": phone,
+        "lang": (lang or os.getenv("NURAVEDA_LANG", "") or DEFAULT_LANG).strip(),
+        "idempotencyKey": idem,
+        "orderName": f"purity:{ctx.get('company') or 'lead'}"[:80],
+        "payload": {
+            "customer_name": ctx.get("contact") or ctx.get("customer_name") or "",
+            "company": ctx.get("company") or "",
+            "city": ctx.get("city") or "",
+            **safe_ctx,
+        },
+    }
+    if scheduled_at is not None:
+        # Overrides the service's own CALL_DELAY_MS default (~10 min,
+        # DND-rolled). server.js honours this verbatim (new Date(b.scheduledAt))
+        # so an operator-requested immediate test call doesn't sit in queue
+        # for no reason — every other call site leaves this unset.
+        payload["scheduledAt"] = scheduled_at.isoformat()
+
+    if dry_run:
+        return CallResult(placed=False, error="dry run — not dispatched",
+                          raw={"would_post": f"{base_url()}/calls/dispatch",
+                               "payload": payload})
+
+    status, body = _request("POST", "/calls/dispatch", payload)
+
+    # A 2xx without an id is not a queued call. The Bolna adapter learned this
+    # the same way: a provider that answers politely has not necessarily done
+    # anything, and treating "ok" as "dialled" invents outcomes.
+    if 200 <= status < 300 and body.get("id"):
+        return CallResult(placed=True, provider_call_id=str(body["id"]),
+                          error="", raw=body)
+    return CallResult(placed=False,
+                      error=f"dispatch failed: HTTP {status} {body.get('error') or body}"[:200],
+                      raw=body)

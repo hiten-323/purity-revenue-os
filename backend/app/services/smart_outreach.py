@@ -515,13 +515,11 @@ def _negative(history: list[Any]) -> bool:
     """
     Has this contact told us to stop?
 
-    This compared UPPERCASE needles against text _text() had already
-    lowercased, so nothing ever matched and UNSUBSCRIBED did not stop
-    automation — an opt-out was recorded and then ignored. decision_engine
-    honoured the same events correctly, which is precisely the damage two
-    decision authorities do.
+    Ignore administrative CONTACT_STATUS_SET audit rows because live
+    lead.contact_status is checked directly alongside this helper.
     """
-    text = _text(*[(getattr(e, "event_type", ""), getattr(e, "payload", "")) for e in history])
+    relevant = [e for e in history if getattr(e, "event_type", "") != "CONTACT_STATUS_SET"]
+    text = _text(*[(getattr(e, "event_type", ""), getattr(e, "payload", "")) for e in relevant])
     return _mentions(text, *SUPPRESSION_EVENTS)
 
 
@@ -993,7 +991,7 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
     if decision["channel"] == "whatsapp":
         import os
 
-        from app.services.whatsapp_sender import send_whatsapp
+        from app.services.whatsapp_sender import provider as wa_provider, send_whatsapp
 
         if decision["action"] == "SEND_CALL_FOLLOWUP":
             text = _call_followup_text(lead, profile)
@@ -1013,6 +1011,39 @@ def execute_one(db: Session, lead: B2BLead) -> dict:
         refused = whatsapp_refusal(lead, db)
         if refused:
             return {**decision, "status": "BLOCKED", "reason": refused}
+
+        if wa_provider() == "klaviyo":
+            from app.services import whatsapp_drafts
+            existing = next(
+                (k for k, v in whatsapp_drafts.all_drafts().items()
+                 if v.get("lead_id") == lead.id and v.get("status") in ("PENDING", "APPROVED")),
+                None,
+            )
+            if existing:
+                return {**decision, "status": "QUEUED_FOR_PACER",
+                        "reason": f"WhatsApp draft {existing} already queued"}
+            klav_tpl = (os.getenv("WA_AUTO_TEMPLATES", "pb_b2b_fullrange_hinglish").split(",")[0].strip()
+                        or "pb_b2b_fullrange_hinglish")
+            did = whatsapp_drafts.create(lead.id, klav_tpl, {
+                "name": lead.contact_name or "",
+                "company": lead.company or "",
+                "followup_type": "warm_followup",
+                "review_text": text,
+                "flags": [],
+            })
+            _record(
+                db,
+                lead,
+                profile,
+                "whatsapp",
+                decision["action"],
+                "DRAFTED_FOR_PACER",
+                klav_tpl,
+                reason=f"queued draft {did} for Klaviyo pacer",
+            )
+            db.commit()
+            return {**decision, "status": "DRAFTED_FOR_PACER", "draft_id": did}
+
         result = send_whatsapp(lead, text, campaign_name=campaign, db=db)
         _record(
             db,

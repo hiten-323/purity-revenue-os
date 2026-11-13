@@ -141,7 +141,10 @@ class WhatsAppSenderTests(unittest.TestCase):
             self.lead.evidence_sha256 = "ab" * 32
             from unittest.mock import patch
             with patch("app.services.gate1_holds.provider_subscription_allows",
-                       return_value=(True, "SUBSCRIBED")):
+                       return_value=(True, "SUBSCRIBED")), \
+                 patch("app.services.outbound_cohort.whatsapp_refusal", return_value=None), \
+                 patch("app.services.outbound_cohort.before_aisensy", return_value=None), \
+                 patch("app.services.business_hours.is_open", return_value=True):
                 result = ws.send_whatsapp(self.lead, "hello")
             self.assertEqual(result.status, "sent")
             self.assertTrue(result.provider_accepted)

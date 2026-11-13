@@ -344,6 +344,38 @@ async def _route_shopify_event(topic: str, payload: dict):
     """Background handler — connects Shopify live events directly to Sarvam Voice Agents."""
     if topic == "orders/create":
         _log_event("order_created", payload.get("id"), payload.get("total_price"))
+
+        # Stop acquisition follow-up if buyer matches an active B2B lead
+        try:
+            from app.database.database import SessionLocal
+            from app.models.models import B2BLead
+            from app.services.contact_coordinator import handle_purchase_event
+            from app.services.identity import digits_only
+
+            shipping = payload.get("shipping_address") or payload.get("billing_address") or {}
+            raw_phone = shipping.get("phone") or payload.get("phone") or (payload.get("customer") or {}).get("phone") or ""
+            phone_clean = digits_only(raw_phone)[-10:] if raw_phone else ""
+            email = ((payload.get("customer") or {}).get("email") or payload.get("email") or "").strip().lower()
+
+            db_sess = SessionLocal()
+            try:
+                lead = None
+                if phone_clean and len(phone_clean) >= 10:
+                    lead = db_sess.query(B2BLead).filter(B2BLead.phone.like(f"%{phone_clean}")).first()
+                if not lead and email:
+                    lead = db_sess.query(B2BLead).filter(B2BLead.email.ilike(email)).first()
+
+                if lead:
+                    order_num = str(payload.get("name") or payload.get("id"))
+                    order_amt = float(payload.get("total_price") or 0.0)
+                    cancelled = handle_purchase_event(lead.id, order_id=order_num, amount=order_amt, db=db_sess)
+                    db_sess.commit()
+                    _log_event("b2b_order_converted", payload.get("id"), f"lead={lead.id}, cancelled_touches={cancelled}")
+            finally:
+                db_sess.close()
+        except Exception as e:
+            _log.error("Failed to reconcile B2B purchase event for order %s: %s", payload.get("id"), e)
+
         # Check if Cash on Delivery (COD) order
         gateways = [str(g).lower() for g in payload.get("payment_gateway_names", [])]
         is_cod = any("cod" in g or "cash on delivery" in g for g in gateways)
@@ -4599,6 +4631,10 @@ def mark_won(lead_id: int, order_value_inr: float = 0, db: Session = Depends(get
 
     # Calculate default split commission pool
     AgentFundingService.calculate_deal_commission(db, lead_id, value)
+
+    # Cancel pending cold drafts and scheduled callbacks
+    from app.services.contact_coordinator import handle_purchase_event
+    handle_purchase_event(lead.id, order_id=f"B2B-WON-{lead.id}", amount=value, db=db)
 
     track(db, "ORDER_WON", lead_id=lead.id, actor="FOUNDER", channel="founder",
           before_status=before, after_status="ORDER_WON",
@@ -9303,15 +9339,21 @@ def get_lead_timeline(lead_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/b2b/pipeline/enrich")
-def enrich_leads(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def enrich_leads(background_tasks: BackgroundTasks, limit: int = 30, db: Session = Depends(get_db)):
     """
-    Trigger background enrichment for leads missing website or email.
-    Finds company website → extracts email + phone → logs LEAD_ENRICHED event.
+    Trigger background enrichment for leads missing website, email, or un-enriched intelligence.
+    Extracts verified contacts, evaluates coffee demand signals, updates Truth Layer and intent tiers.
     """
     from app.models.models import B2BLead
+    from sqlalchemy import or_
 
-    missing = db.query(B2BLead).filter(
-        (B2BLead.email == None) | (~B2BLead.email.like("%@%"))
+    candidates = db.query(B2BLead).filter(
+        or_(
+            B2BLead.email == None,
+            ~B2BLead.email.like("%@%"),
+            B2BLead.intelligence_status != "ENRICHED",
+            B2BLead.intelligence_status == None,
+        )
     ).count()
 
     def _run():
@@ -9320,17 +9362,25 @@ def enrich_leads(background_tasks: BackgroundTasks, db: Session = Depends(get_db
         _db = SessionLocal()
         try:
             leads = _db.query(B2BLead).filter(
-                (B2BLead.email == None) | (~B2BLead.email.like("%@%"))
-            ).order_by(B2BLead.score.desc()).limit(30).all()
-            enrich_batch(leads, _db)
+                or_(
+                    B2BLead.email == None,
+                    ~B2BLead.email.like("%@%"),
+                    B2BLead.intelligence_status != "ENRICHED",
+                    B2BLead.intelligence_status == None,
+                )
+            ).order_by(
+                B2BLead.coffee_buying_score.desc().nullslast(),
+                B2BLead.id.asc(),
+            ).limit(limit).all()
+            enrich_batch(leads, _db, max_per_run=limit)
         finally:
             _db.close()
 
     background_tasks.add_task(_run)
     return {
-        "message": "Enrichment started in background",
-        "leads_missing_email": missing,
-        "processing": min(30, missing),
+        "message": "High-intent enrichment started in background",
+        "candidates_available": candidates,
+        "processing": min(limit, candidates),
     }
 
 
@@ -9634,6 +9684,10 @@ def mark_won_with_split(lead_id: int, body: MarkWonOverrideRequest, db: Session 
     # Calculate splits
     AgentFundingService.calculate_deal_commission(db, lead_id, value, overrides=body.overrides)
 
+    # Cancel pending cold drafts and scheduled callbacks
+    from app.services.contact_coordinator import handle_purchase_event
+    handle_purchase_event(lead.id, order_id=f"B2B-WON-{lead.id}", amount=value, db=db)
+
     track(db, "ORDER_WON", lead_id=lead.id, actor="FOUNDER", channel="founder",
           before_status=before, after_status="ORDER_WON",
           payload={"order_value_inr": value, "margin_inr": margin,
@@ -9686,6 +9740,7 @@ class TreasurySettingsRequest(BaseModel):
 
 class PaymentVerifiedRequest(BaseModel):
     actual_cash: float
+    payment_reference: str
 
 @router.get("/b2b/agent-funding/treasury")
 def get_treasury(db: Session = Depends(get_db)):
@@ -9695,7 +9750,12 @@ def get_treasury(db: Session = Depends(get_db)):
 @router.post("/b2b/agent-funding/treasury/settings")
 def update_treasury_settings(body: TreasurySettingsRequest, db: Session = Depends(get_db)):
     from app.services.agent_economy import AgentEconomyService
-    AgentEconomyService.update_treasury_settings(db, body.reinvestment_rate, body.reinvestment_enabled, body.bootstrap_mode)
+    if body.reinvestment_enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="Reinvestment is locked until B2B invoice-level selling price, quantity, landed COGS and adjustments are verified.",
+        )
+    AgentEconomyService.update_treasury_settings(db, 0.0, False, body.bootstrap_mode)
     return {"status": "ok", "message": "Treasury settings updated successfully."}
 
 @router.get("/b2b/agent-funding/agents")
@@ -9719,25 +9779,38 @@ def update_proposal_action(proposal_id: int, status: str, db: Session = Depends(
 @router.post("/b2b/leads/{lead_id}/payment-verified")
 def verify_payment(lead_id: int, body: PaymentVerifiedRequest, db: Session = Depends(get_db)):
     from app.services.agent_economy import AgentEconomyService
-    # Transition B2BLead status to PAYMENT_VERIFIED if not already
+    from math import isfinite
+    actual_cash = float(body.actual_cash)
+    payment_reference = (body.payment_reference or "").strip()
+    if not isfinite(actual_cash) or actual_cash <= 0:
+        raise HTTPException(status_code=422, detail="Enter a positive, finite amount actually received.")
+    if len(payment_reference) < 4:
+        raise HTTPException(status_code=422, detail="A bank UTR, transaction ID, or receipt reference is required.")
+    # Transition B2BLead status to PAYMENT_VERIFIED only after validation.
     lead = db.query(B2BLead).filter(B2BLead.id == lead_id).first()
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
     
-    # We write a pipeline tracker track event
-    from app.services.pipeline_tracker import track
+    # Seed before mutating the lead: the seed helper may commit its initial rows.
+    AgentEconomyService.seed_if_empty(db)
     before = lead.status
     lead.status = "PAYMENT_VERIFIED"
     lead.last_updated = datetime.utcnow()
-    
-    res = AgentEconomyService.verify_payment_and_allocate(db, lead_id, body.actual_cash)
+
+    res = AgentEconomyService.verify_payment_and_allocate(
+        db, lead_id, actual_cash, payment_reference, before_status=before
+    )
     if res.get("status") == "error":
+        db.rollback()
         raise HTTPException(status_code=400, detail=res.get("message"))
-        
-    track(db, "PAYMENT_VERIFIED", lead_id=lead.id, actor="FOUNDER", channel="founder",
-          before_status=before, after_status="PAYMENT_VERIFIED",
-          payload={"actual_cash": body.actual_cash})
-    db.commit()
+    from app.services.contact_coordinator import handle_purchase_event
+    cancelled = handle_purchase_event(
+        lead_id=lead.id,
+        order_id=f"B2B-PAY-{payment_reference.strip().upper()}",
+        amount=actual_cash,
+        db=db,
+    )
+    res["cancelled_drafts"] = cancelled
     return res
 
 

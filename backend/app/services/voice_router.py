@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timezone
 from typing import Any
 
 
@@ -149,33 +149,69 @@ def place_call(lead, *, context: dict[str, Any] | None = None,
         return CallResult(placed=False, error="AI_CALLING_ENABLED is not set to 1 — no outbound AI calls")
 
     from app.services import founder_call_pipeline as _pipeline
+    # Final-chokepoint callback invariant: no caller may bypass the stored
+    # earliest contact time, even if it skipped the scheduler/eligibility path.
+    now_utc = _pipeline._utcnow()
+    retry_at = getattr(lead, "ai_retry_after", None)
+    if retry_at is not None:
+        if getattr(retry_at, "tzinfo", None) is not None:
+            retry_at = retry_at.astimezone(timezone.utc).replace(tzinfo=None)
+        if now_utc < retry_at:
+            return CallResult(placed=False, error=(
+                "CALLBACK_NOT_DUE: earliest permitted call time is %sZ" % retry_at.isoformat()
+            ))
+
+    callback_outcome = (getattr(lead, "call_outcome_last", "") or "").upper()
+    callback_stage = (getattr(lead, "outreach_stage", "") or "").upper()
+    callback_requested = (
+        callback_outcome in {"CALLBACK_REQUESTED", "HUMAN_HANDOFF", "MEETING_REQUESTED"}
+        or callback_stage in {"AI_CALLBACK_REQUESTED", "FOUNDER_CALL_REQUESTED"}
+    )
+    if callback_requested:
+        callback_text = (getattr(lead, "founder_callback_window", "") or "").strip()
+        callback_at = _pipeline.parse_callback_datetime(callback_text, now=now_utc) if callback_text else None
+        if callback_at is None:
+            return CallResult(placed=False, error=(
+                "CALLBACK_TIME_UNCONFIRMED: exact callback date/time missing or ambiguous; human clarification required"
+            ))
+        if getattr(callback_at, "tzinfo", None) is not None:
+            callback_at = callback_at.astimezone(timezone.utc).replace(tzinfo=None)
+        if now_utc < callback_at:
+            return CallResult(placed=False, error=(
+                "CALLBACK_NOT_DUE: prospect requested %sZ; early calling is blocked"
+                % callback_at.isoformat()
+            ))
+
     hours_ok, hours_why = _pipeline.call_hours_open(lead=lead)
     if not hours_ok:
         return CallResult(placed=False, error=f"business_hours_closed: {hours_why}")
+
+    # Run the most specific permanent safety holds before the generic
+    # cross-channel suppression check, so logs preserve the true refusal reason.
+    from app.services.call_intelligence.standing_rules import call_blocked as _standing_block
+    _sb = _standing_block(lead)
+    if _sb:
+        return CallResult(placed=False, error=f"DNC_BLOCKED: {_sb}")
+    _dup = _pipeline.duplicate_phone_reason(lead)
+    if _dup:
+        return CallResult(placed=False, error=f"DUPLICATE_PHONE_ROW: {_dup}")
+    _cs = (getattr(lead, "contact_status", "") or "").upper()
+    if _cs in ("OPTED_OUT", "DO_NOT_CONTACT", "SUPPRESSED"):
+        reason = (getattr(lead, "contact_status_reason", None) or f"contact_status={_cs}")
+        return CallResult(placed=False, error=f"DNC_BLOCKED: {reason}")
+    if getattr(lead, "do_not_call", 0) or getattr(lead, "do_not_call", False):
+        dnc_why = getattr(lead, "dnc_reason", None) or "do_not_call flag set"
+        return CallResult(placed=False, error=f"DNC_BLOCKED: {dnc_why}")
+
+    from app.services.contact_coordinator import is_cross_channel_suppressed
+    suppressed, sup_why = is_cross_channel_suppressed(lead, "call", db=db, now=now_utc)
+    if suppressed:
+        return CallResult(placed=False, error=f"SUPPRESSED: {sup_why}")
 
     name = active()
     ok, detail = config_status()
     if not ok:
         return CallResult(placed=False, error=detail)
-
-    # 4 Nov 2026 (Hiten "stop,fix all,resume"): NEVER_DIAL hard block + founder
-    # do-not-call businesses, at the final chokepoint (not only in prepare_dial).
-    from app.services.call_intelligence.standing_rules import call_blocked as _standing_block
-    _sb = _standing_block(lead)
-    if _sb:
-        return CallResult(placed=False, error=f"DNC_BLOCKED: {_sb}")
-    # 4 Nov 2026: duplicate-phone rows are never dialled (only the canonical row).
-    _dup = _pipeline.duplicate_phone_reason(lead)
-    if _dup:
-        return CallResult(placed=False, error=f"DNC_BLOCKED: {_dup}")
-    _cs = (getattr(lead, "contact_status", "") or "").upper()
-    if _cs in ("OPTED_OUT", "DO_NOT_CONTACT", "SUPPRESSED"):
-        return CallResult(placed=False, error=f"DNC_BLOCKED: contact_status={_cs}")
-
-    # Check do_not_call / DNC flags
-    if getattr(lead, "do_not_call", 0) or getattr(lead, "do_not_call", False):
-        dnc_why = getattr(lead, "dnc_reason", None) or "do_not_call flag set"
-        return CallResult(placed=False, error=f"DNC_BLOCKED: {dnc_why}")
 
     phone = (getattr(lead, "phone", "") or "").strip()
     if not phone:
@@ -196,11 +232,12 @@ def place_call(lead, *, context: dict[str, Any] | None = None,
     if _h:
         return CallResult(placed=False, error=_h)
 
-    if not dry_run:
-        from app.services.gate1_holds import evidence_refusal
-        held = evidence_refusal(lead)
-        if held:
-            return CallResult(placed=False, error=held)
+    # Voice calls have a separate CALL_AUTHORIZATION_RECORDED proof path.
+    # evidence_refusal() is the WhatsApp subscription/evidence gate and must
+    # not be applied to voice; doing so wrongly requires WhatsApp opt-in for a
+    # separately authorised call. call_refusal() below checks the exact
+    # destination, SHA-256 evidence, founder approval, allow-list, DNC and
+    # revocation state at this final chokepoint.
 
     ctx = {
         "lead_id": getattr(lead, "id", "") or "",

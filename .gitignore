@@ -10,3 +10,12 @@ recordings/
 backups/
 *.pem
 *.key
+
+# Vrini 2026-11-13: never commit env backups / .bak copies
+.env.*
+!.env.example
+!.env.whatsapp.example
+*.bak
+*.bak.*
+*.bak-*
+*.bak_*

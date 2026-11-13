@@ -1,0 +1,346 @@
+{
+ "b99ba85317": {
+  "lead_id": 2239,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "",
+   "company": "CTC Cost to Cost Supermart"
+  },
+  "status": "SENT",
+  "created_at": "2026-10-29T09:54:39.849228",
+  "approved_by": "Hiten 29 Oct 3:22 PM IST: 'send both through klaviyo now' (relayed by architect)",
+  "approved_at": "2026-10-29T09:54:39.849552",
+  "sent_at": "2026-10-29T09:54:40.244259",
+  "provider_ref": "pb-wa-2239-b99ba85317"
+ },
+ "6b00d582bb": {
+  "lead_id": 550,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "",
+   "company": "Sant's Department Store"
+  },
+  "status": "SENT",
+  "created_at": "2026-10-29T10:40:50.017579",
+  "approved_by": "Hiten 29 Oct 4:08 PM IST: all 4Q (relayed by architect)",
+  "approved_at": "2026-10-29T10:40:50.018008",
+  "sent_at": "2026-10-29T10:41:03.755531",
+  "provider_ref": "pb-wa-550-6b00d582bb"
+ },
+ "5cbd6651d9": {
+  "lead_id": 1043,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "",
+   "company": "Frontier Stores Memi Exclusive",
+   "followup_type": "warm_followup",
+   "class": "INTERESTED",
+   "review_text": "Hi there,\n\nThank you for taking our call about Purity Beans instant coffee for Frontier Stores Memi Exclusive.\n\nWe would be glad to be your backup or second instant coffee brand, alongside what you already stock.\n\nWe supply at factory rates, so there's a strong margin opportunity for you.\n\nOn what you asked:\n- Corporate pricing is 20-30% below retail.\n\nOur catalogue: https://cdn.shopify.com/s/files/1/0712/6315/8459/files/Purity_Beans_Catalogue_2026-10.pdf\n\nWould a short 10-minute call this week suit you? Tell me a time that works.\n\nHiten Jain\nPurity Beans / Pure Pantry Provisions\nAbohar, Punjab\nWebsite: https://p3online.in",
+   "flags": []
+  },
+  "status": "SENT",
+  "created_at": "2026-10-29T11:28:38.019784",
+  "approved_by": "auto (Hiten 29 Oct 3:21 PM)",
+  "approved_at": "2026-10-29T11:38:44.344011",
+  "auto": true,
+  "sent_at": "2026-10-29T11:39:03.624941",
+  "provider_ref": "pb-wa-1043-5cbd6651d9"
+ },
+ "af3f130fcb": {
+  "lead_id": 1,
+  "template_key": "pb_b2b_call_followup",
+  "params": {
+   "name": "",
+   "company": "Sandbox Cafe",
+   "followup_type": "warm_followup",
+   "class": "INTERESTED",
+   "review_text": "Hi there,\n\nThank you for taking our call about Purity Beans instant coffee for Sandbox Cafe.\n\nWe would be glad to be your backup or second instant coffee brand, alongside what you already stock.\n\nWe supply at factory rates, so there's a strong margin opportunity for you.\n\nOur catalogue: https://cdn.shopify.com/s/files/1/0712/6315/8459/files/Purity_Beans_Catalogue_2026-10.pdf\n\nWould a short 10-minute call this week suit you? Tell me a time that works.\n\nHiten Jain\nPurity Beans / Pure Pantry Provisions\nAbohar, Punjab\nWebsite: https://p3online.in",
+   "flags": []
+  },
+  "status": "REJECTED",
+  "created_at": "2026-10-29T12:30:26.189532",
+  "approved_by": "Hiten",
+  "approved_at": "2026-11-09T09:40:18.206721"
+ },
+ "ee092224a4": {
+  "lead_id": 1043,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "",
+   "company": "Frontier Stores Memi Exclusive",
+   "followup_type": "warm_followup",
+   "class": "INTERESTED",
+   "review_text": "Hi there,\n\nThank you for taking our call about Purity Beans instant coffee for Frontier Stores Memi Exclusive.\n\nWe would be glad to be your backup or second instant coffee brand, alongside what you already stock.\n\nWe supply at factory rates, so there's a strong margin opportunity for you.\n\nOur catalogue: https://cdn.shopify.com/s/files/1/0712/6315/8459/files/Purity_Beans_Catalogue_2026-10.pdf\n\nWould a short 10-minute call this week suit you? Tell me a time that works.\n\nHiten Jain\nPurity Beans / Pure Pantry Provisions\nAbohar, Punjab\nWebsite: https://p3online.in",
+   "flags": []
+  },
+  "status": "SENT",
+  "created_at": "2026-10-29T12:34:40.729120",
+  "approved_by": "auto (Hiten 29 Oct 3:21 PM)",
+  "approved_at": "2026-10-29T12:36:48.432571",
+  "auto": true,
+  "sent_at": "2026-10-29T12:42:03.080656",
+  "provider_ref": "pb-wa-1043-ee092224a4"
+ },
+ "d887b5c9b3": {
+  "lead_id": 1795,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "",
+   "company": "Famous general store",
+   "followup_type": "warm_followup",
+   "class": "INTERESTED",
+   "review_text": "Hi there,\n\nThank you for taking our call about Purity Beans instant coffee for Famous general store.\n\nWe would be glad to be your backup or second instant coffee brand, alongside what you already stock.\n\nWe supply at factory rates, so there's a strong margin opportunity for you.\n\nOn what you asked:\n- Retail margins are 20-30%.\n\nOur catalogue: https://cdn.shopify.com/s/files/1/0712/6315/8459/files/Purity_Beans_Catalogue_2026-10.pdf\n\nWould a short 10-minute call this week suit you? Tell me a time that works.\n\nHiten Jain\nPurity Beans / Pure Pantry Provisions\nAbohar, Punjab\nWebsite: https://p3online.in",
+   "flags": []
+  },
+  "status": "SENT",
+  "created_at": "2026-10-30T13:14:27.523246",
+  "approved_by": "auto (Hiten 29 Oct 3:21 PM)",
+  "approved_at": "2026-10-30T13:17:28.217694",
+  "auto": true,
+  "sent_at": "2026-10-31T04:03:03.008161",
+  "provider_ref": "pb-wa-1795-d887b5c9b3"
+ },
+ "51d40f2cd3": {
+  "lead_id": 2255,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "",
+   "company": "Goswamy Agencies",
+   "followup_type": "warm_followup",
+   "class": "INTERESTED",
+   "review_text": "Namaste,\n\nThank you for speaking with us regarding Purity Beans instant coffee for Goswamy Agencies.\n\nWe provide direct factory supply with 25% trade margin + 5% cash discount (30% total commercial margin), full GST invoicing, and 100% pure coffee in glass jars.\n\nOur catalogue: https://cdn.shopify.com/s/files/1/0712/6315/8459/files/Purity_Beans_Catalogue_2026-10.pdf\n\nWarm regards,\nHiten Jain\nFounder | Pure Pantry Provisions / Purity Beans\nWebsite: https://p3online.in",
+   "flags": []
+  },
+  "status": "SENT",
+  "created_at": "2026-11-01T07:11:30.336840",
+  "approved_by": "Hiten 01 Nov 12:45 PM IST (Relayed via AI pair)",
+  "approved_at": "2026-11-01T07:11:30.337645",
+  "sent_at": "2026-11-02T11:09:03.357230",
+  "provider_ref": "pb-wa-2255-51d40f2cd3"
+ },
+ "760a029c83": {
+  "lead_id": 2259,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "Amit ji",
+   "company": "Modern Food Products",
+   "followup_type": "warm_followup",
+   "class": "INTERESTED",
+   "review_text": "Namaste Amit ji,\n\nThank you for speaking with us regarding Purity Beans instant coffee for Modern Food Products.\n\nWe provide direct factory supply with 25% trade margin + 5% cash discount (30% total commercial margin), full GST invoicing, and pure coffee in glass jars.\n\nOur catalogue: https://cdn.shopify.com/s/files/1/0712/6315/8459/files/Purity_Beans_Catalogue_2026-10.pdf\n\nWarm regards,\nHiten Jain\nFounder | Pure Pantry Provisions / Purity Beans\nWebsite: https://p3online.in",
+   "flags": []
+  },
+  "status": "SENT",
+  "created_at": "2026-11-01T07:11:30.338032",
+  "approved_by": "Hiten 01 Nov 12:45 PM IST (Relayed via AI pair)",
+  "approved_at": "2026-11-01T07:11:30.338374",
+  "sent_at": "2026-11-02T11:21:03.401337",
+  "provider_ref": "pb-wa-2259-760a029c83"
+ },
+ "54a042574d": {
+  "lead_id": 2289,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "Saurav",
+   "company": "I G Sales Agencies",
+   "followup_type": "warm_followup",
+   "class": "INTERESTED",
+   "review_text": "Namaste Saurav ji,\n\nThank you for speaking with us regarding Purity Beans instant coffee for I G Sales Agencies.\n\nWe provide direct factory supply with 25% trade margin + 5% cash discount (30% total commercial margin), full GST invoicing, and pure coffee in glass jars.\n\nOur catalogue: https://cdn.shopify.com/s/files/1/0712/6315/8459/files/Purity_Beans_Catalogue_2026-10.pdf\n\nWarm regards,\nHiten Jain\nFounder | Pure Pantry Provisions / Purity Beans\nWebsite: https://p3online.in",
+   "flags": []
+  },
+  "status": "SENT",
+  "created_at": "2026-11-01T07:11:30.338793",
+  "approved_by": "Hiten 01 Nov 12:45 PM IST (Relayed via AI pair)",
+  "approved_at": "2026-11-01T07:11:30.339267",
+  "sent_at": "2026-11-02T11:27:03.182113",
+  "provider_ref": "pb-wa-2289-54a042574d"
+ },
+ "bda1eadd16": {
+  "lead_id": 1840,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "JP",
+   "company": "R R Associates",
+   "followup_type": "warm_followup",
+   "class": "INTERESTED",
+   "review_text": "Namaste JP ji,\n\nThank you for speaking with us regarding Purity Beans instant coffee for R R Associates.\n\nWe provide direct factory supply with 25% trade margin + 5% cash discount (30% total commercial margin), full GST invoicing, and 100% pure coffee in premium glass jars.\n\nFor new retail partners, we offer a trial carton of 12 jars at direct factory rates to test customer response.\n\nOur catalogue: https://cdn.shopify.com/s/files/1/0712/6315/8459/files/Purity_Beans_Catalogue_2026-10.pdf\n\nWarm regards,\nHiten Jain\nFounder | Pure Pantry Provisions / Purity Beans\nWebsite: https://p3online.in",
+   "flags": []
+  },
+  "status": "SENT",
+  "created_at": "2026-11-02T11:35:45.150379",
+  "approved_by": "Hiten 02 Nov 5:05 PM IST (Relayed via AI pair)",
+  "approved_at": "2026-11-02T11:36:45.395005",
+  "sent_at": "2026-11-02T12:55:53.761132",
+  "provider_ref": "pb-wa-1840-bda1eadd16"
+ },
+ "fd68dfe2ee": {
+  "lead_id": 2286,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "Sanjay",
+   "company": "Granate Exporters",
+   "followup_type": "warm_followup",
+   "class": "INTERESTED",
+   "review_text": "Namaste Sanjay ji,\n\nThank you for speaking with us regarding Purity Beans instant coffee for Granate Exporters.\n\nWe provide direct factory supply with 25% trade margin + 5% cash discount (30% total commercial margin), full GST invoicing, and 100% pure coffee in premium glass jars.\n\nFor new retail partners, we offer a trial carton of 12 jars at direct factory rates to test customer response.\n\nOur catalogue: https://cdn.shopify.com/s/files/1/0712/6315/8459/files/Purity_Beans_Catalogue_2026-10.pdf\n\nWarm regards,\nHiten Jain\nFounder | Pure Pantry Provisions / Purity Beans\nWebsite: https://p3online.in",
+   "flags": []
+  },
+  "status": "SENT",
+  "created_at": "2026-11-02T11:36:45.396358",
+  "approved_by": "auto (Hiten 29 Oct 3:21 PM)",
+  "approved_at": "2026-11-02T12:03:25.324983",
+  "reason": "Held by founder: confirm delivery of earlier sends first",
+  "auto": true,
+  "sent_at": "2026-11-02T12:55:53.028985",
+  "provider_ref": "pb-wa-2286-fd68dfe2ee"
+ },
+ "53fac4cbd5": {
+  "lead_id": 1840,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "JP",
+   "company": "R R Associates",
+   "followup_type": "catalogue_request",
+   "class": "INTERESTED",
+   "review_text": "Namaste JP ji,\n\nThank you for speaking with us regarding Purity Beans pure coffee for R R Associates.\n\nWe provide direct factory supply with 25% trade margin + 5% cash discount (30% total commercial margin), full GST invoicing, and pure coffee in certified food-grade glass jars.\n\nFor retail and distributor partners, we offer a starter carton of 12 glass jars at direct factory rates.\n\nOur catalogue: https://cdn.shopify.com/s/files/1/0712/6315/8459/files/Purity_Beans_Catalogue_2026-10.pdf\n\nWarm regards,\nHiten Jain\nFounder, Purity Beans | p3online.in\nWhatsApp: +91 90849 58495",
+   "flags": []
+  },
+  "status": "SENT",
+  "created_at": "2026-11-03T07:50:37.396598",
+  "approved_by": "Hiten 03 Nov (Relayed via AI pair)",
+  "approved_at": "2026-11-03T07:50:37.396624",
+  "sent_at": "2026-11-03T07:50:38.230475",
+  "provider_ref": "pb-wa-1840-53fac4cbd5"
+ },
+ "899ea646d7": {
+  "lead_id": 2255,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "Rajesh ji",
+   "company": "Goswamy Agencies"
+  },
+  "status": "SENT",
+  "created_at": "2026-11-07T12:44:48.386985",
+  "approved_by": "Hiten (Option B Live WhatsApp Follow-Up)",
+  "approved_at": "2026-11-07T12:44:48.388232",
+  "sent_at": "2026-11-07T12:48:41.344907",
+  "provider_ref": "pb-wa-2255-899ea646d7"
+ },
+ "df67d3b368": {
+  "lead_id": 2259,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "Amit ji",
+   "company": "Modern Food Products"
+  },
+  "status": "SENT",
+  "created_at": "2026-11-07T12:44:48.388761",
+  "approved_by": "Hiten (Option B Live WhatsApp Follow-Up)",
+  "approved_at": "2026-11-07T12:44:48.389261",
+  "sent_at": "2026-11-07T13:03:03.267715",
+  "provider_ref": "pb-wa-2259-df67d3b368"
+ },
+ "3ffad2a0fb": {
+  "lead_id": 2289,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "Saurav ji",
+   "company": "I G Sales Agencies"
+  },
+  "status": "SENT",
+  "created_at": "2026-11-07T12:44:48.389776",
+  "approved_by": "Hiten (Option B Live WhatsApp Follow-Up)",
+  "approved_at": "2026-11-07T12:44:48.390469",
+  "sent_at": "2026-11-07T13:15:03.010347",
+  "provider_ref": "pb-wa-2289-3ffad2a0fb"
+ },
+ "5b19745fb5": {
+  "lead_id": 550,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "",
+   "company": "Sant's Department Store",
+   "followup_type": "warm_followup",
+   "class": "INTERESTED",
+   "review_text": "Hi there,\n\nThank you for taking our call about Purity Beans instant coffee for Sant's Department Store.\n\nWe would be glad to be your backup or second instant coffee brand, alongside what you already stock.\n\nWe supply at factory rates, so there's a strong margin opportunity for you.\n\nOur catalogue: https://cdn.shopify.com/s/files/1/0712/6315/8459/files/Purity_Beans_Catalogue_2026-10.pdf\n\nWould a short 10-minute call this week suit you? Tell me a time that works.\n\nHiten Jain\nPurity Beans / Pure Pantry Provisions\nIndia\nWebsite: https://p3online.in",
+   "flags": []
+  },
+  "status": "SENT",
+  "created_at": "2026-11-09T06:58:04.727371",
+  "approved_by": "auto (Hiten 29 Oct 3:21 PM)",
+  "approved_at": "2026-11-09T06:59:09.244324",
+  "auto": true,
+  "sent_at": "2026-11-09T07:00:03.888771",
+  "provider_ref": "pb-wa-550-5b19745fb5"
+ },
+ "50c0b252d1": {
+  "lead_id": 550,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "",
+   "company": "Sant's Department Store",
+   "followup_type": "warm_followup",
+   "review_text": "Hi there, Hiten here from Pure Pantry Provisions \u2014 following up on our call. As discussed, here's a bit more on Purity Beans for Sant's Department Store: pure coffee with no chicory in our pure range (Purica, Purista, Prima), clean label, certified food-grade glass jars, FSSAI licensed, PAN-India dispatch. Happy to send the catalogue or set up a quick call with the founder \u2014 just let me know which.",
+   "flags": []
+  },
+  "status": "SENT",
+  "created_at": "2026-11-12T06:01:41.277999",
+  "approved_by": "auto (Hiten 29 Oct 3:21 PM)",
+  "approved_at": "2026-11-12T06:01:43.791609",
+  "auto": true,
+  "sent_at": "2026-11-12T06:02:17.064923",
+  "provider_ref": "pb-wa-550-50c0b252d1"
+ },
+ "da77d71f08": {
+  "lead_id": 2289,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "Saurav Gupta",
+   "company": "I G Sales Agencies",
+   "followup_type": "warm_followup",
+   "review_text": "Hi Saurav, Hiten here from Pure Pantry Provisions \u2014 following up on our call. As discussed, here's a bit more on Purity Beans for I G Sales Agencies: pure coffee with no chicory in our pure range (Purica, Purista, Prima), clean label, certified food-grade glass jars, FSSAI licensed, PAN-India dispatch. Happy to send the catalogue or set up a quick call with the founder \u2014 just let me know which.",
+   "flags": []
+  },
+  "status": "SENT",
+  "created_at": "2026-11-12T06:01:41.370143",
+  "approved_by": "auto (Hiten 29 Oct 3:21 PM)",
+  "approved_at": "2026-11-12T06:01:43.795931",
+  "auto": true,
+  "sent_at": "2026-11-12T06:10:03.815510",
+  "provider_ref": "pb-wa-2289-da77d71f08"
+ },
+ "50a5c0bf0e": {
+  "lead_id": 2259,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "Amit Saxena",
+   "company": "Modern Food Products",
+   "followup_type": "warm_followup",
+   "review_text": "Hi Amit, Hiten here from Pure Pantry Provisions \u2014 following up on our call. As discussed, here's a bit more on Purity Beans for Modern Food Products: pure coffee with no chicory in our pure range (Purica, Purista, Prima), clean label, certified food-grade glass jars, FSSAI licensed, PAN-India dispatch. Happy to send the catalogue or set up a quick call with the founder \u2014 just let me know which.",
+   "flags": []
+  },
+  "status": "SENT",
+  "created_at": "2026-11-12T06:01:41.400118",
+  "approved_by": "auto (Hiten 29 Oct 3:21 PM)",
+  "approved_at": "2026-11-12T06:01:43.799402",
+  "auto": true,
+  "sent_at": "2026-11-12T06:20:02.963772",
+  "provider_ref": "pb-wa-2259-50a5c0bf0e"
+ },
+ "beac39492c": {
+  "lead_id": 2255,
+  "template_key": "pb_b2b_fullrange_hinglish",
+  "params": {
+   "name": "Rajesh Goswami",
+   "company": "Goswamy Agencies",
+   "followup_type": "warm_followup",
+   "review_text": "Hi Rajesh, Hiten here from Pure Pantry Provisions \u2014 following up on our call. As discussed, here's a bit more on Purity Beans for Goswamy Agencies: pure coffee with no chicory in our pure range (Purica, Purista, Prima), clean label, certified food-grade glass jars, FSSAI licensed, PAN-India dispatch. Happy to send the catalogue or set up a quick call with the founder \u2014 just let me know which.",
+   "flags": []
+  },
+  "status": "SENT",
+  "created_at": "2026-11-12T06:01:41.427072",
+  "approved_by": "auto (Hiten 29 Oct 3:21 PM)",
+  "approved_at": "2026-11-12T06:01:43.802781",
+  "auto": true,
+  "sent_at": "2026-11-12T06:30:03.142643",
+  "provider_ref": "pb-wa-2255-beac39492c"
+ }
+}

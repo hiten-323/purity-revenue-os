@@ -81,6 +81,7 @@ def test_the_dial_reaches_the_adapter(monkeypatch):
 
     monkeypatch.setattr("app.services.gate1_holds.provider_subscription_allows",
                         lambda phone: (True, "SUBSCRIBED"))
+    monkeypatch.setattr("app.services.outbound_cohort.call_refusal", lambda lead, db=None: None)
     result = vr.place_call(Lead(
         consent_status="EXPLICIT", consent_phone="+91-98765-43210",
         evidence_sha256="ab" * 32))
@@ -107,6 +108,7 @@ def test_router_passes_the_key_through(monkeypatch):
 
     monkeypatch.setattr("app.services.gate1_holds.provider_subscription_allows",
                         lambda phone: (True, "SUBSCRIBED"))
+    monkeypatch.setattr("app.services.outbound_cohort.call_refusal", lambda lead, db=None: None)
     lead = Lead(id=42, consent_status="EXPLICIT", consent_phone="+91-98765-43210",
                 evidence_sha256="ab" * 32)
     vr.place_call(lead)

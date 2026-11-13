@@ -193,7 +193,7 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
     _to = (email.to_email or "").strip().lower()
     _is_self = _to == sender_email.lower()
 
-    # Gate -1 (3 Nov): email-only on/off switch, EMAIL_SENDING_ENABLED (default 1).
+    # Gate -1: email-only on/off switch, EMAIL_SENDING_ENABLED (default OFF / fail closed).
     # Off = every prospect email is HELD (retry later); founder self-previews exempt.
     if not _is_self:
         try:
@@ -238,15 +238,7 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
             email.status = "failed"
             email.error = f"BLOCKED: wording gate - {_wwhy} - not sent"
             return email
-        # Email window ends 19:00 IST (Hiten), tighter than the shared gate.
-        try:
-            from datetime import datetime as _dtw
-            from app.services.business_hours import IST as _ISTw
-            _n = _dtw.now(_ISTw)
-            if (_n.hour, _n.minute) >= (19, 0) or (_n.hour, _n.minute) < (9, 30):
-                return _gate_failure(email, "outside email hours (Asia/Kolkata 09:30-19:00 Mon-Sat)")
-        except Exception as _exc:
-            return _gate_failure(email, "email hours check unavailable; email not sent", _exc)
+
 
     # All prospect sends are hard-held outside India business hours. Founder
     # previews/verification mail to the sender's own inbox are exempt.
@@ -254,7 +246,7 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
         try:
             from app.services.business_hours import is_open
             if not is_open():
-                return _gate_failure(email, "outside outreach business hours (Asia/Kolkata 09:30-18:30 Mon-Sat)")
+                return _gate_failure(email, "outside outreach business hours (Asia/Kolkata 09:30-19:30 Mon-Sat)")
             # Email-only Sunday block (Hiten 26 Oct): calls/WhatsApp keep OUTREACH_ALLOW_SUNDAY.
             from datetime import datetime as _dt
             from app.services.business_hours import IST as _IST
@@ -343,8 +335,12 @@ def send_email(email: OutreachEmail) -> OutreachEmail:
                         email.status = "failed"
                         email.error = f"BLOCKED: {email.to_email} — {_why}"
                         return email
-                    from app.services.gate1_holds import evidence_refusal
-                    _held = evidence_refusal(_lead, _db)
+                    from app.services.outbound_cohort import _cold_outreach_enabled, email_refusal
+                    if _cold_outreach_enabled():
+                        _held = email_refusal(email, _db)
+                    else:
+                        from app.services.gate1_holds import evidence_refusal
+                        _held = evidence_refusal(_lead, _db)
                     if _held:
                         email.status = "failed"
                         email.error = f"BLOCKED: {_held}"

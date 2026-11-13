@@ -1,0 +1,8 @@
+assistant: Namaste Sanjay ji, main Purity Beans ki AI assistant hoon. Hum glass jar mein instant coffee banate hain. Bas 20 second - kya aap instant coffee rakhte ya bechte hain?
+user: हाँ जी।
+user: हम इंस्टेंट कॉफी बेचते हैं।
+assistant: Achha ji. Kya aap abhi koi instant coffee brand
+assistant: ठीक है जी। अभी आप कौन सा instant coffee brand distribute या stock करते हैं?
+user: S Cafe
+assistant: समझ गई। हमारी glass jar वाली clean instant coffee है, और distributors को 30% margin मिलता है। क्या backup brand test करना चाहेंगे?
+user: मुझे इसी नंबर पर व्हाट्सएप कर सकते हैं आपकी डिटेल्स?

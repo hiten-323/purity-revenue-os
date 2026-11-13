@@ -263,9 +263,11 @@ MEANINGFUL_OUTCOMES = frozenset(
 # ----------------------------------------------------------- invariants ----
 
 MAX_AI_CALL_ATTEMPTS_PER_LEAD = 3
+# No-answer retries remain open; the ceiling is a rolling cooling window, not a lifetime terminal limit.
+AI_CALL_ATTEMPT_WINDOW_DAYS = 30
 MAX_AI_COLD_CALLS_PER_LEAD = MAX_AI_CALL_ATTEMPTS_PER_LEAD
 MAX_AI_CALLS_PER_DAY = 10**9
-AI_CALL_RETRY_COOLDOWN_HOURS = 20                       # Daily retry: 20 hours cooldown to retry next calendar day
+AI_CALL_RETRY_COOLDOWN_HOURS = 168                      # Standard no-answer retry: 7-day cooldown
 MAX_AGENT_RESPONSE_WORDS = 15
 VOICE_CONVERSATION_RULES = (
     "Speak at an everyday pace with warm, respectful Hindi.",
@@ -520,7 +522,7 @@ CALL_CONSTRAINTS = (
     "(25% trade discount + 5% cash discount); only if they push back on margin "
     "may you offer up to 35% maximum (25% trade discount + up to 10% cash "
     "discount, framed as the extra cash discount for cash/advance payment); "
-    "Never above 35%. Supermarkets and retail stores - say a 30% margin "
+    "Never above 35% (only if this business is a distributor or wholesaler, never to supermarkets, retail or any other category). Supermarkets, retail stores and grocery - say a 30% margin "
     "(25% trade discount + 5% cash discount). Corporate buyers - say \"up to 30% off\". HoReCa (hotels, "
     "restaurants, cafes, caterers) - say \"up to 30% off\". Never "
     "any other figure; every other category never hears a margin figure.",
@@ -699,13 +701,10 @@ def parse_callback_datetime(val: Any, now: datetime | None = None) -> datetime |
     for fmt in (
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
-        "%Y-%m-%d",
         "%d-%m-%Y %H:%M:%S",
         "%d-%m-%Y %H:%M",
-        "%d-%m-%Y",
         "%d/%m/%Y %H:%M:%S",
         "%d/%m/%Y %H:%M",
-        "%d/%m/%Y",
     ):
         try:
             dt = datetime.strptime(s, fmt)
@@ -738,15 +737,36 @@ def parse_callback_datetime(val: Any, now: datetime | None = None) -> datetime |
     m_rel_day = re.search(r"(\d+)(?:\s*(?:-|to|se|ya|or)\s*(\d+))?\s*(?:day|days|din|dino|dinon|dino\b)", low)
     m_rel_wk = re.search(r"(\d+)?\s*(?:week|weeks|hafte|hafta|haftay)", low)
     if m_rel_day or m_rel_wk:
+        day_match = m_rel_day or m_rel_wk
         if m_rel_day:
             n_days = int(m_rel_day.group(2) or m_rel_day.group(1))
         else:
             n_days = 7 * int(m_rel_wk.group(1) or 1)
         n_days = max(1, min(n_days, 60))
-        _pm = any(k in low for k in ("shaam", "evening", "raat", "night", "dophar", "afternoon", "pm"))
+        # Remove the duration token before looking for the clock time so the
+        # "3" in "in 3 days" cannot be mistaken for 3:00.
+        remainder = (low[:day_match.start()] + " " + low[day_match.end():]).strip()
+        m_clock = re.search(r"(?:\b(?:at|around|by)\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|baje|o'?clock|hours?)?", remainder)
+        if not m_clock:
+            return None
+        hour = int(m_clock.group(1))
+        minute = int(m_clock.group(2) or 0)
+        suffix = (m_clock.group(3) or "").lower()
+        has_marker = bool(suffix or ":" in m_clock.group(0) or re.search(r"\b(?:at|around|by)\s*\d", remainder))
+        if not has_marker:
+            return None
+        if suffix == "pm" and hour < 12:
+            hour += 12
+        elif suffix == "am" and hour == 12:
+            hour = 0
+        elif suffix in {"baje", "o'clock", "oclock", "hour", "hours"} and hour <= 12:
+            if any(k in remainder for k in ("shaam", "evening", "raat", "night", "dophar", "afternoon")) and hour < 12:
+                hour += 12
+        if hour > 23 or minute > 59:
+            return None
         target_day = (now_ist + timedelta(days=n_days)).date()
         target_ist = datetime(target_day.year, target_day.month, target_day.day,
-                              17 if _pm else 11, 0, tzinfo=_IST())
+                              hour, minute, tzinfo=_IST())
         return target_ist.astimezone(timezone.utc).replace(tzinfo=None)
 
     # 5. Day offsets: 'kal' / 'tomorrow' -> +1, 'parso' -> +2, weekday names -> next weekday
@@ -779,6 +799,15 @@ def parse_callback_datetime(val: Any, now: datetime | None = None) -> datetime |
     # Match time expressions: e.g. '7 baje', '7:30 baje', '7 pm', '7:00 pm', 'at 8', '19:00'
     m_time = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(?:baje|o\'clock|pm|am|hours)?", low)
     if m_time:
+        token = m_time.group(0).strip()
+        has_clock_marker = bool(
+            ":" in token
+            or re.search(r"\b(?:am|pm|baje|o'?clock|hours?)\b", token)
+            or re.search(r"\\b(?:at|around|by)\\s*\\d", low)
+            or is_am_hint or is_pm_hint
+        )
+        if not has_clock_marker:
+            return None
         hour_s, min_s = m_time.groups()
         hour = int(hour_s)
         minute = int(min_s) if min_s else 0
@@ -800,12 +829,9 @@ def parse_callback_datetime(val: Any, now: datetime | None = None) -> datetime |
         return target_ist.astimezone(timezone.utc).replace(tzinfo=None)
 
     elif day_matched:
-        # Day was specified without a specific time (e.g. 'Monday ko call karna', 'kal call karna')
-        # Default to 11:00 AM (or 5:00 PM if evening hint)
-        hour = 17 if is_pm_hint else 11
-        target_day = (now_ist + timedelta(days=day_offset)).date()
-        target_ist = datetime(target_day.year, target_day.month, target_day.day, hour, 0, tzinfo=_IST())
-        return target_ist.astimezone(timezone.utc).replace(tzinfo=None)
+        # A day or broad period without an exact clock time is a clarification
+        # task, not permission to invent an 11:00/17:00 callback.
+        return None
 
     return None
 
@@ -855,6 +881,86 @@ def predial_block(phone) -> str | None:
     if e164[3:7] in DEAD_NUMBER_SERIES:
         return "DEAD_SERIES"
     return None
+
+
+def recent_ai_attempt_count(lead, now: datetime | None = None, db=None) -> tuple[int, datetime | None]:
+    """Count actual AI dial attempts in the rolling 30-day window.
+
+    The structured call_results table is the authoritative one-row-per-provider-
+    attempt ledger. Older installations may have only call_history rows; those
+    are used as a fallback and timestamps within five minutes are coalesced
+    because dispatch and outcome callbacks can create separate history rows
+    for the same dial. A recent lead-level last_call_date is the final
+    conservative fallback, never a lifetime counter.
+    """
+    now = now or _utcnow()
+    cutoff = now - timedelta(days=AI_CALL_ATTEMPT_WINDOW_DAYS)
+    last = getattr(lead, "last_call_date", None)
+    try:
+        from sqlalchemy.orm import object_session
+        session = db or object_session(lead)
+        if session is None:
+            if last is not None and last >= cutoff:
+                return 1, last
+            if last is None and int(getattr(lead, "ai_call_count", 0) or 0) >= MAX_AI_CALL_ATTEMPTS_PER_LEAD:
+                return MAX_AI_CALL_ATTEMPTS_PER_LEAD, None
+            return 0, last
+
+        result_dates = []
+        try:
+            from app.services.call_intelligence.models import CallResult, ensure_for_session
+            if not ensure_for_session(session):
+                raise RuntimeError("call_results ledger unavailable")
+            from app.services.call_intelligence.taxonomy import NEVER_RANG_TERMINATIONS
+            result_rows = session.query(
+                CallResult.started_at, CallResult.outcome,
+                CallResult.termination_reason, CallResult.status,
+            ).filter(
+                CallResult.lead_id == getattr(lead, "id", None),
+                CallResult.started_at.isnot(None),
+                CallResult.started_at >= cutoff,
+            ).order_by(CallResult.started_at.asc()).all()
+            result_dates = [
+                row[0] for row in result_rows
+                if row[0] is not None
+                and str(row[1] or "").upper() != "DISPATCH_FAILED"
+                and str(row[2] or "").upper() not in NEVER_RANG_TERMINATIONS
+                and str(row[3] or "").upper() != "DISPATCH_FAILED"
+            ]
+        except Exception:
+            result_dates = []
+
+        if result_dates:
+            dates = list(result_dates)
+            if last is not None and last >= cutoff and not any(
+                abs((last - dt).total_seconds()) <= 300 for dt in dates
+            ):
+                dates.append(last)
+            return len(dates), max(dates)
+
+        # Legacy fallback only when no structured call-result row exists.
+        from app.models.models import CallHistory
+        legacy_dates = [
+            row[0] for row in session.query(CallHistory.call_date).filter(
+                CallHistory.lead_id == getattr(lead, "id", None),
+                CallHistory.status.like("AI_%"),
+                CallHistory.call_date.isnot(None),
+                CallHistory.call_date >= cutoff,
+            ).order_by(CallHistory.call_date.asc()).all()
+            if row and row[0] is not None
+        ]
+        unique_dates = []
+        for dt in legacy_dates:
+            if not unique_dates or (dt - unique_dates[-1]).total_seconds() > 300:
+                unique_dates.append(dt)
+        if last is not None and last >= cutoff and not any(
+            abs((last - dt).total_seconds()) <= 300 for dt in unique_dates
+        ):
+            unique_dates.append(last)
+        return len(unique_dates), max(unique_dates) if unique_dates else last
+    except Exception:
+        # Eligibility must fail closed when the attempt ledger cannot be read.
+        return MAX_AI_CALL_ATTEMPTS_PER_LEAD, last
 
 
 def may_place_ai_call(lead) -> tuple[bool, str]:
@@ -921,6 +1027,11 @@ def may_place_ai_call(lead) -> tuple[bool, str]:
     if locked and locked > datetime.utcnow():
         return False, "lead_locked"
 
+    from app.services.contact_coordinator import is_cross_channel_suppressed
+    suppressed, sup_why = is_cross_channel_suppressed(lead, "call")
+    if suppressed:
+        return False, sup_why
+
     stage = stage_of(lead)
     attempts = getattr(lead, "ai_call_count", 0) or 0
     last_call = getattr(lead, "last_call_date", None)
@@ -941,9 +1052,6 @@ def may_place_ai_call(lead) -> tuple[bool, str]:
     if is_explicit_callback(lead):
         # Explicit requested callback overrides standard cooldown and calendar-day check
         # once the requested datetime has arrived.
-        if attempts >= MAX_AI_CALL_ATTEMPTS_PER_LEAD:
-            return False, ("ai_call_count is already %d; no retry beyond %d attempts per lead"
-                           % (attempts, MAX_AI_CALL_ATTEMPTS_PER_LEAD))
         if scheduled and now < scheduled:
             return False, ("retry_scheduled: earliest window is %sZ; pass it before another attempt"
                            % scheduled)
@@ -956,9 +1064,10 @@ def may_place_ai_call(lead) -> tuple[bool, str]:
         # a recorded last_call_date is an inconsistency, not permission to call
         # again; the old 14-day cooldown is superseded by the retry path below.
         if stage == ELIGIBLE:
-            if attempts >= MAX_AI_CALL_ATTEMPTS_PER_LEAD:
-                return False, ("ai_call_count is already %d; limit is %d"
-                               % (attempts, MAX_AI_CALL_ATTEMPTS_PER_LEAD))
+            recent_count, recent_latest = recent_ai_attempt_count(lead, now=now)
+            if recent_count >= MAX_AI_CALL_ATTEMPTS_PER_LEAD:
+                return False, ("rolling retry cooling: %d AI attempts in %d days; latest=%s"
+                               % (recent_count, AI_CALL_ATTEMPT_WINDOW_DAYS, recent_latest))
             if last_call:
                 return False, ("inconsistent state: still ELIGIBLE but last_call_date=%s "
                                "recorded — resolve the lead before dialling again"
@@ -967,11 +1076,14 @@ def may_place_ai_call(lead) -> tuple[bool, str]:
         # Retry (AI_NO_ANSWER). Bounded by the same attempt budget as a first
         # call, plus the cooldown, the scheduled window and the calendar-day rule.
         if stage == AI_NO_ANSWER:
-            if attempts >= MAX_AI_CALL_ATTEMPTS_PER_LEAD:
-                return False, ("ai_call_count is already %d; no retry beyond %d "
-                               "attempts per lead"
-                               % (attempts, MAX_AI_CALL_ATTEMPTS_PER_LEAD))
-            # Standard retry: 3 days (72h) cooldown + different calendar day + scheduled window
+            recent_count, recent_latest = recent_ai_attempt_count(lead, now=now)
+            if recent_count >= MAX_AI_CALL_ATTEMPTS_PER_LEAD:
+                return False, ("rolling retry cooling: %d AI attempts in %d days; "
+                               "next review after %s"
+                               % (recent_count, AI_CALL_ATTEMPT_WINDOW_DAYS,
+                                  (recent_latest + timedelta(days=AI_CALL_ATTEMPT_WINDOW_DAYS)).isoformat()
+                                  if recent_latest else "ledger recovery"))
+            # Standard retry: 7-day cooldown + different calendar day + scheduled window
             if last_call and now < last_call + timedelta(hours=AI_CALL_RETRY_COOLDOWN_HOURS):
                 return False, ("retry cooldown_active: last call %s; earliest retry "
                                "is >= %d hours out (%sZ)"
@@ -1342,7 +1454,7 @@ def mark_ai_call_dispatched(lead, db) -> None:
              "attempt %d dispatched" % lead.ai_call_count, lead=lead)
 
 
-def release_ai_call_attempt(db, lead) -> None:
+def release_ai_call_attempt(db, lead, reason: str = "") -> None:
     """The provider refused BEFORE any PSTN attempt. Delete the reservation
     so the slot is not consumed by a call that never rang; the attempt count
     on the lead is untouched because mark_ai_call_dispatched never ran.
@@ -1361,8 +1473,9 @@ def release_ai_call_attempt(db, lead) -> None:
     for row in rows:
         db.delete(row)
     from app.observability import decision
+    detail = (": " + str(reason).replace("\\n", " ")[:180]) if reason else ""
     decision("ai_call.attempt", "RELEASED",
-             "provider refused before dispatch; reservation returned", lead=lead)
+             "provider refused before dispatch; reservation returned" + detail, lead=lead)
 
 
 # ------------------------------------------------------------ transitions --
@@ -1628,7 +1741,15 @@ def record_ai_outcome(lead, db, outcome: str, *, summary: str = "",
     # real exchange and is treated as final rather than scheduled — the SAME
     # classifier the dial gate consults, so record and gate cannot drift.
     from app.observability import ALLOWED, decision
-    if key in RETRYABLE_OUTCOMES:
+    parsed_callback = parse_callback_datetime(callback_window) if callback_window else None
+    if key in {"CALLBACK_REQUESTED", "HUMAN_HANDOFF", "MEETING_REQUESTED"} and parsed_callback is None:
+        lead.founder_callback_window = callback_window.strip()[:120] if callback_window else None
+        lead.ai_retry_after = None
+        lead.callback_retry_count = 0
+        decision("ai_call.callback_needs_clarification", "HUMAN_REVIEW",
+                 "callback requested without an exact parseable date and time; automated calling held",
+                 lead=lead)
+    elif key in RETRYABLE_OUTCOMES:
         if classify_meaningful_conversation(key, transcript=transcript):
             lead.ai_retry_after = None
             lead.callback_retry_count = 0

@@ -176,8 +176,13 @@ def sync_lead(lead: dict, *, session=None, sleep=time.sleep, lists=None,
                      session=session, sleep=sleep)
             res["steps"].append("wa_consent")
         except Exception as e:  # consent may be refused (e.g. WA not set up); still list them
-            log.warning("klaviyo_sync lead %s consent failed: %s", lid, str(e)[:200])
-            res["steps"].append("wa_consent_failed")
+            err_msg = str(e).lower()
+            if "after current subscription date" in err_msg or "already subscribed" in err_msg:
+                log.info("klaviyo_sync lead %s already subscribed to WA marketing", lid)
+                res["steps"].append("wa_already_subscribed")
+            else:
+                log.warning("klaviyo_sync lead %s consent failed: %s", lid, str(e)[:200])
+                res["steps"].append("wa_consent_failed")
         for lst in lists:
             try:
                 _request("POST", f"/lists/{lst}/relationships/profiles",

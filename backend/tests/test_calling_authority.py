@@ -54,6 +54,8 @@ def _lead(db, **kw):
 
 def _arm(monkeypatch):
     monkeypatch.setenv("AI_CALLING_ENABLED", "1")
+    # Tests using _arm exercise lead-level policy, not the production emergency stop.
+    monkeypatch.setenv("AI_CALLING_KILL_SWITCH", "0")
     monkeypatch.setattr(voice_router, "config_status", lambda: (True, "configured"))
     monkeypatch.setattr(voice_router, "active", lambda: "nuraveda")
     # Deterministic runs: the business-hours gate would otherwise make
@@ -63,6 +65,7 @@ def _arm(monkeypatch):
 
 def test_flag_off_blocks_trigger_even_with_a_patched_dialler(db, registry, monkeypatch):
     monkeypatch.setenv("AI_CALLING_ENABLED", "0")
+    monkeypatch.setenv("AI_CALLING_KILL_SWITCH", "0")
     placed = []
     monkeypatch.setattr(voice_router, "place_call",
                         lambda *a, **k: placed.append(1) or type("R", (), {"placed": True, "error": "", "provider_call_id": "x"})())

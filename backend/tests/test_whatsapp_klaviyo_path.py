@@ -27,8 +27,8 @@ def isolate(tmp_path, monkeypatch):
 
 def test_hours_mon_sat_0930_1900():
     assert p.in_hours(datetime(2026, 10, 29, 9, 30, tzinfo=IST))
-    assert p.in_hours(datetime(2026, 10, 31, 19, 0, tzinfo=IST))      # Saturday
-    assert not p.in_hours(datetime(2026, 10, 29, 19, 1, tzinfo=IST))
+    assert p.in_hours(datetime(2026, 10, 31, 20, 0, tzinfo=IST))      # Saturday
+    assert not p.in_hours(datetime(2026, 10, 29, 20, 1, tzinfo=IST))
     assert not p.in_hours(datetime(2026, 10, 29, 9, 29, tzinfo=IST))
     assert not p.in_hours(datetime(2026, 11, 1, 12, 0, tzinfo=IST))   # Sunday
 
@@ -36,9 +36,9 @@ def test_hours_mon_sat_0930_1900():
 def test_gap_3_to_12_min_and_cap(monkeypatch):
     for m in range(50):
         g = p._gap_for(datetime(2026, 10, 29, 10, m))
-        assert 180 <= g <= 720
-    monkeypatch.setenv("WA_MAX_PER_HOUR", "50"); assert p.max_per_hour() == 5
-    monkeypatch.delenv("WA_MAX_PER_HOUR"); assert p.max_per_hour() == 5
+        assert 300 <= g <= 900
+    monkeypatch.setenv("WA_MAX_PER_HOUR", "50"); assert p.max_per_hour() == 6
+    monkeypatch.delenv("WA_MAX_PER_HOUR"); assert p.max_per_hour() == 6
 
 
 def test_number_suppression():
@@ -155,3 +155,27 @@ def test_klaviyo_sync_sends_consent_time_and_call_id(tmp_path, monkeypatch):
 def test_future_consent_time_is_dropped():
     assert ks._iso_past(datetime.utcnow() + timedelta(hours=1)) is None
     assert ks._iso_past(None) is None
+
+
+def test_email_reply_consent_is_eligible_for_whatsapp_pacer(monkeypatch):
+    from app.services import whatsapp_pacer as pacer
+    from app.services import outbound_cohort as cohort
+    from tests.test_outbound_cohort_20261106 import _db, _lead
+    db, engine = _db()
+    try:
+        lead = _lead(db, email="distributor@coffee.in", company="Coffee Dist")
+        lead.phone = "+919876543210"
+        lead.whatsapp_number = "+919876543210"
+        lead.consent_phone = "+919876543210"
+        lead.consent_status = "EXPLICIT"
+        lead.consent_source = "EMAIL_REPLY_WHATSAPP_REQUEST"
+        db.commit()
+
+        monkeypatch.setattr(cohort, "on_allow_list", lambda l: True)
+        monkeypatch.setattr(pacer, "number_suppressed", lambda n: "")
+
+        ok, why = pacer.eligible(db, lead)
+        assert ok is True
+        assert why == "eligible"
+    finally:
+        db.close(); engine.dispose()
