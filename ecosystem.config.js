@@ -81,6 +81,9 @@ const apps = [
       restart_delay: 1000,
       max_restarts: 50,
       min_uptime: 3000,
+      // uvicorn needs more than PM2's 1.6s default to close listeners;
+      // without this a reload becomes SIGKILL and looks like a crash.
+      kill_timeout: 5000,
       env: {
         PYTHONUNBUFFERED: "1",
         API_ADMIN_SECRET: need("API_ADMIN_SECRET"),
@@ -110,6 +113,8 @@ const apps = [
       restart_delay: 5000,
       max_restarts: 20,
       min_uptime: 5000,
+      // Same reason as purity-api: a graceful worker stop must finish.
+      kill_timeout: 5000,
       env: {
         PYTHONUNBUFFERED: "1",
         DND_SUPPRESSION_FILE: need("DND_SUPPRESSION_FILE"),
